@@ -116,6 +116,12 @@ To deploy, connect the GitHub repository containing this project to Render, then
 new Blueprint from that repository and review the paid service and disk before confirming.
 The source repository is public; use a private repository if you do not want the app source
 to be public.
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/HowellDaniel/ChrisphicsHub)
+
+Open the deployment link, sign in to Render, provide a strong value for
+`CHRIPHICS_AUTH_PASSWORD`, review the paid Starter service and persistent disk, then confirm
+**Deploy Blueprint**. Render will show the app's public HTTPS URL after provisioning finishes.
 Render builds the Python server, provisions its persistent disk, and serves the app over
 HTTPS. The service exposes `/healthz` for health checks and is intentionally limited to one
 instance because SQLite is stored on that disk. Keep a current backup outside Render as
