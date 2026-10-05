@@ -523,3 +523,141 @@ label.field.wide { grid-column: 1 / -1; }
   .themeseg { max-width: 260px; }
   .side-foot { display: none; }
 }
+
+/* ---------- phone ----------
+   Under 720px the rail is gone. The destinations become a fixed tab bar a thumb reaches,
+   the overflow sits in a sheet behind its last slot, and forms rise from the bottom of the
+   screen the way a phone expects them to. Structure keys off [data-shell="phone"], which
+   app.js sets from this same media query, so the DOM and the styling cannot disagree. */
+@media (max-width: 720px) {
+  :root { --pad: 12px; --gap: 11px; }
+  .shell { display: block; padding-bottom: calc(72px + env(safe-area-inset-bottom)); }
+  .side {
+    position: fixed; left: 0; right: 0; bottom: 0; top: auto; height: auto; z-index: 30;
+    flex-direction: column; gap: 0; padding: 0 0 env(safe-area-inset-bottom);
+    border-top: 1px solid var(--side-line);
+  }
+  .brand, .brand-sub, .nav { display: none; }
+
+  /* The connection line is the one thing from the rail worth keeping in sight. */
+  .phonetop { background: var(--ink-2); }
+  .phonetop .network-status {
+    margin: 0; padding: calc(5px + env(safe-area-inset-top)) var(--pad) 5px;
+    font-size: .68em; color: #b6acae;
+  }
+
+  .tabbar { display: flex; align-items: stretch; }
+  .moresheet {
+    position: absolute; left: 0; right: 0; bottom: 100%; z-index: 1;
+    max-height: min(64vh, 460px); overflow-y: auto;
+    display: grid; gap: 3px; padding: 12px var(--pad) 14px;
+    background: var(--ink); border-top: 1px solid var(--side-line);
+    box-shadow: 0 -18px 40px rgba(0, 0, 0, .38);
+  }
+  .moresheet[hidden] { display: none; }
+  .moresheet .side-cta, .moresheet .side-bottom { padding: 0; max-width: none; margin-top: 0; }
+  .moresheet .side-cta { display: grid; gap: 6px; margin: 10px 0 4px; }
+  .moresheet .side-foot { display: grid; gap: 8px; margin-top: 12px; }
+  .moresheet .hint { color: var(--side-mid); }
+
+  /* Each destination carries the mark it uses on the desktop rail, drawn as a mask so it
+     takes the text colour and needs no second set of artwork for dark mode. */
+  [data-shell="phone"] .navlink::before {
+    content: ""; width: 21px; height: 21px; flex: none; background: currentColor;
+    -webkit-mask: var(--ic) center / contain no-repeat; mask: var(--ic) center / contain no-repeat;
+  }
+  .navlink[data-view="dashboard"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'><path d='M4.5 4.5h6v6h-6zM13.5 4.5h6v6h-6zM4.5 13.5h6v6h-6zM13.5 13.5h6v6h-6z'/></svg>"); }
+  .navlink[data-view="jobs"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M7 8V3h10v5M5 8h14v8h-3v5H8v-5H5zM8 12.5h8'/></svg>"); }
+  .navlink[data-view="accounts"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 8h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3zM3 8V6a1 1 0 0 1 1-1h13M16.5 14h2.5'/></svg>"); }
+  .navlink[data-view="clients"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><path d='M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM5 21a7 7 0 0 1 14 0'/></svg>"); }
+  .navlink[data-view="spoiled"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M12 4l9 16H3zM12 10v4M12 17.4v.1'/></svg>"); }
+  .navlink[data-view="sync"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M20 12a8 8 0 1 1-2.4-5.7M20.5 3.5V8H16'/></svg>"); }
+  .navlink[data-view="leads"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'><path d='M3 5h18l-7 8v7l-4-2v-5z'/></svg>"); }
+  .navlink[data-view="expenses"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M12 4v11M8 11l4 4 4-4M4 20h16'/></svg>"); }
+  .navlink[data-view="reports"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><path d='M5 20V11M12 20V5M19 20v-6'/></svg>"); }
+  .navlink.more { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'><path d='M5.5 12h.1M12 12h.1M18.5 12h.1'/></svg>"); }
+
+  .tabbar .navlink {
+    flex: 1 1 0; min-width: 0; min-height: 60px; border: 0; border-radius: 0; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    background: none; color: #a99ea0; font-size: 0; font-family: inherit; font-weight: 600;
+    text-decoration: none; padding: 7px 2px 6px;
+  }
+  /* The rail's own label is two words long; the tab gets the short one app.js sets. The
+     anchor's font-size is zeroed to hide that text, so the label needs an absolute size —
+     .62em of zero is still zero. */
+  .tabbar .navlink::after { content: attr(data-short); font-size: 10.5px; letter-spacing: .01em; }
+  .tabbar .navlink span { display: none; }
+  .tabbar .navlink.on, .tabbar .navlink[aria-expanded="true"] {
+    background: var(--side-active); color: var(--side-hi); box-shadow: inset 0 3px 0 var(--brand);
+  }
+  .moresheet .navlink {
+    display: flex; align-items: center; gap: 11px; min-height: 46px; padding: 0 10px;
+    border: 0; border-radius: var(--r-sm); background: none; cursor: pointer;
+    color: #cfc5c7; font: 500 .95em/1.2 inherit; text-align: left; text-decoration: none;
+  }
+  .moresheet .navlink.on { background: var(--side-active); color: var(--side-hi); box-shadow: inset 3px 0 0 var(--brand); }
+  .moresheet .navlink span { font-size: .78em; color: var(--side-dim); margin-left: auto; }
+
+  /* One thumb, so everything you press is at least 44px tall and the filter row scrolls
+     sideways instead of stacking into a wall. An <a class="btn"> is inline by default, and
+     min-height does nothing to an inline box, so the buttons become flex boxes here. */
+  .btn { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+  /* The compact button and the filter chip are the two places the desktop shrinks below a
+     thumb. A ledger row is already ~99px tall here, so nothing is lost by making them full. */
+  .btn.sm { min-height: 44px; }
+  input, select, textarea { min-height: 44px; font-size: 16px; }
+  .tab { min-height: 44px; }
+  /* Click-to-change values stay text rather than becoming buttons, but a thumb still needs
+     something to hit — so the tappable box grows without moving the line it sits in. */
+  .qe { padding: 8px 7px; margin: -6px -7px; }
+  /* The stage stepper and the links inside a record — a client name, a phone number to tap
+     and dial — are primary actions on a phone, so they get full-height targets too. */
+  .step { min-height: 44px; display: inline-flex; align-items: center; }
+  /* Two icons were drawn for a mouse: a sheet's ✕ and the remove button on a job line.
+     They keep their size and get their hit box back through the negative margin. */
+  .modal-card .iconbtn, .drawer .iconbtn { width: 44px; height: 44px; }
+  .items-t .iconbtn { width: 34px; height: 34px; margin: -5px; }
+  td a, .drawer-body a:not(.btn) {
+    display: inline-flex; align-items: center; min-height: 44px; padding: 0 6px; margin: -4px -6px;
+  }
+  .toolbar { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 3px; }
+  .toolbar > * { flex: none; }
+  .toolbar .search { flex: 1 1 150px; min-width: 150px; }
+  .tabs { flex-wrap: nowrap; }
+  .title h1 { font-size: 1.3em; }
+
+  /* Two figures side by side still read at phone width; one per row buried the shop's
+     whole day below the fold. */
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat { padding: 12px; }
+  .stat .v { font-size: 20px; }
+  .stat .n { font-size: .74em; }
+  .f-grid { grid-template-columns: minmax(0, 1fr); }
+  .f-grid .field.wide { grid-column: auto; }
+
+  /* A wide ledger stays legible: the first column pins itself so a row you have scrolled
+     under is still identifiable. */
+  table { font-size: .86em; }
+  th, td { padding: 9px 9px; }
+  th:first-child, td:first-child { position: sticky; left: 0; background: var(--surface); z-index: 1; }
+  th:first-child { background: var(--surface-2); }
+  tr[data-open]:hover td:first-child { background: var(--surface-hover); }
+
+  .modal { padding: 0; align-items: end; justify-items: stretch; }
+  .modal-card {
+    width: auto; max-width: none; max-height: 92vh; border-radius: 16px 16px 0 0;
+    padding: 16px var(--pad) calc(16px + env(safe-area-inset-bottom));
+    animation: rise .2s ease;
+  }
+  .modal-card:has(#jobForm) { width: auto; }
+  @keyframes rise { from { transform: translateY(28px); opacity: .6; } }
+  .drawer-body { width: 100%; max-width: 100vw; overflow-x: hidden; padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
+  .drawer-body > * { min-width: 0; }
+  /* .chips hugs its text with width:1% + nowrap, which is right in a table column and wrong
+     as a block: it made the whole sheet wider than the phone and pushed the last stage off. */
+  .drawer-body .chips { width: auto; white-space: normal; }
+  .toasts { left: 12px; right: 12px; bottom: calc(80px + env(safe-area-inset-bottom)); justify-items: stretch; }
+  .toast { max-width: none; }
+}
+

@@ -28,7 +28,7 @@ function run(argv) {
 }
 """
 
-probe_path = pathlib.Path("/tmp/chriphics_js_check.js")
+probe_path = pathlib.Path("/tmp/chrisphics_js_check.js")
 probe_path.parent.mkdir(exist_ok=True)
 probe_path.write_text(PROBE, encoding="utf-8")
 

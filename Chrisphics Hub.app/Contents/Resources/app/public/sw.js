@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'crispprint-shell-v2';
+const CACHE_NAME = 'crispprint-shell-v4';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -9,6 +9,10 @@ const APP_SHELL = [
   '/manifest.webmanifest',
   '/img/brand.png',
   '/img/mark.png',
+  '/img/icon-192.png',
+  '/img/icon-512.png',
+  '/img/icon-maskable-512.png',
+  '/img/apple-touch-icon.png',
 ];
 
 self.addEventListener('install', (event) => {

@@ -2,14 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CRISPprint Ghana — Printing Records &amp; Accounts</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Chrisphics Hub — CRISPprint Ghana Printing Records &amp; Accounts</title>
 <meta name="theme-color" content="#1c1517">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="CRISPprint">
+<meta name="apple-mobile-web-app-title" content="Chrisphics">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="apple-touch-icon" href="/img/mark.png">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
 <link rel="stylesheet" href="/styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231c1517'/><g fill='%239a9aa0'><polygon points='16,2.9 21.6,8.5 16,14.1 10.4,8.5'/><polygon points='16,17.9 21.6,23.5 16,29.1 10.4,23.5'/></g><g fill='%23c93a3f'><polygon points='8.5,10.4 14.1,16 8.5,21.6 2.9,16'/><polygon points='23.5,10.4 29.1,16 23.5,21.6 17.9,16'/></g></svg>">
 <script>
@@ -35,15 +36,15 @@
     <p class="network-status" id="networkStatus" role="status" aria-live="polite">Connected to the book</p>
 
     <nav class="nav" id="nav">
-      <a href="#/dashboard" data-view="dashboard">Dashboard</a>
-      <a href="#/jobs" data-view="jobs">Print jobs</a>
-      <a href="#/spoiled" data-view="spoiled">Spoiled work</a>
-      <a href="#/sync" data-view="sync">Pending sync</a>
-      <a href="#/clients" data-view="clients">Clients</a>
-      <a href="#/leads" data-view="leads">Enquiries</a>
-      <a href="#/accounts" data-view="accounts">Accounts</a>
-      <a href="#/expenses" data-view="expenses">Expenses</a>
-      <a href="#/reports" data-view="reports">Reports</a>
+      <a class="navlink" href="#/dashboard" data-view="dashboard">Dashboard</a>
+      <a class="navlink" href="#/jobs" data-view="jobs">Print jobs</a>
+      <a class="navlink" href="#/spoiled" data-view="spoiled">Spoiled work</a>
+      <a class="navlink" href="#/sync" data-view="sync">Pending sync</a>
+      <a class="navlink" href="#/clients" data-view="clients">Clients</a>
+      <a class="navlink" href="#/leads" data-view="leads">Enquiries</a>
+      <a class="navlink" href="#/accounts" data-view="accounts">Accounts</a>
+      <a class="navlink" href="#/expenses" data-view="expenses">Expenses</a>
+      <a class="navlink" href="#/reports" data-view="reports">Reports</a>
     </nav>
 
     <div class="side-cta">
@@ -64,7 +65,7 @@
       <div class="side-foot">
         <div class="kv"><span>In the book</span><b id="footCounts">–</b></div>
         <button class="linkbtn" data-action="backup">Download data backup</button>
-        <p class="hint">Saves to <code id="footDb">data/chriphics.db</code> on this Mac. Keep that file.</p>
+        <p class="hint">Saves to <code id="footDb">data/chrisphics.db</code> on this Mac. Keep that file.</p>
       </div>
     </div>
   </aside>

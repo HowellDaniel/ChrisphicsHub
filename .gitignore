@@ -3,3 +3,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# The app bundle under the old misspelled name. The shop is still running from it;
+# it is deleted once "Chrisphics Hub.app" replaces it. Never rebuild or publish this one.
+Chriphics Hub.app/

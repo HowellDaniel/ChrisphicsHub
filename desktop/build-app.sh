@@ -7,8 +7,8 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 PROJECT="$(dirname "$SRC")"
-APP="$PROJECT/Chriphics Hub.app"
-BIN="$APP/Contents/MacOS/ChriphicsHub"
+APP="$PROJECT/Chrisphics Hub.app"
+BIN="$APP/Contents/MacOS/ChrisphicsHub"
 
 PY="$(command -v python3 || echo /usr/bin/python3)"
 
@@ -33,10 +33,10 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>CRISPprint Ghana</string>
-  <key>CFBundleDisplayName</key><string>CRISPprint Ghana</string>
-  <key>CFBundleIdentifier</key><string>com.chriphics.hub</string>
-  <key>CFBundleExecutable</key><string>ChriphicsHub</string>
+  <key>CFBundleName</key><string>Chrisphics Hub</string>
+  <key>CFBundleDisplayName</key><string>Chrisphics Hub</string>
+  <key>CFBundleIdentifier</key><string>com.chrisphics.hub</string>
+  <key>CFBundleExecutable</key><string>ChrisphicsHub</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>

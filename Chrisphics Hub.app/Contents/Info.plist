@@ -2,10 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>CRISPprint Ghana</string>
-  <key>CFBundleDisplayName</key><string>CRISPprint Ghana</string>
-  <key>CFBundleIdentifier</key><string>com.chriphics.hub</string>
-  <key>CFBundleExecutable</key><string>ChriphicsHub</string>
+  <key>CFBundleName</key><string>Chrisphics Hub</string>
+  <key>CFBundleDisplayName</key><string>Chrisphics Hub</string>
+  <key>CFBundleIdentifier</key><string>com.chrisphics.hub</string>
+  <key>CFBundleExecutable</key><string>ChrisphicsHub</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>

@@ -223,7 +223,7 @@ async function paintNetworkStatus() {
     ? (pending ? 'Connected · ' + pending + ' changes waiting' : 'Connected to the book')
     : 'Offline · saved changes: ' + pending;
   el.classList.toggle('offline', !S.connected || pending > 0);
-  const sync = $('#nav [data-view="sync"]');
+  const sync = $('.navlink[data-view="sync"]');
   if (sync) {
     const old = sync.querySelector('span');
     if (old) old.remove();
@@ -341,7 +341,7 @@ function paintNav() {
     reports: '',
     sync: '',
   };
-  $$('#nav a').forEach((a) => {
+  $$('.navlink[data-view]').forEach((a) => {
     const view = a.dataset.view;
     a.classList.toggle('on', S.route && S.route.view === view);
     const old = a.querySelector('span');
@@ -367,6 +367,97 @@ async function refreshChrome() {
   try { S.boot = await api('/api/bootstrap'); } catch (e) { /* keep going */ }
   paintNav();
   paintFoot();
+}
+
+/* ---------------------------------------------------------------- phone shell */
+/* A phone has no room for a rail, so the same destinations become a tab bar a thumb
+   reaches and everything that does not fit moves into a sheet behind its last slot.
+   Links and buttons are moved rather than copied, so the router, the active state and
+   the "3 waiting" badges keep working wherever they end up living. */
+const PHONE = window.matchMedia('(max-width: 720px)');
+const TABS = { dashboard: 'Desk', jobs: 'Jobs', accounts: 'Money', clients: 'Clients' };
+let phoneRestore = null;
+
+function stash(node, parent) {
+  if (!node || node.parentNode === parent) return;
+  phoneRestore.push([node, node.parentNode, node.nextElementSibling]);
+  parent.appendChild(node);
+}
+
+function shellChrome() {
+  const wide = !PHONE.matches;
+  document.documentElement.dataset.shell = wide ? 'wide' : 'phone';
+  if (wide) {
+    (phoneRestore || []).slice().reverse().forEach((entry) => {
+      const node = entry[0], parent = entry[1], next = entry[2];
+      if (parent) parent.insertBefore(node, next && next.parentNode === parent ? next : null);
+    });
+    phoneRestore = null;
+    ['#phonetop', '#tabbar', '#moresheet'].forEach((sel) => {
+      const el = $(sel);
+      if (el) el.remove();
+    });
+    return;
+  }
+  if (document.getElementById('tabbar')) return;
+  phoneRestore = [];
+  const side = $('#side');
+  const top = document.createElement('div');
+  top.className = 'phonetop';
+  top.id = 'phonetop';
+  $('.main').insertBefore(top, $('#topbar'));
+  stash($('#networkStatus'), top);
+
+  const bar = document.createElement('nav');
+  bar.className = 'tabbar';
+  bar.id = 'tabbar';
+  bar.setAttribute('aria-label', 'Main screens');
+  Object.keys(TABS).forEach((view) => {
+    const link = $('#nav .navlink[data-view="' + view + '"]');
+    if (!link) return;
+    link.dataset.short = TABS[view];
+    stash(link, bar);
+  });
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'navlink more';
+  more.id = 'moreTab';
+  more.dataset.short = 'More';
+  more.dataset.action = 'toggle-more';
+  more.setAttribute('aria-expanded', 'false');
+  bar.appendChild(more);
+
+  const sheet = document.createElement('div');
+  sheet.className = 'moresheet';
+  sheet.id = 'moresheet';
+  sheet.hidden = true;
+  side.appendChild(sheet);
+  side.appendChild(bar);
+  $$('#nav .navlink').forEach((link) => stash(link, sheet));
+  stash($('.side-cta'), sheet);
+  stash($('.side-bottom'), sheet);
+}
+
+function closeMore() {
+  const sheet = $('#moresheet');
+  if (!sheet || sheet.hidden) return;
+  sheet.hidden = true;
+  const tab = $('#moreTab');
+  if (tab) tab.setAttribute('aria-expanded', 'false');
+}
+PHONE.addEventListener('change', shellChrome);
+
+/* A launcher shortcut opens the app already part-way into a job: ?action= names the
+   button the tap stood for, and the address is tidied away once it has been honoured. */
+function launchShortcut() {
+  const asked = new URLSearchParams(location.search).get('action');
+  if (!asked) return;
+  history.replaceState(null, '', location.pathname + location.hash);
+  if (!/^[a-z][a-z-]{2,30}$/.test(asked)) return;
+  const handler = ACTIONS[asked];
+  if (typeof handler === 'function') {
+    handler(document.querySelector('[data-action="' + asked + '"]') || document.body);
+  }
 }
 function topbar(title, sub, controls, buttons) {
   const list = buttons || [{ label: '+ New job', action: 'new-job', primary: true }];
@@ -2319,6 +2410,13 @@ async function afterMutation(keepDrawer) {
 }
 const ACTIONS = {
   'install-app'() { installApp().catch(fail); },
+  'toggle-more'() {
+    const sheet = $('#moresheet');
+    if (!sheet) return;
+    sheet.hidden = !sheet.hidden;
+    $('#moreTab').setAttribute('aria-expanded', String(!sheet.hidden));
+    if (!sheet.hidden) sheet.scrollTop = 0;
+  },
   async 'sync-now'() { await syncOfflineQueue(); },
   async 'sync-keep'(el) {
     const row = await offlineRead('outbox', el.dataset.syncKeep);
@@ -2728,7 +2826,7 @@ document.addEventListener('keydown', (e) => {
     if (s) { e.preventDefault(); s.focus(); }
   }
 });
-window.addEventListener('hashchange', () => { render(); });
+window.addEventListener('hashchange', () => { closeMore(); render(); });
 window.addEventListener('online', () => {
   S.connected = true;
   paintNetworkStatus();
@@ -2742,7 +2840,7 @@ window.addEventListener('offline', () => {
 /* The native menu bar has no buttons of its own, so it asks for these by name.
    If the current screen happens to show the matching button, it is handed over
    so any data-* it carries (client, job) still reaches the form. */
-window.chriphics = {
+window.chrisphics = {
   act(name) {
     const handler = ACTIONS[name];
     if (typeof handler !== 'function') return false;
@@ -2754,6 +2852,7 @@ window.chriphics = {
 
 (async function start() {
   paintTheme(themeMode());
+  shellChrome();
   try {
     await paintNetworkStatus();
     const session = await api('/api/session');
@@ -2763,6 +2862,7 @@ window.chriphics = {
     if (navigator.onLine) await syncOfflineQueue();
     if (!location.hash) location.hash = '#/dashboard';
     await render();
+    launchShortcut();
   } catch (err) {
     if (err.status === 401) loginScreen(err.message);
     else $('#view').innerHTML = emptyState('The app cannot reach its database', err.message +

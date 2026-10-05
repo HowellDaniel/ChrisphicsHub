@@ -1,4 +1,4 @@
-// CRISPprint Ghana — native macOS shell.
+// Chrisphics Hub — native macOS shell for CRISPprint Ghana.
 // Own window, own Dock icon, own menu bar; the records engine is the same
 // stdlib Python server, started on a private loopback port for this app only.
 
@@ -7,9 +7,9 @@ import Foundation
 import PDFKit
 import WebKit
 
-let kAppName = "CRISPprint Ghana"
+let kAppName = "Chrisphics Hub"
 // Never rename this one: it is the folder holding the shop's live book.
-let kDataFolder = "Chriphics Hub"
+let kDataFolder = "Chrisphics Hub"
 
 // ---------------------------------------------------------------- appearance
 // The page owns the palette; the shell only follows it — window chrome, menu tick,
@@ -61,19 +61,19 @@ final class Paths {
         let cwd = URL(fileURLWithPath: fm.currentDirectoryPath, isDirectory: true)
         let resources = Bundle.main.resourceURL ?? cwd
         var root = resources.appendingPathComponent("app", isDirectory: true)
-        if let override = ProcessInfo.processInfo.environment["CHRIPHICS_SRC"],
+        if let override = ProcessInfo.processInfo.environment["CHRISPHICS_SRC"],
            fm.fileExists(atPath: override + "/server.py") {
             root = URL(fileURLWithPath: override, isDirectory: true)
         } else if !fm.fileExists(atPath: root.appendingPathComponent("server.py").path) {
             root = cwd
         }
         appRoot = root
-        if let override = ProcessInfo.processInfo.environment["CHRIPHICS_SUPPORT"], !override.isEmpty {
+        if let override = ProcessInfo.processInfo.environment["CHRISPHICS_SUPPORT"], !override.isEmpty {
             let dir = URL(fileURLWithPath: override, isDirectory: true)
             try? fm.createDirectory(at: dir.appendingPathComponent("Backups"), withIntermediateDirectories: true)
             support = dir
             backups = dir.appendingPathComponent("Backups", isDirectory: true)
-            db = dir.appendingPathComponent("chriphics.db")
+            db = dir.appendingPathComponent("chrisphics.db")
             log = dir.appendingPathComponent("engine.log")
             return
         }
@@ -81,7 +81,7 @@ final class Paths {
             ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support")
         support = base.appendingPathComponent(kDataFolder, isDirectory: true)
         backups = support.appendingPathComponent("Backups", isDirectory: true)
-        db = support.appendingPathComponent("chriphics.db")
+        db = support.appendingPathComponent("chrisphics.db")
         log = support.appendingPathComponent("engine.log")
         try? fm.createDirectory(at: backups, withIntermediateDirectories: true)
     }
@@ -102,7 +102,7 @@ final class Engine {
     static func python() -> String? {
         let fm = FileManager.default
         var candidates = ["/usr/bin/python3", "/usr/local/bin/python3", "/opt/homebrew/bin/python3"]
-        if let env = ProcessInfo.processInfo.environment["CHRIPHICS_PYTHON"], !env.isEmpty {
+        if let env = ProcessInfo.processInfo.environment["CHRISPHICS_PYTHON"], !env.isEmpty {
             candidates.insert(env, at: 0)
         }
         for c in candidates where fm.isExecutableFile(atPath: c) { return c }
@@ -179,12 +179,12 @@ final class Engine {
             }
             let port = self.freePort()
             var env = ProcessInfo.processInfo.environment
-            env["CHRIPHICS_DB"] = Paths.shared.db.path
-            env["CHRIPHICS_BACKUP_DIR"] = Paths.shared.backups.path
+            env["CHRISPHICS_DB"] = Paths.shared.db.path
+            env["CHRISPHICS_BACKUP_DIR"] = Paths.shared.backups.path
             env["PYTHONUNBUFFERED"] = "1"
             env["PYTHONWARNINGS"] = "ignore"
-            env["CHRIPHICS_WATCH_STDIN"] = "1"
-            env.removeValue(forKey: "CHRIPHICS_PORT")
+            env["CHRISPHICS_WATCH_STDIN"] = "1"
+            env.removeValue(forKey: "CHRISPHICS_PORT")
 
             FileManager.default.createFile(atPath: Paths.shared.log.path, contents: nil)
             let handle = try? FileHandle(forWritingTo: Paths.shared.log)
@@ -316,7 +316,7 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate,
         window.tabbingMode = .disallowed
         window.minSize = NSSize(width: kind == .main ? 940 : 480, height: 500)
         window.title = kAppName
-        window.setFrameAutosaveName(kind == .main ? "ChriphicsMain" : "ChriphicsSheet")
+        window.setFrameAutosaveName(kind == .main ? "ChrisphicsMain" : "ChrisphicsSheet")
         if kind != .main { window.title = "Job Sheet" }
         window.center()
         super.init(window: window)
@@ -358,7 +358,7 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate,
         if url.scheme == "http", url.host == "127.0.0.1" {
             if url.path.hasPrefix("/api/export/") || url.path.hasPrefix("/api/backup") {
                 decisionHandler(.cancel)
-                let name = url.path.hasPrefix("/api/backup") ? "chriphics-backup.db"
+                let name = url.path.hasPrefix("/api/backup") ? "chrisphics-backup.db"
                     : (url.path.components(separatedBy: "/").last ?? "export.csv")
                 Saver.save(url, fallbackName: name, in: view.window)
                 return
@@ -728,7 +728,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // shell back what is now showing, so the tick and the window chrome cannot disagree.
     @objc private func pickTheme(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String, let theme = Theme(rawValue: raw) else { return }
-        main?.run("window.chriphics.theme('\(theme.rawValue)')")
+        main?.run("window.chrisphics.theme('\(theme.rawValue)')")
     }
 
     func themeDidPick(_ theme: Theme) {
@@ -745,8 +745,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSApp.orderFrontStandardAboutPanel(options: [.credits: credits])
     }
 
-    // The menu opens the same forms the on-page buttons open (window.chriphics in app.js).
-    private func act(_ name: String) { main?.run("window.chriphics.act('\(name)')") }
+    // The menu opens the same forms the on-page buttons open (window.chrisphics in app.js).
+    private func act(_ name: String) { main?.run("window.chrisphics.act('\(name)')") }
     @objc func newJob() { act("new-job") }
     @objc func newQuote() { act("new-quote") }
     @objc func newEnquiry() { act("new-lead") }
@@ -770,7 +770,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc func backupNow() {
         guard let base = Engine.shared.base, let web = main?.web else { return }
-        Saver.save(base.appendingPathComponent("api/backup"), fallbackName: "chriphics-backup.db", in: web.window)
+        Saver.save(base.appendingPathComponent("api/backup"), fallbackName: "chrisphics-backup.db", in: web.window)
     }
 
     @objc func revealDB() {

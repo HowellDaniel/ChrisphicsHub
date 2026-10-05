@@ -12,11 +12,11 @@ services:
       mountPath: /var/data
       sizeGB: 1
     envVars:
-      - key: CHRIPHICS_DB
-        value: /var/data/chriphics.db
-      - key: CHRIPHICS_BACKUP_DIR
+      - key: CHRISPHICS_DB
+        value: /var/data/chrisphics.db
+      - key: CHRISPHICS_BACKUP_DIR
         value: /var/data/Backups
-      - key: CHRIPHICS_AUTH_PASSWORD
+      - key: CHRISPHICS_AUTH_PASSWORD
         sync: false
       - key: PYTHONUNBUFFERED
         value: "1"

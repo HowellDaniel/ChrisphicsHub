@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Start Chriphics Hub. Double-click "Chriphics Hub.command" in Finder, or run ./run.sh
+# Start Chrisphics Hub. Double-click "Chrisphics Hub.command" in Finder, or run ./run.sh
 cd "$(dirname "$0")" || exit 1
 PY=/usr/bin/python3
 [ -x "$PY" ] || PY=$(command -v python3)

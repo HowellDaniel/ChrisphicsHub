@@ -10,11 +10,27 @@
 		</data>
 		<key>Resources/app/public/app.js</key>
 		<data>
-		RhTiCdLkZb7Sxlh+1PxUBR3xmLw=
+		95YzP8/yIq59uQo6Fb8mQ6tfmfk=
+		</data>
+		<key>Resources/app/public/img/apple-touch-icon.png</key>
+		<data>
+		DqCsM4GY75WxgcPMh/4k7z96NPc=
 		</data>
 		<key>Resources/app/public/img/brand.png</key>
 		<data>
 		ZmZitv8MVmS6K29NC17pvlaqdBs=
+		</data>
+		<key>Resources/app/public/img/icon-192.png</key>
+		<data>
+		zX23/Ro4t91ydSLuS85JFrqTlMo=
+		</data>
+		<key>Resources/app/public/img/icon-512.png</key>
+		<data>
+		ExCQcTUpJ7oDYlm+6hsO9puPjsM=
+		</data>
+		<key>Resources/app/public/img/icon-maskable-512.png</key>
+		<data>
+		qbg0haTB09VLswJ0RvWMi9XrDSo=
 		</data>
 		<key>Resources/app/public/img/mark.png</key>
 		<data>
@@ -22,27 +38,27 @@
 		</data>
 		<key>Resources/app/public/index.html</key>
 		<data>
-		kL9KC2l4SwKwgJDtrE70f1hJ77E=
+		en0MiaNA5bnwxuEWBnynurAX1rY=
 		</data>
 		<key>Resources/app/public/manifest.webmanifest</key>
 		<data>
-		FJwboXZUQOESKQ37OIN6UaY/Ut4=
+		p+nW7onPXuZz1C8F79AaPcOMN44=
 		</data>
 		<key>Resources/app/public/styles.css</key>
 		<data>
-		5NKzPtKJr6Rop77mR812EIJkRl4=
+		IycJ1SxuGb8qoemKfuKJ0DnW6DE=
 		</data>
 		<key>Resources/app/public/sw.js</key>
 		<data>
-		/cS+HHaFI4KKe+ly0SAQcWDY9U0=
+		bW0OfuArzhyQAgNw2FZTQbVQuv8=
 		</data>
 		<key>Resources/app/schema.sql</key>
 		<data>
-		ks+Kno2Z41jZWvevKAZ6jGT7498=
+		Dn3GKuTAf3EX65DVinCalWKwbCk=
 		</data>
 		<key>Resources/app/server.py</key>
 		<data>
-		Ng6QuZ5RsZ+sG7GOESmXktJbGxc=
+		UDluN5QDCBSiuEo3j/z42sPZWjA=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -58,7 +74,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			h20ef5Ug1v9KaAgAjHykY+zWmqHmNEmXbNr1HgfONCk=
+			iniY0SL9w3qnmMebdTvN9GJN0UGvswM9QCMqc2JmIt0=
+			</data>
+		</dict>
+		<key>Resources/app/public/img/apple-touch-icon.png</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			HeyM/Oeyv9FcGzZVfc/tOXOGsmeRYc2s0c2IiQHnG84=
 			</data>
 		</dict>
 		<key>Resources/app/public/img/brand.png</key>
@@ -66,6 +89,27 @@
 			<key>hash2</key>
 			<data>
 			6izSjKNwQ4yzgNt4gQtoKmUflWgvSBD5tXX4/HdDfPI=
+			</data>
+		</dict>
+		<key>Resources/app/public/img/icon-192.png</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			Z2KrxtgjJDNWO86WkC8lmM0SNwqzh6QlCRtkYTVeVlQ=
+			</data>
+		</dict>
+		<key>Resources/app/public/img/icon-512.png</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			x6boJUJcO420/W2oa8F1q3oL39rh2LUh2Gyv80yySG8=
+			</data>
+		</dict>
+		<key>Resources/app/public/img/icon-maskable-512.png</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			SQhhRtl6ePPBfGO+vr4xGyLJxl1zGXXKyHfzpmarfIY=
 			</data>
 		</dict>
 		<key>Resources/app/public/img/mark.png</key>
@@ -79,42 +123,42 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			Cy/Os2fg/i1RHsJ7QzbDIlPyKQNV3kGnV1YyRVnBxxM=
+			xQDx/u1xJLeMJ54GkpekowD0vGadiE95mTGhQR8ldqY=
 			</data>
 		</dict>
 		<key>Resources/app/public/manifest.webmanifest</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			N8Opb7lmop3ibLF7bFRqTwpEixQVx0xMth51Dy9nC0M=
+			WRujLY4CVzOHKgsjEu+CuHP3HJklqN5h/L2vpSjNQL0=
 			</data>
 		</dict>
 		<key>Resources/app/public/styles.css</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			x0ddolHv4Pg7GZ4bwyiUA2XXYhFP/fL+xWMJwRWOkgE=
+			5SERvNT6F95FTioI3ouyvbRHv31xa0LMxR0mPGxRs/Y=
 			</data>
 		</dict>
 		<key>Resources/app/public/sw.js</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			p1zsKfHfK3F7fliGlpzD6jB0ZD4lM21kC3S9J6YLhuQ=
+			bML/9IIzhz/nFwdlA3cpuL7I4sKKm4c0OF26DhhkPro=
 			</data>
 		</dict>
 		<key>Resources/app/schema.sql</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			u+oTUhldYq7WJu22DSTxrybNXQP6EHXHRfoJJr7HZxA=
+			OYUuOOjXbegO/A4cdUKb8EnXnHZ1wEPQ9GYbqosuPmw=
 			</data>
 		</dict>
 		<key>Resources/app/server.py</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			JakR3/wVV8fKErNPtRyvhUba3y55IAaMu7P8s4pVHt8=
+			Jb7gHB1swNXHZukn6w/ouR3NSo7cL77uGSiI2o0I2DA=
 			</data>
 		</dict>
 	</dict>

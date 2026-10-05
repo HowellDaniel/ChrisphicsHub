@@ -1,4 +1,4 @@
-# CRISPprint Ghana — printing records & account book
+# Chrisphics Hub — CRISPprint Ghana printing records & account book
 
 A records and accounts system for a print shop, running as a Mac app and installable web app. Every printing job gets
 a line, every payment gets a line, and every client keeps a running balance. It runs on the
@@ -8,24 +8,26 @@ outbound WhatsApp/email updates need internet when they are sent.
 The app wears the shop's own artwork: the CRISPprint Ghana lockup is in the sidebar, on the
 printed job sheet and in the browser tab, and the Dock icon is the four-diamond mark. The
 colours are lifted from the same artwork — see [Colour and appearance](#colour-and-appearance).
-The bundle on disk is still called `Chriphics Hub.app` and your records still live in
-`~/Library/Application Support/Chriphics Hub/`, so nothing about where your data sits changed.
+The bundle on disk is `Chrisphics Hub.app` and your records live in
+`~/Library/Application Support/Chrisphics Hub/`. The first time the renamed app starts it copies
+the book out of the old misspelled folder (`Chriphics Hub`) and leaves that file where it was, so
+there is never a moment when the shop's records only exist in one place.
 
 ## What is in this folder
 
 | Path | What it is |
 | --- | --- |
-| `Chriphics Hub.app` | the desktop app — this is what you open |
-| `Chriphics Hub.command` | the same thing in a browser tab, if you prefer |
+| `Chrisphics Hub.app` | the desktop app — this is what you open |
+| `Chrisphics Hub.command` | the same thing in a browser tab, if you prefer |
 | `server.py`, `schema.sql`, `public/` | the records engine and the screens it serves |
 | `desktop/` | the native shell's Swift source and `build-app.sh` |
 | `render.yaml` | Render web service, HTTPS proxy, password and persistent-disk setup |
-| `tools/` | two dev checks, for anyone editing the code — the app does not need them |
-| `~/Library/Application Support/Chriphics Hub/` | your actual records — not in this folder |
+| `tools/` | `make-web-icons.swift` redraws the install icons; the other two are dev checks |
+| `~/Library/Application Support/Chrisphics Hub/` | your actual records — not in this folder |
 
 ## Start it
 
-**The desktop app (single-computer mode).** Double-click **`Chriphics Hub.app`**. It opens in
+**The desktop app (single-computer mode).** Double-click **`Chrisphics Hub.app`**. It opens in
 its own window with its own Dock icon and menus, and starts a private copy of the engine on
 a port only it uses. There is nothing to keep open and nothing to install — quit the app and
 the engine stops with it. For one shared book across the shop Wi-Fi, use the LAN server
@@ -41,7 +43,7 @@ instructions below instead; do not run this private app at the same time as that
   macOS print dialog (the sheet's own print button is wired to it); **Export Job Sheet as
   PDF** saves it as a file.
 
-**In a browser instead.** Double-click **`Chriphics Hub.command`**. A Terminal window opens and
+**In a browser instead.** Double-click **`Chrisphics Hub.command`**. A Terminal window opens and
 your browser goes to <http://127.0.0.1:8712/>. It reads and writes the same data file as the
 desktop app. Use one at a time; keep the Terminal window open while you work, and press
 `Ctrl+C` in it (or close it) to stop.
@@ -53,10 +55,10 @@ From the command line, the browser route is `./run.sh`. Useful flags:
 | `./run.sh` | start and open the browser |
 | `./run.sh --no-browser` | start without opening a browser tab |
 | `./run.sh --port 8080` | use a different port if 8712 is taken |
-| `./run.sh --host 0.0.0.0 --port 8712 --tls-cert /path/server.crt --tls-key /path/server.key` | serve the installable app over shop Wi-Fi with HTTPS; requires `CHRIPHICS_AUTH_PASSWORD` |
+| `./run.sh --host 0.0.0.0 --port 8712 --tls-cert /path/server.crt --tls-key /path/server.key` | serve the installable app over shop Wi-Fi with HTTPS; requires `CHRISPHICS_AUTH_PASSWORD` |
 | `./run.sh --seed` | add sample clients, jobs, a quote, expenses and enquiries — only into an empty book |
 | `python3 server.py --backup` | write a backup into the Backups folder and exit |
-| `./desktop/build-app.sh` | rebuild `Chriphics Hub.app` after editing the code |
+| `./desktop/build-app.sh` | rebuild `Chrisphics Hub.app` after editing the code |
 
 ### Install on Windows, Android and iPhone
 
@@ -64,7 +66,7 @@ The same responsive web app can be installed from Microsoft Edge on Windows and 
 mobile browser. First configure the shop computer as the local server, give it a stable
 Wi-Fi address/name, and use a TLS certificate trusted by the devices. HTTPS is required for
 browser installation and offline app-shell storage on phones; a plain `http://` LAN address
-is not sufficient. Set `CHRIPHICS_AUTH_PASSWORD` on the server before listening on the
+is not sufficient. Set `CHRISPHICS_AUTH_PASSWORD` on the server before listening on the
 network. Do not forward the server port to the public internet.
 
 The certificate must be trusted by the devices and include the stable shop hostname (or IP)
@@ -77,9 +79,9 @@ PowerShell on Windows:
 
 ```powershell
 Set-Location C:\path\to\CRISPprint-Ghana
-$env:CHRIPHICS_AUTH_PASSWORD = Read-Host "Shop password"
-$env:CHRIPHICS_DB = "$env:LOCALAPPDATA\CRISPprint\chriphics.db"
-New-Item -ItemType Directory -Force (Split-Path $env:CHRIPHICS_DB) | Out-Null
+$env:CHRISPHICS_AUTH_PASSWORD = Read-Host "Shop password"
+$env:CHRISPHICS_DB = "$env:LOCALAPPDATA\CRISPprint\chrisphics.db"
+New-Item -ItemType Directory -Force (Split-Path $env:CHRISPHICS_DB) | Out-Null
 python server.py --host 0.0.0.0 --port 8712 --tls-cert C:\shop\server.crt --tls-key C:\shop\server.key --no-browser
 ```
 
@@ -95,6 +97,20 @@ Open the HTTPS shop address once on each device while connected to the shop Wi-F
 - **Android / Chrome:** use **Install app** or **Add to Home screen**.
 - **iPhone / iPad:** in Safari, choose **Share → Add to Home Screen**.
 
+Under 720px the book becomes a phone app rather than a shrunken desktop. The side rail is
+gone; **Desk · Jobs · Money · Clients · More** sit in a tab bar at thumb height, and **More**
+opens a sheet holding the remaining screens (spoiled work, pending sync, enquiries, expenses,
+reports) plus the theme switch and the backup button. A job's record and every form rise from
+the bottom of the screen, the first column of a wide ledger pins itself so a scrolled row is
+still identifiable, and everything you press is at least 44px tall. The status strip and the
+tab bar sit inside the notch and home-indicator areas, so nothing hides under them. Once
+installed, long-press the home-screen icon for **New job** and **Receive payment** shortcuts,
+which open straight to that form.
+
+Icons are drawn, not photographed: `tools/make-web-icons.swift` renders the shop's four-diamond
+mark at 192px, 512px, a 512px maskable version with the mark pulled inside the safe circle,
+and a 180px `apple-touch-icon`, all on the same ink plate as the Dock icon.
+
 The app shell and screens already opened are cached on each device. While offline, new
 changes are saved in that device's **Pending sync** queue. Reconnect to the shop Wi-Fi to
 send them to the shared book; the queue retries safely if a connection drops. If another
@@ -105,7 +121,7 @@ device must reconnect to the shop server to see updates entered elsewhere.
 
 The native Mac desktop app is a separate single-computer mode, not a client for the shared
 LAN server. When using shared mode on a Mac, use the HTTPS shop address in its browser rather
-than opening `Chriphics Hub.app`.
+than opening `Chrisphics Hub.app`.
 
 ### Open and install over HTTPS on the same Wi-Fi
 
@@ -199,7 +215,7 @@ to be public.
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/HowellDaniel/ChrisphicsHub)
 
 Open the deployment link, sign in to Render, provide a strong value for
-`CHRIPHICS_AUTH_PASSWORD`, review the paid Starter service and persistent disk, then confirm
+`CHRISPHICS_AUTH_PASSWORD`, review the paid Starter service and persistent disk, then confirm
 **Deploy Blueprint**. Render will show the app's public HTTPS URL after provisioning finishes.
 Render builds the Python server, provisions its persistent disk, and serves the app over
 HTTPS. The service exposes `/healthz` for health checks and is intentionally limited to one
@@ -312,7 +328,7 @@ of the Dashboard is how that happens.
 **Watch Messages** turns on a reader that looks at Messages every twenty seconds. It opens
 `~/Library/Messages/chat.db` **read-only**, never writes to it, and never sends anything.
 macOS protects that file, so the first time you switch it on the app needs permission:
-*System Settings ▸ Privacy & Security ▸ Full Disk Access*, tick **Chriphics Hub** (or the
+*System Settings ▸ Privacy & Security ▸ Full Disk Access*, tick **Chrisphics Hub** (or the
 terminal you started `server.py` from), then press **Check Messages now**. Without it the card
 says so in one line instead of failing quietly, and the paste box still works.
 
@@ -384,27 +400,27 @@ Hello {{1}}, your print job {{2}} ({{3}}) is now {{4}}. We will keep you updated
 
 The four template parameters are the client's name, job reference, a concise work
 description and status.
-Configure `CHRIPHICS_WHATSAPP_TOKEN`, `CHRIPHICS_WHATSAPP_PHONE_NUMBER_ID`,
-`CHRIPHICS_WHATSAPP_TEMPLATE`, and optionally `CHRIPHICS_WHATSAPP_API_VERSION` (defaults to
-`v22.0`) and `CHRIPHICS_WHATSAPP_TEMPLATE_LANGUAGE` (defaults to `en`). Use Meta's current
+Configure `CHRISPHICS_WHATSAPP_TOKEN`, `CHRISPHICS_WHATSAPP_PHONE_NUMBER_ID`,
+`CHRISPHICS_WHATSAPP_TEMPLATE`, and optionally `CHRISPHICS_WHATSAPP_API_VERSION` (defaults to
+`v22.0`) and `CHRISPHICS_WHATSAPP_TEMPLATE_LANGUAGE` (defaults to `en`). Use Meta's current
 supported API version and the exact language code approved for the template.
 
 Email requires an SMTP host, username, password and sender address. For example, in the same
 PowerShell window before starting the server:
 
 ```powershell
-$env:CHRIPHICS_WHATSAPP_TOKEN = Read-Host "WhatsApp Cloud API token"
-$env:CHRIPHICS_WHATSAPP_PHONE_NUMBER_ID = "your-phone-number-id"
-$env:CHRIPHICS_WHATSAPP_TEMPLATE = "crispprint_job_status"
-$env:CHRIPHICS_EMAIL_SMTP_HOST = "smtp.example.com"
-$env:CHRIPHICS_EMAIL_SMTP_PORT = "587"
-$env:CHRIPHICS_EMAIL_SMTP_USERNAME = "shop@example.com"
-$env:CHRIPHICS_EMAIL_SMTP_PASSWORD = Read-Host "Email SMTP password"
-$env:CHRIPHICS_EMAIL_FROM = "shop@example.com"
-$env:CHRIPHICS_EMAIL_SMTP_SECURITY = "starttls"
+$env:CHRISPHICS_WHATSAPP_TOKEN = Read-Host "WhatsApp Cloud API token"
+$env:CHRISPHICS_WHATSAPP_PHONE_NUMBER_ID = "your-phone-number-id"
+$env:CHRISPHICS_WHATSAPP_TEMPLATE = "crispprint_job_status"
+$env:CHRISPHICS_EMAIL_SMTP_HOST = "smtp.example.com"
+$env:CHRISPHICS_EMAIL_SMTP_PORT = "587"
+$env:CHRISPHICS_EMAIL_SMTP_USERNAME = "shop@example.com"
+$env:CHRISPHICS_EMAIL_SMTP_PASSWORD = Read-Host "Email SMTP password"
+$env:CHRISPHICS_EMAIL_FROM = "shop@example.com"
+$env:CHRISPHICS_EMAIL_SMTP_SECURITY = "starttls"
 ```
 
-Port 587 uses STARTTLS by default; set `CHRIPHICS_EMAIL_SMTP_SECURITY=ssl` for an SSL-wrapped
+Port 587 uses STARTTLS by default; set `CHRISPHICS_EMAIL_SMTP_SECURITY=ssl` for an SSL-wrapped
 SMTP service (commonly port 465). Environment changes take effect after restarting the
 server. If a provider is not configured, messages stay queued and show the missing settings;
 the server never reports them as sent.
@@ -420,21 +436,21 @@ and returned to the queue. A message already accepted by a provider keeps its se
 
 ## Your data
 
-Everything lives in one file: **`~/Library/Application Support/Chriphics Hub/chriphics.db`**.
+Everything lives in one file: **`~/Library/Application Support/Chrisphics Hub/chrisphics.db`**.
 The sidebar footer shows the full path, and `Data ▸ Show Data File in Finder` reveals it.
 Both the app and the browser launcher use this same file, so rebuilding or moving the `.app`
 never touches your records.
 
 - **Back up**: `Data ▸ Back Up Book Now`, or *Download data backup* in the sidebar, or
   `python3 server.py --backup`. Each one lands in
-  `~/Library/Application Support/Chriphics Hub/Backups/backup-<date>.db` as a complete,
+  `~/Library/Application Support/Chrisphics Hub/Backups/backup-<date>.db` as a complete,
   self-contained copy — one file, nothing else needed to restore it. Do this at the end of
   each trading day, and keep a copy on a USB stick, Google Drive or Time Machine.
 - **Restore**: quit the app, move your backup file into that folder renamed to
-  `chriphics.db`, and start again.
-- **Move to another Mac**: copy the `.app` and the `chriphics.db` file. Only Python 3
+  `chrisphics.db`, and start again.
+- **Move to another Mac**: copy the `.app` and the `chrisphics.db` file. Only Python 3
   (already on macOS) is needed to run it.
-- **Start with an empty book**: quit, then delete `chriphics.db` from that folder.
+- **Start with an empty book**: quit, then delete `chrisphics.db` from that folder.
 - **Bring an old book up to date**: just open the rebuilt app. Missing tables (item lines,
   expenses, enquiries, queued client messages) and columns are added on start-up; every
   record you already wrote stays where it is, and anything booked before quotes existed
@@ -443,7 +459,7 @@ never touches your records.
 Want to look inside it directly:
 
 ```bash
-sqlite3 "$HOME/Library/Application Support/Chriphics Hub/chriphics.db" \
+sqlite3 "$HOME/Library/Application Support/Chrisphics Hub/chrisphics.db" \
   "SELECT ref, title, total, paid, balance FROM job_accounts WHERE balance > 0;"
 ```
 
@@ -513,7 +529,7 @@ Two dev checks live in `tools/`, and neither needs anything installed:
   already typed. Nothing is sent, uploaded or contacted while you work, and the app will not
   load any outside page inside its own window.
 - Job sheets print black on white for a clean photocopy.
-- Run one at a time — the app and `Chriphics Hub.command` open the same book, so close one
+- Run one at a time — the app and `Chrisphics Hub.command` open the same book, so close one
   before starting the other.
 - The `.app` is built and signed for this Mac. If a copy on another Mac says it is from an
   unidentified developer, right-click it and choose Open once.

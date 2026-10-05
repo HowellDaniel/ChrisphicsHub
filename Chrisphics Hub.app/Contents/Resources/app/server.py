@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CRISPprint Ghana — printing records & account book.
+"""Chrisphics Hub — the printing records and account book of CRISPprint Ghana.
 
 Local-first app: Python standard library + one SQLite file. Optional outbound job notices
 use the shop's configured WhatsApp Business and email providers.
@@ -37,15 +37,17 @@ from urllib.parse import urlparse, parse_qs, unquote, quote
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
-# One book wherever Chriphics Hub is started from — the app, the .command or a bare
+# One book wherever Chrisphics Hub is started from — the app, the .command or a bare
 # `python3 server.py` — so records never fork into two copies.
-SUPPORT = os.path.expanduser("~/Library/Application Support/Chriphics Hub")
-DB_PATH = os.environ.get("CHRIPHICS_DB") or os.path.join(SUPPORT, "chriphics.db")
-BACKUP_DIR = os.environ.get("CHRIPHICS_BACKUP_DIR") or os.path.join(SUPPORT, "Backups")
+SUPPORT = os.path.expanduser("~/Library/Application Support/Chrisphics Hub")
+DB_PATH = os.environ.get("CHRISPHICS_DB") or os.path.join(SUPPORT, "chrisphics.db")
+BACKUP_DIR = os.environ.get("CHRISPHICS_BACKUP_DIR") or os.path.join(SUPPORT, "Backups")
+# Where the book lived while the shop's name was misspelled. adopt_legacy_book() copies it
+# forward on the first run of the corrected build; the old file is never touched.
+LEGACY_DB = os.path.expanduser("~/Library/Application Support/Chriphics Hub/chriphics.db")
 
 SHOP = {
-    # The shop's trading name, as it appears on a job sheet. The data folder keeps its
-    # original "Chriphics Hub" path (see SUPPORT) so an existing book is still found.
+    # The shop's trading name, as it appears on a job sheet.
     "name": "CRISPprint Ghana",
     "tagline": "Printing & Design Services",
     "phone": "+233 000 000 000",
@@ -64,6 +66,11 @@ CATEGORIES = [
 UNITS = ["pcs", "ream", "set", "sqm", "page", "hour", "book", "dozen", "job"]
 PAY_METHODS = ["Cash", "MoMo", "Bank Transfer", "Cheque", "Change", "Other"]
 KINDS = ["Individual", "Business", "School", "Church", "NGO", "Government"]
+
+# Hard ceilings for the book. An unbounded float is what let a "payment" of 1e30 sit beside a
+# job of 1,250, so every money field is checked against these before it reaches SQLite.
+MONEY_MAX = 10_000_000.0
+QUANTITY_MAX = 1_000_000
 
 # A job is booked work; a quote is a price we have promised but not yet printed.
 DOC_KINDS = ["Job", "Quote"]
@@ -90,7 +97,7 @@ DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _db = None
 _sessions = {}
-AUTH_PASSWORD = os.environ.get("CHRIPHICS_AUTH_PASSWORD", "")
+AUTH_PASSWORD = os.environ.get("CHRISPHICS_AUTH_PASSWORD", "")
 _notification_wakeup = threading.Event()
 # Reentrant: route() holds this while the handlers below take it again.
 _lock = threading.RLock()
@@ -98,16 +105,45 @@ _lock = threading.RLock()
 
 # --------------------------------------------------------------------------- data
 
+def legacy_book_path():
+    """The book left behind in the misspelled support folder, or None when there is nothing to
+    bring forward. Only ever considered on the default path, so a test, a Windows box or a Render
+    location never pulls in a book it has not been asked for. connect() asks this before opening
+    the new file, because opening it would create an empty book and hide the old one."""
+    if DB_PATH != os.path.join(SUPPORT, "chrisphics.db"):
+        return None
+    if os.path.exists(DB_PATH) or not os.path.exists(LEGACY_DB):
+        return None
+    return LEGACY_DB
+
+
+def adopt_legacy_book(source_path):
+    """Copy the old book into the corrected folder, once. The old file is read only and never
+    moved, so the shop always still has the folder it started with."""
+    if not source_path:
+        return
+    source = sqlite3.connect("file:%s?mode=ro" % source_path, uri=True)
+    try:
+        with _lock:
+            source.backup(_db)
+            _db.commit()
+        sys.stdout.write("Book copied from the older folder: %s\n" % source_path)
+    finally:
+        source.close()
+
+
 def connect(path=None):
     global _db, DB_PATH
     if path:
         DB_PATH = os.path.abspath(path)
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+    pending = legacy_book_path()
     _db = sqlite3.connect(DB_PATH, check_same_thread=False)
     _db.row_factory = sqlite3.Row
     _db.execute("PRAGMA journal_mode=WAL")
     _db.execute("PRAGMA foreign_keys=ON")
     _db.execute("PRAGMA busy_timeout=5000")
+    adopt_legacy_book(pending)
     # An older book is brought forward first: the schema's views and indexes read the
     # columns migrate() adds, so they cannot be created against the old table.
     migrate()
@@ -117,7 +153,7 @@ def connect(path=None):
 
 
 # executescript() creates missing tables, but CREATE TABLE IF NOT EXISTS can never add a
-# column to a table that already has records. A book written by an older Chriphics Hub is
+# column to a table that already has records. A book written by an older Chrisphics Hub is
 # brought forward here, column by column, with nothing dropped and nothing rewritten.
 JOB_MIGRATIONS = [
     ("kind", "TEXT NOT NULL DEFAULT 'Job'"),
@@ -161,9 +197,13 @@ def migrate():
 
 
 def q(sql, args=()):
-    cur = _db.execute(sql, args)
-    cur.row_factory = sqlite3.Row
-    return [dict(r) for r in cur.fetchall()]
+    # The shop server shares one SQLite connection across request and worker threads.
+    # route() already holds this reentrant lock for HTTP requests, but background workers
+    # also call q() directly; serialize both execution and cursor consumption.
+    with _lock:
+        cur = _db.execute(sql, args)
+        cur.row_factory = sqlite3.Row
+        return [dict(r) for r in cur.fetchall()]
 
 
 def one(sql, args=()):
@@ -184,17 +224,23 @@ def next_ref(prefix="CH"):
         try:
             n = int(row["ref"].rsplit("-", 1)[1]) + 1
         except (ValueError, IndexError):
-            n = _db.execute("SELECT count(*) c FROM jobs WHERE ref LIKE ?", (prefix + "-%",)).fetchone()["c"] + 1
+            n = one("SELECT count(*) c FROM jobs WHERE ref LIKE ?", (prefix + "-%",))["c"] + 1
     return "%s-%d-%04d" % (prefix, year, n)
 
 
-def num(value, default=0.0, minimum=None):
+def num(value, default=0.0, minimum=None, maximum=None):
     try:
         out = float(str(value).replace(",", "").strip())
     except (TypeError, ValueError):
         return default
+    # inf and nan both survive round() and land in the book: nan is stored as NULL and inf
+    # answers "not a float" the moment anything tries to int() it.
+    if out != out or out in (float("inf"), float("-inf")):
+        return default
     if minimum is not None and out < minimum:
         out = minimum
+    if maximum is not None and out > maximum:
+        out = maximum
     return round(out, 2)
 
 
@@ -206,7 +252,19 @@ def text(value, limit=4000, required=False, name="field"):
 
 
 def money(value):
-    return float(round(num(value), 2))
+    return float(num(value, 0.0, 0.0, MONEY_MAX))
+
+
+def path_id(value):
+    """A record number taken from a URL. A link that names no row is 'not found', not a
+    server fault, and a number too wide for a SQLite INTEGER must never reach a query."""
+    try:
+        out = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise LookupError("That link does not name a record in the book")
+    if not 1 <= out <= 9223372036854775807:
+        raise LookupError("That link does not name a record in the book")
+    return out
 
 
 # --------------------------------------------------------------------- dashboards
@@ -443,7 +501,7 @@ def clean_job(payload):
     data["kind"] = "Quote" if text(payload.get("kind"), 10) == "Quote" else "Job"
     data["description"] = text(payload.get("description"), 4000)
     data["size"] = text(payload.get("size"), 120)
-    data["quantity"] = max(int(num(payload.get("quantity"), 1, 0)), 0)
+    data["quantity"] = min(max(int(num(payload.get("quantity"), 1, 0)), 0), QUANTITY_MAX)
     data["unit"] = text(payload.get("unit"), 20) or "pcs"
     data["unit_price"] = money(payload.get("unit_price"))
     data["extras"] = money(payload.get("extras"))
@@ -471,7 +529,7 @@ def clean_items(payload):
         if not isinstance(row, dict):
             continue
         title = text(row.get("title"), 200)
-        qty = max(int(num(row.get("quantity"), 0, 0)), 0)
+        qty = min(max(int(num(row.get("quantity"), 0, 0)), 0), QUANTITY_MAX)
         price = money(row.get("unit_price"))
         cost = money(row.get("unit_cost"))
         if not title and qty <= 0 and price <= 0:
@@ -529,10 +587,11 @@ def create_job(payload):
                     (job_id, label + " created as " + data["status"]))
         _db.commit()
     if items:
-        replace_items(job_id, items)
-        _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'note', ?)",
-                    (job_id, "%d item line(s) added" % len(items)))
-        _db.commit()
+        with _lock:
+            replace_items(job_id, items)
+            _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'note', ?)",
+                        (job_id, "%d item line(s) added" % len(items)))
+            _db.commit()
     # A booked job's initial status is its first customer update; quotes stay manual.
     queue_message(job_id, "Quote" if data["kind"] == "Quote" else data["status"])
     return job_detail(job_id)
@@ -560,8 +619,9 @@ def update_items(job_id, items):
         detail = "Itemised into %d line(s) worth %s %.2f" % (len(after), SHOP["currency_symbol"], new_total)
     else:
         detail = "Item lines removed"
-    _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'note', ?)", (job_id, detail))
-    _db.commit()
+    with _lock:
+        _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'note', ?)", (job_id, detail))
+        _db.commit()
 
 
 FIELD_LABELS = {
@@ -736,18 +796,18 @@ def convert_quote(job_id, status="Pending"):
 AUTO_NOTIFY_EVENTS = frozenset(("Pending", "Printing", "Ready"))
 DELIVERY_RETRY_SECONDS = (60, 300, 900, 3600, 21600, 86400, 86400)
 DELIVERY_MAX_ATTEMPTS = len(DELIVERY_RETRY_SECONDS) + 1
-WHATSAPP_API_VERSION = os.environ.get("CHRIPHICS_WHATSAPP_API_VERSION", "v22.0")
-WHATSAPP_TOKEN = os.environ.get("CHRIPHICS_WHATSAPP_TOKEN", "")
-WHATSAPP_PHONE_NUMBER_ID = os.environ.get("CHRIPHICS_WHATSAPP_PHONE_NUMBER_ID", "")
-WHATSAPP_TEMPLATE = os.environ.get("CHRIPHICS_WHATSAPP_TEMPLATE", "")
-WHATSAPP_TEMPLATE_LANGUAGE = os.environ.get("CHRIPHICS_WHATSAPP_TEMPLATE_LANGUAGE", "en")
-EMAIL_SMTP_HOST = os.environ.get("CHRIPHICS_EMAIL_SMTP_HOST", "")
-EMAIL_SMTP_PORT = os.environ.get("CHRIPHICS_EMAIL_SMTP_PORT", "587")
-EMAIL_SMTP_USERNAME = os.environ.get("CHRIPHICS_EMAIL_SMTP_USERNAME", "")
-EMAIL_SMTP_PASSWORD = os.environ.get("CHRIPHICS_EMAIL_SMTP_PASSWORD", "")
-EMAIL_FROM = os.environ.get("CHRIPHICS_EMAIL_FROM", EMAIL_SMTP_USERNAME)
-EMAIL_FROM_NAME = os.environ.get("CHRIPHICS_EMAIL_FROM_NAME", SHOP["name"])
-EMAIL_SMTP_SECURITY = os.environ.get("CHRIPHICS_EMAIL_SMTP_SECURITY", "starttls").lower()
+WHATSAPP_API_VERSION = os.environ.get("CHRISPHICS_WHATSAPP_API_VERSION", "v22.0")
+WHATSAPP_TOKEN = os.environ.get("CHRISPHICS_WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.environ.get("CHRISPHICS_WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_TEMPLATE = os.environ.get("CHRISPHICS_WHATSAPP_TEMPLATE", "")
+WHATSAPP_TEMPLATE_LANGUAGE = os.environ.get("CHRISPHICS_WHATSAPP_TEMPLATE_LANGUAGE", "en")
+EMAIL_SMTP_HOST = os.environ.get("CHRISPHICS_EMAIL_SMTP_HOST", "")
+EMAIL_SMTP_PORT = os.environ.get("CHRISPHICS_EMAIL_SMTP_PORT", "587")
+EMAIL_SMTP_USERNAME = os.environ.get("CHRISPHICS_EMAIL_SMTP_USERNAME", "")
+EMAIL_SMTP_PASSWORD = os.environ.get("CHRISPHICS_EMAIL_SMTP_PASSWORD", "")
+EMAIL_FROM = os.environ.get("CHRISPHICS_EMAIL_FROM", EMAIL_SMTP_USERNAME)
+EMAIL_FROM_NAME = os.environ.get("CHRISPHICS_EMAIL_FROM_NAME", SHOP["name"])
+EMAIL_SMTP_SECURITY = os.environ.get("CHRISPHICS_EMAIL_SMTP_SECURITY", "starttls").lower()
 
 COUNTRY_DIAL = "233"        # Ghana: 059 387 2873 and +233 59 387 2873 are the same number.
 NOTIFY_EVENTS = ["Quote", "Booked", "Pending", "Printing", "Ready", "Delivered", "Cancelled"]
@@ -1021,12 +1081,12 @@ def refresh_pending_status_notification(job_id):
 def notification_config_error(channel):
     if channel == "WhatsApp":
         missing = [name for name, value in (
-            ("CHRIPHICS_WHATSAPP_TOKEN", WHATSAPP_TOKEN),
-            ("CHRIPHICS_WHATSAPP_PHONE_NUMBER_ID", WHATSAPP_PHONE_NUMBER_ID),
-            ("CHRIPHICS_WHATSAPP_TEMPLATE", WHATSAPP_TEMPLATE),
+            ("CHRISPHICS_WHATSAPP_TOKEN", WHATSAPP_TOKEN),
+            ("CHRISPHICS_WHATSAPP_PHONE_NUMBER_ID", WHATSAPP_PHONE_NUMBER_ID),
+            ("CHRISPHICS_WHATSAPP_TEMPLATE", WHATSAPP_TEMPLATE),
         ) if not value]
         if not re.fullmatch(r"v\d+\.\d+", WHATSAPP_API_VERSION):
-            missing.append("CHRIPHICS_WHATSAPP_API_VERSION (for example v22.0)")
+            missing.append("CHRISPHICS_WHATSAPP_API_VERSION (for example v22.0)")
         if WHATSAPP_PHONE_NUMBER_ID and not WHATSAPP_PHONE_NUMBER_ID.isdigit():
             return "WhatsApp phone number ID must contain digits only."
         if missing:
@@ -1034,21 +1094,21 @@ def notification_config_error(channel):
         return ""
     if channel == "Email":
         missing = [name for name, value in (
-            ("CHRIPHICS_EMAIL_SMTP_HOST", EMAIL_SMTP_HOST),
-            ("CHRIPHICS_EMAIL_SMTP_USERNAME", EMAIL_SMTP_USERNAME),
-            ("CHRIPHICS_EMAIL_SMTP_PASSWORD", EMAIL_SMTP_PASSWORD),
-            ("CHRIPHICS_EMAIL_FROM", EMAIL_FROM),
+            ("CHRISPHICS_EMAIL_SMTP_HOST", EMAIL_SMTP_HOST),
+            ("CHRISPHICS_EMAIL_SMTP_USERNAME", EMAIL_SMTP_USERNAME),
+            ("CHRISPHICS_EMAIL_SMTP_PASSWORD", EMAIL_SMTP_PASSWORD),
+            ("CHRISPHICS_EMAIL_FROM", EMAIL_FROM),
         ) if not value]
         try:
             port = int(EMAIL_SMTP_PORT)
             if not 1 <= port <= 65535:
                 raise ValueError
         except ValueError:
-            missing.append("a valid CHRIPHICS_EMAIL_SMTP_PORT")
+            missing.append("a valid CHRISPHICS_EMAIL_SMTP_PORT")
         if EMAIL_SMTP_SECURITY not in ("starttls", "ssl"):
-            missing.append("CHRIPHICS_EMAIL_SMTP_SECURITY=starttls or ssl")
+            missing.append("CHRISPHICS_EMAIL_SMTP_SECURITY=starttls or ssl")
         if EMAIL_FROM and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", EMAIL_FROM):
-            return "CHRIPHICS_EMAIL_FROM must be a valid email address."
+            return "CHRISPHICS_EMAIL_FROM must be a valid email address."
         if missing:
             return "Configure " + ", ".join(missing) + " to enable email delivery."
         return ""
@@ -1359,11 +1419,13 @@ MONEY_WORDS = ("momo", "mobile money", "mtn", "telecel", "at money", "mtn money"
                "top up", "trans_id", "reference")
 # These mean money went out, which must never be booked as a payment in. "Balance after" is
 # deliberately absent: a credit alert prints it too, so it says nothing about direction.
-MONEY_OUT = ("withdraw", "you paid", "you have paid", "paid to", "sent to", "debited",
-             "transfer to", "sent for", "airtime", "payment to")
-# A number sitting after one of these is the amount paid, not a balance or a limit.
-MONEY_CUE = ("received", "credited", "credit of", "deposit", "paid by", "top up",
-             "payment received", "money in", "successfully", "you have")
+MONEY_OUT = ("withdraw", "you paid", "you have paid", "paid to", "sent to", "you sent",
+             "debited", "transfer to", "sent for", "airtime", "payment to", "you transferred")
+# A number sitting next to one of these is the amount paid, not a balance or a limit. The
+# wording runs both ways: "received 1,250.00" and "1,250.00 received from Ama" are the same alert.
+MONEY_CUE = ("received", "credited", "credit of", "credit alert", "deposit", "paid by",
+             "sent by", "sent you", "top up", "payment received", "money in", "successfully",
+             "you have")
 # A number sitting after one of these is not the amount.
 MONEY_SKIP = ("balance", "available", "limit", "since last", "total", "fee")
 
@@ -1373,11 +1435,14 @@ AMOUNT_RE = re.compile(r"(?<![\dA-Za-z.,\-])(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d
 PHONE_RE = re.compile(r"[\d][\d\s-]{7,14}[\d]")
 PAYER_RE = re.compile(r"\bfrom\s+([A-Za-z][A-Za-z .'\-]{1,30})(?!\w)", re.I)
 REF_RE = re.compile(r"\b(?:ref|reference|name|customer|by)\s*[:#\- ]\s*([A-Za-z][A-Za-z .'\-]{2,29})(?!\w)", re.I)
+# MTN signs a credit the other way round: "Kofi paid you GHS 450.00", with the name in front.
+PAID_YOU_RE = re.compile(r"\b([A-Za-z][A-Za-z '\-]{2,29}?)\s+(?:paid|sent)\s+you\b", re.I)
 # Text that is money news but is plainly not a client settling a bill.
 MONEY_JUNK = ("won", "prize", "claim", "lottery", "congratul", "winner", "promo", "bonus offer")
 # What the words after a payer name actually describe, so the name stops there.
-PAYER_STOP = (" for ", " to ", " into ", " as ", " ref", " momo", " ghs", " payment", " order",
-              " on ", " at ", " paid", " with", " using", " trans", " balance")
+PAYER_STOP = (" for ", " to ", " into ", " as ", " of ", " ref", " momo", " ghs", " payment",
+              " order", " on ", " at ", " paid", " with", " using", " trans", " balance",
+              " tel", " credited", " new", " excess")
 MESSAGES_DB = os.path.expanduser("~/Library/Messages/chat.db")
 
 
@@ -1438,13 +1503,15 @@ def money_amount(body):
             value = round(float(m.group(1).replace(",", "")), 2)
         except ValueError:
             continue
-        if value <= 0 or value > 10000000:
+        if value <= 0 or value > MONEY_MAX:
             continue
         before = low[max(0, m.start() - 46):m.start()]
         if any(w in before for w in MONEY_SKIP):
             continue
         near = low[max(0, m.start() - 6):m.end() + 6]
-        score = 2 if any(w in low[max(0, m.start() - 34):m.start()] for w in MONEY_CUE) else 0
+        cue_before = any(w in low[max(0, m.start() - 34):m.start()] for w in MONEY_CUE)
+        cue_after = any(w in low[m.end():m.end() + 34] for w in MONEY_CUE)
+        score = 2 if cue_before or cue_after else 0
         if score == 0 and re.search(r"ghs|gh₵|₵|cedi", near):
             score = 1
         if score and (best is None or score > best[0]):
@@ -1467,7 +1534,7 @@ def parse_money_alert(raw):
 
     numbers = [n for n in phones_in(body) if n != wa_number(MOMO_NUMBER)]
     read["payer_phone"] = numbers[0] if numbers else ""
-    hit = PAYER_RE.search(body) or REF_RE.search(body)
+    hit = PAYER_RE.search(body) or PAID_YOU_RE.search(body) or REF_RE.search(body)
     read["payer"] = payer_name(hit.group(1) if hit else "")
 
     if any(w in low for w in MONEY_OUT):
@@ -1598,7 +1665,9 @@ def book_signal(row_id, payload=None):
         raise LookupError("There is no payment notice with that number")
     if row["payment_id"]:
         raise ValueError("This notice is already booked")
-    amount = num(payload.get("amount"), row["amount"] or 0, 0)
+    amount = num(payload.get("amount"), row["amount"] or 0, 0, MONEY_MAX)
+    if amount >= MONEY_MAX:
+        raise ValueError("That figure is too large for the book — check the amount")
     if amount <= 0:
         raise ValueError("No amount was read from this notice — type the figure in first")
     client_id = int(num(payload.get("client_id"), row["client_id"] or 0))
@@ -1742,7 +1811,9 @@ def momo_payload():
 # ----------------------------------------------------------------------- expenses
 
 def clean_expense(payload):
-    amount = num(payload.get("amount"), 0, 0)
+    amount = num(payload.get("amount"), 0, 0, MONEY_MAX)
+    if amount >= MONEY_MAX:
+        raise ValueError("That figure is too large for the book — check the amount")
     if amount <= 0:
         raise ValueError("Enter an amount greater than zero")
     category = text(payload.get("category"), 60) or "Other"
@@ -1840,14 +1911,9 @@ def clean_spoilage(payload):
         raise LookupError("Choose an existing print job")
     if quantity < 1:
         raise ValueError("Quantity must be at least 1")
+    quantity = min(quantity, QUANTITY_MAX)
     reason = text(payload.get("reason"), 500, True, "reason")
-    amount_raw = payload.get("amount")
-    try:
-        amount = float(str(amount_raw).replace(",", "").strip())
-    except (TypeError, ValueError):
-        raise ValueError("Enter the spoilage cost (use 0 if there was no extra cost)")
-    if not (amount >= 0 and amount < float("inf")):
-        raise ValueError("Enter a valid spoilage cost of zero or more")
+    amount = money(payload.get("amount"))
     spoiled_on = text(payload.get("spoiled_on"), 10) or today()
     if not DATE_ONLY.fullmatch(spoiled_on):
         raise ValueError("Enter a valid spoilage date")
@@ -2296,7 +2362,9 @@ def client_detail(cid):
 # --------------------------------------------------------------------- payments
 
 def create_payment(payload):
-    amount = num(payload.get("amount"), 0, 0)
+    amount = num(payload.get("amount"), 0, 0, MONEY_MAX)
+    if amount >= MONEY_MAX:
+        raise ValueError("That figure is too large for the book — check the amount")
     if amount <= 0:
         raise ValueError("Enter an amount greater than zero")
     client_id = int(num(payload.get("client_id"), -1))
@@ -2811,7 +2879,7 @@ def seed():
 # -------------------------------------------------------------------------- http
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ChriphicsHub/1.0"
+    server_version = "ChrisphicsHub/1.0"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
@@ -2890,7 +2958,7 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 operation_id = text(self.headers.get("X-Operation-Id"), 120)
                 protected = path.startswith("/api/") and path not in {
-                    "/api/session", "/api/login", "/api/healthz",
+                    "/api/session", "/api/login",
                 }
                 if protected and not self.authenticated():
                     return self.send(401, {"error": "Sign in is required to access the shop book"})
@@ -2905,7 +2973,7 @@ class Handler(BaseHTTPRequestHandler):
                     resource = self.sync_resource(path)
                     if base_tag and resource:
                         current = self.dispatch("GET", resource, {})
-                        if current is None or isinstance(current[1], tuple):
+                        if current is None or isinstance(current[1], tuple) or current[0] != 200:
                             return self.send(409, {"error": "The record is no longer available.",
                                                    "current": None, "etag": None})
                         current_tag = self.etag(current[1])
@@ -2925,8 +2993,10 @@ class Handler(BaseHTTPRequestHandler):
                                     (operation_id, code, response))
                         _db.commit()
                 self.emit(code, payload, path, params, headers)
-        except (ValueError, LookupError) as err:
+        except ValueError as err:
             self.send(400, {"error": str(err)})
+        except LookupError as err:
+            self.send(404, {"error": str(err)})
         except sqlite3.Error as err:
             self.send(500, {"error": "Database error: %s" % err})
         except Exception as err:  # noqa: BLE001 - keep the shop running
@@ -3007,7 +3077,7 @@ class Handler(BaseHTTPRequestHandler):
     def dispatch_api(self, method, path, params, seg):
         if method == "GET" and (not seg or seg[0] != "api"):
             if path.startswith("/print/"):
-                return 200, ("raw", receipt_html(int(path.rsplit("/", 1)[1])), "text/html; charset=utf-8")
+                return 200, ("raw", receipt_html(path_id(path.rsplit("/", 1)[1])), "text/html; charset=utf-8")
             if not seg:
                 return 200, ("raw", open(os.path.join(PUBLIC, "index.html"), encoding="utf-8").read(),
                              "text/html; charset=utf-8")
@@ -3042,14 +3112,14 @@ class Handler(BaseHTTPRequestHandler):
             return 200, dashboard()
         if head == "clients":
             if len(rest) >= 2:
-                cid = int(rest[1])
+                cid = path_id(rest[1])
                 if len(rest) == 3 and rest[2] == "restore" and method == "POST":
                     archive_client(cid, False)
                     return 200, {"ok": True}
                 if len(rest) == 2:
                     if method == "GET":
                         detail = client_detail(cid)
-                        return (200, detail) if detail else (400, {"error": "Client not found"})
+                        return (200, detail) if detail else (404, {"error": "Client not found"})
                     if method == "PUT":
                         return 200, update_client(cid, self.body())
                     if method == "DELETE":
@@ -3064,13 +3134,13 @@ class Handler(BaseHTTPRequestHandler):
                 return 201, create_client(self.body())
         if head == "jobs":
             if len(rest) >= 2:
-                jid = int(rest[1])
+                jid = path_id(rest[1])
                 if len(rest) == 3 and method == "GET" and rest[2] == "notifications":
                     return 200, notify_payload(jid)
                 if len(rest) == 2:
                     if method == "GET":
                         detail = job_detail(jid)
-                        return (200, detail) if detail else (400, {"error": "Job not found"})
+                        return (200, detail) if detail else (404, {"error": "Job not found"})
                     if method == "PUT":
                         return 200, update_job(jid, self.body())
                     if method == "DELETE":
@@ -3106,35 +3176,35 @@ class Handler(BaseHTTPRequestHandler):
                 return 201, create_job(self.body())
         if head == "expenses":
             if len(rest) == 2:
-                eid = int(rest[1])
+                eid = path_id(rest[1])
                 if method == "PUT":
                     return 200, update_expense(eid, self.body())
                 if method == "DELETE":
                     return 200, delete_expense(eid)
                 if method == "GET":
                     row = expense_detail(eid)
-                    return (200, row) if row else (400, {"error": "Expense not found"})
+                    return (200, row) if row else (404, {"error": "Expense not found"})
             elif method == "GET":
                 return 200, list_expenses(params)
             elif method == "POST":
                 return 201, create_expense(self.body())
         if head == "spoiled":
             if len(rest) == 2:
-                sid = int(rest[1])
+                sid = path_id(rest[1])
                 if method == "PUT":
                     return 200, update_spoilage(sid, self.body())
                 if method == "DELETE":
                     return 200, delete_spoilage(sid)
                 if method == "GET":
                     row = next((item for item in list_spoiled_work() if item["id"] == sid), None)
-                    return (200, row) if row else (400, {"error": "Spoilage record not found"})
+                    return (200, row) if row else (404, {"error": "Spoilage record not found"})
             elif method == "GET":
                 return 200, list_spoiled_work()
             elif method == "POST":
                 return 201, create_spoilage(self.body())
         if head == "leads":
             if len(rest) >= 2:
-                lid = int(rest[1])
+                lid = path_id(rest[1])
                 if len(rest) == 3 and method == "POST":
                     if rest[2] == "stage":
                         return 200, set_lead_stage(lid, text(self.body().get("stage"), 20))
@@ -3146,7 +3216,7 @@ class Handler(BaseHTTPRequestHandler):
                 if len(rest) == 2:
                     if method == "GET":
                         row = lead_detail(lid)
-                        return (200, row) if row else (400, {"error": "Enquiry not found"})
+                        return (200, row) if row else (404, {"error": "Enquiry not found"})
                     if method == "PUT":
                         return 200, update_lead(lid, self.body())
                     if method == "DELETE":
@@ -3156,7 +3226,7 @@ class Handler(BaseHTTPRequestHandler):
             elif method == "POST":
                 return 201, create_lead(self.body())
         if head == "notifications":
-            nid = int(rest[1]) if len(rest) >= 2 else 0
+            nid = path_id(rest[1]) if len(rest) >= 2 else 0
             if method == "POST" and len(rest) == 3 and rest[2] == "state":
                 return 200, {"messages": set_message_state(nid, text(self.body().get("state"), 20))}
             if method == "POST" and len(rest) == 3 and rest[2] == "retry":
@@ -3179,7 +3249,7 @@ class Handler(BaseHTTPRequestHandler):
                 notice = paste_alert(payload.get("text"))
                 return 201, dict(momo_payload(), notice=notice)
             if method == "POST" and len(rest) == 3:
-                sid = int(rest[1])
+                sid = path_id(rest[1])
                 if rest[2] == "book":
                     return 200, dict(momo_payload(), payment=book_signal(sid, self.body()))
                 if rest[2] == "ignore":
@@ -3190,7 +3260,7 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and head == "payments":
             return 201, create_payment(self.body())
         if head == "payments" and len(rest) == 2 and method == "DELETE":
-            row = one("SELECT * FROM payments WHERE id=?", (int(rest[1]),))
+            row = one("SELECT * FROM payments WHERE id=?", (path_id(rest[1]),))
             if not row:
                 raise LookupError("Payment not found")
             with _lock:
@@ -3238,7 +3308,7 @@ def write_backup():
 def watch_parent():
     """The .app holds our stdin open. When it closes, the app is gone — exit too,
     so a killed app never leaves an engine behind holding the data file."""
-    if os.environ.get("CHRIPHICS_WATCH_STDIN") != "1":
+    if os.environ.get("CHRISPHICS_WATCH_STDIN") != "1":
         return
 
     def loop():
@@ -3250,6 +3320,10 @@ def watch_parent():
         os._exit(0)
 
     threading.Thread(target=loop, daemon=True).start()
+
+
+class ShopHTTPServer(ThreadingHTTPServer):
+    request_queue_size = 64
 
 
 def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_key=None,
@@ -3270,7 +3344,7 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
         AUTH_PASSWORD = ""
     if (host not in ("127.0.0.1", "localhost", "::1") and not AUTH_PASSWORD
             and not allow_unauthenticated_lan):
-        raise RuntimeError("Set CHRIPHICS_AUTH_PASSWORD before listening beyond this computer.")
+        raise RuntimeError("Set CHRISPHICS_AUTH_PASSWORD before listening beyond this computer.")
     if bool(tls_cert) != bool(tls_key):
         raise ValueError("Both --tls-cert and --tls-key are required to enable HTTPS.")
     if (host not in ("127.0.0.1", "localhost", "::1") and not tls_cert and not trust_proxy
@@ -3281,7 +3355,7 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
     watch_parent()
     watch_messages()
     watch_notifications()
-    httpd = ThreadingHTTPServer((host, port), Handler)
+    httpd = ShopHTTPServer((host, port), Handler)
     if tls_cert:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(tls_cert, tls_key)
@@ -3305,11 +3379,11 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
 
 
 def main():
-    ap = argparse.ArgumentParser(description="CRISPprint Ghana records & accounts")
-    ap.add_argument("--port", type=int, default=int(os.environ.get("CHRIPHICS_PORT", 8712)))
-    ap.add_argument("--host", default=os.environ.get("CHRIPHICS_HOST", "127.0.0.1"))
-    ap.add_argument("--tls-cert", default=os.environ.get("CHRIPHICS_TLS_CERT"))
-    ap.add_argument("--tls-key", default=os.environ.get("CHRIPHICS_TLS_KEY"))
+    ap = argparse.ArgumentParser(description="Chrisphics Hub — printing records and accounts")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("CHRISPHICS_PORT", 8712)))
+    ap.add_argument("--host", default=os.environ.get("CHRISPHICS_HOST", "127.0.0.1"))
+    ap.add_argument("--tls-cert", default=os.environ.get("CHRISPHICS_TLS_CERT"))
+    ap.add_argument("--tls-key", default=os.environ.get("CHRISPHICS_TLS_KEY"))
     ap.add_argument("--trust-proxy", action="store_true",
                     help="use only behind a trusted HTTPS-terminating reverse proxy")
     ap.add_argument("--allow-unauthenticated-lan", "--allow-insecure-lan",

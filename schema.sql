@@ -1,4 +1,4 @@
--- Chriphics Hub — printing shop records & account book
+-- Chrisphics Hub — printing shop records & account book
 -- SQLite 3.37+ (ships with macOS). Money is stored in Ghana Cedi (GHS) as decimals.
 
 PRAGMA foreign_keys = ON;
