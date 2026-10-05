@@ -215,6 +215,8 @@ without provider settings, those messages cannot be delivered.
 
 **Dashboard** — money in today / this week / month to date, what customers still owe,
 what is late, what is ready for pickup, a 15-day cash chart, and what you print most.
+Above the tiles sits **Money in by MoMo**: payment alerts the shop did not type, read out of
+Messages or pasted in, waiting to be booked ([see below](#money-in-by-momo)).
 Below that: quotes still waiting for an answer, enquiries due for a chase, and where the
 month's money went.
 
@@ -228,8 +230,10 @@ the row can be caught in the change. A value the engine refuses (an empty job na
 that is not a date) shakes red and stays as it was.
 
 **Print jobs** — the order book, with a Quotes tab beside it. Filter by status, service,
-date booked or client; search by job, item, client name or phone. Each row shows the
-balance and the profit, and how many client messages are still to send. Open a row for the
+date booked or client, and by **Money: any / Still owing / Paid in full**; search by job,
+item, client name or phone. Each row shows the balance and the profit, how many client
+messages are still to send, and a green **Paid in full** pill on work whose balance has been
+cleared. Open a row for the
 full record: every item line on the order, the costs booked against it, payments, a status
 stepper (Pending → Printing → Ready → Delivered), a **Tell the client** card with the
 message written for that stage ([see below](#telling-the-client)), a notes timeline, and a
@@ -243,9 +247,17 @@ one carries a source, what they want, a rough value, a stage (Prospect → Meeti
 Proposal → Won / Lost) and a follow-up date, so nothing asked in the shop is forgotten.
 A yes turns into a client and a booked job in one click.
 
-**Accounts** — who owes what, with a "Get ₵…" button on each outstanding job; the payment
-ledger (filter by date, method, client or transaction reference); what was paid out in the
-same period; and credit held on client accounts that has not been applied to a job yet.
+**Accounts** — who owes what, with a "Get ₵…" button on each outstanding job; a **Paid in
+full — settled jobs** table holding the work whose balance has been cleared, with what was
+billed, what was collected and the date it was cleared; the payment ledger (filter by date,
+method, client or transaction reference); what was paid out in the same period; and credit
+held on client accounts that has not been applied to a job yet.
+
+In the **Receive money** window, typing the whole balance turns the foot of the form into
+"That is the whole balance — this job will read Paid in full", and a partial figure offers
+**Cover the rest · ₵…** which fills the amount in, sets the type to `Payment` and notes the
+entry as *Paid in full*. Money taken after a job is cleared is not refused: it sits as credit
+on the client's account, which the next job draws against.
 
 **Expenses** — money out: paper, ink, finishing, rent, airtime, transport, and anything
 outsourced. Each entry can hang off a job, which is what makes that job's profit real;
@@ -253,7 +265,10 @@ the rest is shop overhead. Totals by category and month, and a CSV for the accou
 
 **Spoiled work** — record spoiled quantity, reason, date and extra cost against an existing
 job. The cost is added to that job's expenses and reduces its profit; entries can be edited
-or removed from this screen.
+or removed from this screen. The same record sits inside the job it belongs to: open a job and
+**Spoiled on this job** lists every incident on that order with its cost, and **+ Log spoiled
+work** there opens the form with the job already chosen — so a batch that goes wrong is
+recorded against the job, never against the client's price.
 
 **Pending sync** — shows offline changes saved on this device, whether they are waiting,
 synced or need conflict review.
@@ -287,6 +302,60 @@ costs or an expense and it turns into a real figure.
 
 Every change is written to the job's record: status moves, edits (shown as
 `Unit price: ₵ 45.00 -> ₵ 50.00`), notes and payments. Nothing is silently overwritten.
+
+## Money in by MoMo
+
+Clients pay into **0506399641**. When a payment alert arrives as an SMS in **Messages** on
+this Mac, the dashboard should already know about it — the *Money in by MoMo* card at the top
+of the Dashboard is how that happens.
+
+**Watch Messages** turns on a reader that looks at Messages every twenty seconds. It opens
+`~/Library/Messages/chat.db` **read-only**, never writes to it, and never sends anything.
+macOS protects that file, so the first time you switch it on the app needs permission:
+*System Settings ▸ Privacy & Security ▸ Full Disk Access*, tick **Chriphics Hub** (or the
+terminal you started `server.py` from), then press **Check Messages now**. Without it the card
+says so in one line instead of failing quietly, and the paste box still works.
+
+**Paste an alert instead — this needs no permission**: drop the SMS text into the box and press
+**Read it**. Same reading, no disk access.
+
+What the reader takes from a text:
+
+```
+amount        the figure the alert carries, in cedis
+payer         the name the alert gives, and their number
+direction     money coming in, or money going out of the wallet
+```
+
+Number and name are what tie an alert to a client: the payer's number is matched against each
+client's phone and WhatsApp (normalised to the same 233 form), and if no number matches, the
+name is tried. That is as far as it goes — nothing is guessed, and an alert that cannot be
+placed waits in the panel with the reason written out, so a person can name the client and
+pick the job. **Money going out** (`you paid`, `withdraw`, `debited`…) is flagged and never
+booked as a payment in; airtime messages, prizes and promotions are dropped and never appear
+as a notice at all.
+
+Press **Book it** and the money enters the book like any other payment: `MoMo` as the method,
+**the client's own name as the transaction reference**, the amount, the job you chose (or left
+as *Kept on their account (credit)* when nothing is owed), and the raw alert kept in the note
+as the proof. The collected and owed figures on the Dashboard move at once, and while the
+Dashboard is open the card refreshes on its own every twenty seconds, so an alert that arrives
+while you are working shows itself without a click.
+
+**Book without asking** takes the last click away: an alert whose amount, direction and client
+all read cleanly books itself the moment it is seen. It is off by default and asks you to
+confirm before it turns on, because it writes money into the book with no human between the
+SMS and the ledger. Anything it cannot place with certainty still waits for you.
+
+Only texts that actually read as money news are stored, and only in the `money_signals` table
+of the same SQLite file, next to everything else in the book. Nothing is uploaded, and the
+shop's wallet number (the `MOMO_NUMBER` at the top of the MoMo block in `server.py`) is
+excluded when the reader looks for the payer, so your own number is never mistaken for a
+client's.
+
+Alert wording differs by network and changes over time. Before trusting **Book without
+asking**, read one real alert from your own SMS through the panel and check the amount, the
+name and the direction come back as they should.
 
 ## Telling the client
 
