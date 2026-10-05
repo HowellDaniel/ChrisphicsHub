@@ -33,6 +33,13 @@ a port only it uses. There is nothing to keep open and nothing to install — qu
 the engine stops with it. For one shared book across the shop Wi-Fi, use the LAN server
 instructions below instead; do not run this private app at the same time as that server.
 
+**Switching over from the old build.** Until the shop quits the app that is open right now, the
+misspelled `Chriphics Hub.app` and its folder are still the live book, and the Wi-Fi server must
+not be restarted in that window: a restart would copy the book forward and the running app would
+keep writing to the old one. Quit the old app, then open **`Chrisphics Hub.app`** — it copies the
+book into `~/Library/Application Support/Chrisphics Hub/` on its first run and the old file stays
+untouched as the safety copy. From then on only the new name is used.
+
 - `File` — New Job `⌘N`, New Quote `⇧⌘N`, New Enquiry `⌘I`, New Client `⌘K`,
   Receive Payment `⌘R`, Record Money Out `⌘E`.
 - `View` — `⌘1`…`⌘9` jump between the nine screens; Reload `⇧⌘R` after changing `public/`;
