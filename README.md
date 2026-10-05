@@ -112,8 +112,10 @@ SQLite book and backups. Render terminates public HTTPS; the app's `--trust-prox
 only for this trusted proxy deployment. A shop password is required at setup. Choose a strong
 password in Render's setup prompt and keep it private; the sign-in cookie is marked Secure.
 
-To deploy, push this project to a private GitHub repository, then in Render create a new
-Blueprint from that repository and review the paid service and disk before confirming.
+To deploy, connect the GitHub repository containing this project to Render, then create a
+new Blueprint from that repository and review the paid service and disk before confirming.
+The source repository is public; use a private repository if you do not want the app source
+to be public.
 Render builds the Python server, provisions its persistent disk, and serves the app over
 HTTPS. The service exposes `/healthz` for health checks and is intentionally limited to one
 instance because SQLite is stored on that disk. Keep a current backup outside Render as
