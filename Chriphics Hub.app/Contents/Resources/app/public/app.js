@@ -1722,8 +1722,11 @@ function installInstructions() {
   if (!window.isSecureContext) {
     steps = '<p>This address uses plain HTTP. Browsers require HTTPS before they allow this app ' +
       'to be installed or its offline app shell to be cached on another device.</p>' +
-      '<p>Keep using it in the browser for now. To enable installation, open the app from a ' +
-      'trusted HTTPS address; a certificate warning that you bypass is not sufficient.</p>';
+      '<p>On this shop Wi-Fi, first download and trust the ' +
+      '<a href="http://' + location.hostname + ':8835/shop-root-ca.cer" download="CRISPprint-Shop-Root-CA.cer">CRISPprint shop certificate</a> ' +
+      'on this device, then open the HTTPS address supplied by the shop.</p>' +
+      '<p class="hint">Install a certificate only for a shop you trust. The fingerprint and ' +
+      'device setup steps are in the setup guide.</p>';
   } else if (ios) {
     steps = '<p>In Safari, tap <b>Share</b>, then choose <b>Add to Home Screen</b> and confirm.</p>';
   } else if (/Android/.test(ua)) {

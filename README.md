@@ -107,7 +107,63 @@ The native Mac desktop app is a separate single-computer mode, not a client for 
 LAN server. When using shared mode on a Mac, use the HTTPS shop address in its browser rather
 than opening `Chriphics Hub.app`.
 
-### Open on the same Wi-Fi without signing in
+### Open and install over HTTPS on the same Wi-Fi
+
+The no-login Wi-Fi mode can use HTTPS too. On the shop Mac, install a local certificate
+authority tool and create a certificate for the Mac's current Wi-Fi address:
+
+```sh
+brew install mkcert
+mkcert -install || security add-trusted-cert -r trustRoot -p ssl \
+  -k "$HOME/Library/Keychains/login.keychain-db" "$(mkcert -CAROOT)/rootCA.pem"
+WIFI_IP="$(ipconfig getifaddr en0)"
+mkdir -p "$HOME/Library/Application Support/CRISPprint TLS"
+mkcert -cert-file "$HOME/Library/Application Support/CRISPprint TLS/shop-cert.pem" \
+  -key-file "$HOME/Library/Application Support/CRISPprint TLS/shop-key.pem" \
+  "$WIFI_IP" localhost 127.0.0.1 ::1
+chmod 600 "$HOME/Library/Application Support/CRISPprint TLS/shop-key.pem"
+```
+
+The HTTPS listener requires that certificate and private key. It still has no sign-in; bind it
+only to the private Wi-Fi address, and do not forward its port or run it on a guest/public
+network:
+
+```sh
+./run.sh --host "$WIFI_IP" --port 8834 \
+  --tls-cert "$HOME/Library/Application Support/CRISPprint TLS/shop-cert.pem" \
+  --tls-key "$HOME/Library/Application Support/CRISPprint TLS/shop-key.pem" \
+  --allow-unauthenticated-lan --no-browser
+```
+
+Run the certificate-only download server in a second Terminal window so other devices can
+obtain the public CA certificate before trusting the HTTPS site:
+
+```sh
+CERT_DIR="$HOME/Library/Application Support/CRISPprint TLS/device-download"
+mkdir -p "$CERT_DIR"
+openssl x509 -in "$(mkcert -CAROOT)/rootCA.pem" -outform DER \
+  -out "$CERT_DIR/shop-root-ca.cer"
+ruby -run -e httpd -- --bind-address="$WIFI_IP" --port=8835 "$CERT_DIR"
+```
+
+On each other device, download `http://<WIFI_IP>:8835/shop-root-ca.cer` or transfer the public
+CA certificate from `"$(mkcert -CAROOT)/rootCA.pem"`. Verify the certificate's SHA-256
+fingerprint is:
+
+```text
+ED:4D:60:46:1B:FA:5F:E8:3C:EA:A0:84:03:F3:42:EE:A0:D1:F9:D8:7F:62:C3:B8:02:98:BF:E2:E3:7D:1A:CB
+```
+
+Install that CA certificate as a trusted root on the device: Windows uses Certificate Manager
+under **Trusted Root Certification Authorities**; Android uses Security settings to install a
+CA certificate; on iPhone/iPad, install the downloaded profile in Settings and enable full
+trust under Certificate Trust Settings. Then open `https://<WIFI_IP>:8834/` and use **Install
+app**: supported browsers can install it and the service worker can cache the app shell. The
+CA **private key** (`rootCA-key.pem`) must remain on the shop Mac and must never be shared. The
+shop certificate's private key must also stay on the Mac. Renew the shop certificate and repeat
+the device trust steps if the local CA is replaced.
+
+### Open on the same Wi-Fi without HTTPS
 
 For a quick, no-login connection on the shop Wi-Fi only, bind the server to the Mac's private
 Wi-Fi IPv4 address instead of `0.0.0.0`. For example:

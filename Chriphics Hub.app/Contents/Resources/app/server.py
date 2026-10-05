@@ -3230,27 +3230,28 @@ def watch_parent():
 
 
 def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_key=None,
-          trust_proxy=False, allow_insecure_lan=False):
+          trust_proxy=False, allow_unauthenticated_lan=False):
     global AUTH_PASSWORD
     if seed_first:
         seed()
-    if allow_insecure_lan:
+    if allow_unauthenticated_lan:
         try:
             address = ipaddress.ip_address(host)
         except ValueError as err:
-            raise ValueError("--allow-insecure-lan requires a private IPv4 address.") from err
+            raise ValueError("--allow-unauthenticated-lan requires a private IPv4 address.") from err
         if (address.version != 4 or not address.is_private or address.is_loopback
                 or address.is_link_local):
-            raise ValueError("--allow-insecure-lan requires a private Wi-Fi IPv4 address.")
-        if tls_cert or tls_key or trust_proxy:
-            raise ValueError("--allow-insecure-lan cannot be combined with HTTPS or a proxy.")
+            raise ValueError("--allow-unauthenticated-lan requires a private Wi-Fi IPv4 address.")
+        if trust_proxy:
+            raise ValueError("--allow-unauthenticated-lan cannot be combined with a proxy.")
         AUTH_PASSWORD = ""
-    if host not in ("127.0.0.1", "localhost", "::1") and not AUTH_PASSWORD and not allow_insecure_lan:
+    if (host not in ("127.0.0.1", "localhost", "::1") and not AUTH_PASSWORD
+            and not allow_unauthenticated_lan):
         raise RuntimeError("Set CHRIPHICS_AUTH_PASSWORD before listening beyond this computer.")
     if bool(tls_cert) != bool(tls_key):
         raise ValueError("Both --tls-cert and --tls-key are required to enable HTTPS.")
     if (host not in ("127.0.0.1", "localhost", "::1") and not tls_cert and not trust_proxy
-            and not allow_insecure_lan):
+            and not allow_unauthenticated_lan):
         raise RuntimeError("HTTPS is required when listening beyond this computer.")
     if trust_proxy and tls_cert:
         raise ValueError("Use either direct HTTPS or --trust-proxy, not both.")
@@ -3288,8 +3289,9 @@ def main():
     ap.add_argument("--tls-key", default=os.environ.get("CHRIPHICS_TLS_KEY"))
     ap.add_argument("--trust-proxy", action="store_true",
                     help="use only behind a trusted HTTPS-terminating reverse proxy")
-    ap.add_argument("--allow-insecure-lan", action="store_true",
-                    help="disable login and HTTPS only when bound to a private Wi-Fi IPv4 address")
+    ap.add_argument("--allow-unauthenticated-lan", "--allow-insecure-lan",
+                    dest="allow_unauthenticated_lan", action="store_true",
+                    help="disable login only when bound to a private Wi-Fi IPv4 address")
     ap.add_argument("--db", default=None, help="alternative SQLite file")
     ap.add_argument("--seed", action="store_true", help="load sample records if the book is empty")
     ap.add_argument("--no-browser", action="store_true")
@@ -3300,7 +3302,7 @@ def main():
         print("Backup written to %s" % write_backup())
         return
     serve(args.port, not args.no_browser, args.seed, args.host, args.tls_cert, args.tls_key,
-          args.trust_proxy, args.allow_insecure_lan)
+          args.trust_proxy, args.allow_unauthenticated_lan)
 
 
 if __name__ == "__main__":
