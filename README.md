@@ -1,8 +1,9 @@
 # CRISPprint Ghana — printing records & account book
 
-A records and accounts system for a print shop, running as a Mac app. Every printing job gets
-a line, every payment gets a line, and every client keeps a running balance. It runs entirely
-on this Mac: no internet, no subscription, no accounts to log into.
+A records and accounts system for a print shop, running as a Mac app and installable web app. Every printing job gets
+a line, every payment gets a line, and every client keeps a running balance. It runs on the
+shop's own computer and local network: normal record keeping works offline; configured
+outbound WhatsApp/email updates need internet when they are sent.
 
 The app wears the shop's own artwork: the CRISPprint Ghana lockup is in the sidebar, on the
 printed job sheet and in the browser tab, and the Dock icon is the four-diamond mark. The
@@ -18,19 +19,21 @@ The bundle on disk is still called `Chriphics Hub.app` and your records still li
 | `Chriphics Hub.command` | the same thing in a browser tab, if you prefer |
 | `server.py`, `schema.sql`, `public/` | the records engine and the screens it serves |
 | `desktop/` | the native shell's Swift source and `build-app.sh` |
+| `render.yaml` | Render web service, HTTPS proxy, password and persistent-disk setup |
 | `tools/` | two dev checks, for anyone editing the code — the app does not need them |
 | `~/Library/Application Support/Chriphics Hub/` | your actual records — not in this folder |
 
 ## Start it
 
-**The desktop app (recommended).** Double-click **`Chriphics Hub.app`**. It opens in its own
-window with its own Dock icon and menus, and starts a private copy of the engine on a port
-only it uses. There is nothing to keep open and nothing to install — quit the app and the
-engine stops with it.
+**The desktop app (single-computer mode).** Double-click **`Chriphics Hub.app`**. It opens in
+its own window with its own Dock icon and menus, and starts a private copy of the engine on
+a port only it uses. There is nothing to keep open and nothing to install — quit the app and
+the engine stops with it. For one shared book across the shop Wi-Fi, use the LAN server
+instructions below instead; do not run this private app at the same time as that server.
 
 - `File` — New Job `⌘N`, New Quote `⇧⌘N`, New Enquiry `⌘I`, New Client `⌘K`,
   Receive Payment `⌘R`, Record Money Out `⌘E`.
-- `View` — `⌘1`…`⌘7` jump between the seven screens; Reload `⇧⌘R` after changing `public/`;
+- `View` — `⌘1`…`⌘9` jump between the nine screens; Reload `⇧⌘R` after changing `public/`;
   **Appearance** picks Light, Dark or "Follow the Mac" (the same three buttons sit at the
   bottom of the sidebar).
 - `Data` — Back Up Book Now `⌘B`, Show Data File in Finder, Open Backup Folder.
@@ -40,8 +43,8 @@ engine stops with it.
 
 **In a browser instead.** Double-click **`Chriphics Hub.command`**. A Terminal window opens and
 your browser goes to <http://127.0.0.1:8712/>. It reads and writes the same data file as the
-app, so you can use either — just not both at once. Keep the Terminal window open while you
-work; press `Ctrl+C` in it (or close it) to stop.
+desktop app. Use one at a time; keep the Terminal window open while you work, and press
+`Ctrl+C` in it (or close it) to stop.
 
 From the command line, the browser route is `./run.sh`. Useful flags:
 
@@ -50,11 +53,78 @@ From the command line, the browser route is `./run.sh`. Useful flags:
 | `./run.sh` | start and open the browser |
 | `./run.sh --no-browser` | start without opening a browser tab |
 | `./run.sh --port 8080` | use a different port if 8712 is taken |
+| `./run.sh --host 0.0.0.0 --port 8712 --tls-cert /path/server.crt --tls-key /path/server.key` | serve the installable app over shop Wi-Fi with HTTPS; requires `CHRIPHICS_AUTH_PASSWORD` |
 | `./run.sh --seed` | add sample clients, jobs, a quote, expenses and enquiries — only into an empty book |
 | `python3 server.py --backup` | write a backup into the Backups folder and exit |
 | `./desktop/build-app.sh` | rebuild `Chriphics Hub.app` after editing the code |
 
-## The seven screens
+### Install on Windows, Android and iPhone
+
+The same responsive web app can be installed from Microsoft Edge on Windows and from a
+mobile browser. First configure the shop computer as the local server, give it a stable
+Wi-Fi address/name, and use a TLS certificate trusted by the devices. HTTPS is required for
+browser installation and offline app-shell storage on phones; a plain `http://` LAN address
+is not sufficient. Set `CHRIPHICS_AUTH_PASSWORD` on the server before listening on the
+network. Do not forward the server port to the public internet.
+
+The certificate must be trusted by the devices and include the stable shop hostname (or IP)
+in its Subject Alternative Name. A self-signed certificate warning is not enough for
+service-worker installation. Keep the certificate's private key on the server; only install
+the CA's public certificate on client devices.
+
+On the shop computer, configure a database path and start the server. For example, in
+PowerShell on Windows:
+
+```powershell
+Set-Location C:\path\to\CRISPprint-Ghana
+$env:CHRIPHICS_AUTH_PASSWORD = Read-Host "Shop password"
+$env:CHRIPHICS_DB = "$env:LOCALAPPDATA\CRISPprint\chriphics.db"
+New-Item -ItemType Directory -Force (Split-Path $env:CHRIPHICS_DB) | Out-Null
+python server.py --host 0.0.0.0 --port 8712 --tls-cert C:\shop\server.crt --tls-key C:\shop\server.key --no-browser
+```
+
+On macOS/Linux, set the same environment variables and run the matching `./run.sh` command
+from the project folder. Keep this server computer on while devices are syncing. Open the
+HTTPS shop address on the server computer too; it is the shared book for every device.
+
+Open the HTTPS shop address once on each device while connected to the shop Wi-Fi:
+
+- **Windows / Edge:** use the browser's **Install this site as an app** command.
+- **Android / Chrome:** use **Install app** or **Add to Home screen**.
+- **iPhone / iPad:** in Safari, choose **Share → Add to Home Screen**.
+
+The app shell and screens already opened are cached on each device. While offline, new
+changes are saved in that device's **Pending sync** queue. Reconnect to the shop Wi-Fi to
+send them to the shared book; the queue retries safely if a connection drops. If another
+device changed the same record first, the app pauses and shows both the saved local change
+and current shared record for review. Data stays on the server and on devices' browser
+storage; protect each device with its own screen lock. Offline copies may be stale, and a
+device must reconnect to the shop server to see updates entered elsewhere.
+
+The native Mac desktop app is a separate single-computer mode, not a client for the shared
+LAN server. When using shared mode on a Mac, use the HTTPS shop address in its browser rather
+than opening `Chriphics Hub.app`.
+
+### Host on Render
+
+`render.yaml` defines a single-instance paid web service with a persistent disk for the
+SQLite book and backups. Render terminates public HTTPS; the app's `--trust-proxy` option is
+only for this trusted proxy deployment. A shop password is required at setup. Choose a strong
+password in Render's setup prompt and keep it private; the sign-in cookie is marked Secure.
+
+To deploy, push this project to a private GitHub repository, then in Render create a new
+Blueprint from that repository and review the paid service and disk before confirming.
+Render builds the Python server, provisions its persistent disk, and serves the app over
+HTTPS. The service exposes `/healthz` for health checks and is intentionally limited to one
+instance because SQLite is stored on that disk. Keep a current backup outside Render as
+well; the app's backup action writes to the mounted disk, which is not an independent backup.
+
+The hosted book starts empty. It does not import or change the records on the shop computer.
+Configure WhatsApp and email provider secrets separately in the Render service environment
+if automatic customer messages are wanted. Record each client's channel consent in the app;
+without provider settings, those messages cannot be delivered.
+
+## The nine screens
 
 **Dashboard** — money in today / this week / month to date, what customers still owe,
 what is late, what is ready for pickup, a 15-day cash chart, and what you print most.
@@ -94,6 +164,13 @@ same period; and credit held on client accounts that has not been applied to a j
 outsourced. Each entry can hang off a job, which is what makes that job's profit real;
 the rest is shop overhead. Totals by category and month, and a CSV for the accountant.
 
+**Spoiled work** — record spoiled quantity, reason, date and extra cost against an existing
+job. The cost is added to that job's expenses and reduces its profit; entries can be edited
+or removed from this screen.
+
+**Pending sync** — shows offline changes saved on this device, whether they are waiting,
+synced or need conflict review.
+
 **Reports** — billed, what it cost, profit, collected, still owed and delivered for any
 date range, grouped by day, week or month; broken down by service, by payment method, by
 client and by expense category. Every table exports to CSV for Excel or the accountant.
@@ -126,39 +203,64 @@ Every change is written to the job's record: status moves, edits (shown as
 
 ## Telling the client
 
-When you enter a client's job details, and again every time the job moves — **Pending**,
-**Printing**, **Ready**, **Delivered** (also a quote, and a cancellation) — the book writes
-the message for that stage and queues it on **WhatsApp** and on **email** for whichever
-contact details that client has. The nav badge reads "N messages to send" so a queue never
-sits unnoticed, and each job row says how many it owes.
+When a job is first booked and when its status changes to **Pending**, **Printing** or
+**Ready**, the shop server automatically sends an update to each channel the client has
+agreed to use. **Quotes, Delivered and Cancelled** messages remain available as drafts for
+staff to open and send. Both channels are optional; edit a client and tick the matching
+permission box only after they have agreed to receive job updates on that channel. Existing
+clients are opted out until the shop records that permission.
 
-**You press send; the app does not.** A message is *composed and queued here*, and the button
-hands it to your Mac half-written:
+Automatic messages are written to the job's durable queue first. If the provider is
+unavailable or the shop server has no internet, it retries later; after eight unsuccessful
+attempts the message is marked failed and the job screen offers **Retry now**. The queue and
+provider error remain visible for review. Successful deliveries appear in the job timeline.
+Provider acceptance is recorded, but email/WhatsApp cannot guarantee that the recipient's
+device displayed or read a message.
 
-- **WhatsApp** opens `wa.me` for that number with the text already typed in the box.
-- **Email** opens a new mail message with the subject and body filled in.
-- **Copy** puts the words on the clipboard, for whatever you actually use.
-- **Mark as sent** records it, and the job's timeline gets a line saying what went, to whom
-  and on which channel — that line is the audit trail. **Back to queued** undoes it if you
-  changed your mind; **Remove** drops a message you decided not to send.
+Before automatic delivery can work on a channel, configure that provider in the environment
+of the computer running `server.py` (never paste credentials into the app, source files or
+chat). WhatsApp requires a Meta WhatsApp Business Cloud API token, phone-number ID, current
+Graph API version, and an approved template in the configured language. Its body must be:
 
-The reason it stops at the handoff is the same reason the rest of the app does: sending on
-the shop's own WhatsApp would need Meta's Business API, a permanent token and pre-approved
-template messages — an account, a cloud and a monthly cost, all of which the numbers stay
-off. Auto-email would need a mailbox password kept on this Mac. Everything here needs
-neither, and nothing leaves until you choose to send it.
+```text
+Hello {{1}}, your print job {{2}} ({{3}}) is now {{4}}. We will keep you updated.
+```
 
-What the client is told is built from the job itself: reference, what is being printed, the
-total, the due date, how long a quote holds, and what is still owing, closed with the shop's
-phone and address. Retune the wording in `NOTIF_NEWS` in `server.py` — one entry per stage.
-Numbers are normalised for `wa.me` (Ghana, `233`) by `COUNTRY_DIAL`: `0593872873`,
-`00233593872873` and `+233 59 387 2873` all become the same 12-digit link. A client with no
-WhatsApp number and no email is said plainly, with a link to their record to fill it in.
+The four template parameters are the client's name, job reference, a concise work
+description and status.
+Configure `CHRIPHICS_WHATSAPP_TOKEN`, `CHRIPHICS_WHATSAPP_PHONE_NUMBER_ID`,
+`CHRIPHICS_WHATSAPP_TEMPLATE`, and optionally `CHRIPHICS_WHATSAPP_API_VERSION` (defaults to
+`v22.0`) and `CHRIPHICS_WHATSAPP_TEMPLATE_LANGUAGE` (defaults to `en`). Use Meta's current
+supported API version and the exact language code approved for the template.
 
-There is one message per stage per channel, so clicking a status twice does not double-queue
-it. If the job's money changes after a message was queued — a payment, for instance — the
-queued text is rewritten and goes back to *Queued*, because the words on screen were the
-older truth. A message you already marked Sent keeps its wording; that is what the client got.
+Email requires an SMTP host, username, password and sender address. For example, in the same
+PowerShell window before starting the server:
+
+```powershell
+$env:CHRIPHICS_WHATSAPP_TOKEN = Read-Host "WhatsApp Cloud API token"
+$env:CHRIPHICS_WHATSAPP_PHONE_NUMBER_ID = "your-phone-number-id"
+$env:CHRIPHICS_WHATSAPP_TEMPLATE = "crispprint_job_status"
+$env:CHRIPHICS_EMAIL_SMTP_HOST = "smtp.example.com"
+$env:CHRIPHICS_EMAIL_SMTP_PORT = "587"
+$env:CHRIPHICS_EMAIL_SMTP_USERNAME = "shop@example.com"
+$env:CHRIPHICS_EMAIL_SMTP_PASSWORD = Read-Host "Email SMTP password"
+$env:CHRIPHICS_EMAIL_FROM = "shop@example.com"
+$env:CHRIPHICS_EMAIL_SMTP_SECURITY = "starttls"
+```
+
+Port 587 uses STARTTLS by default; set `CHRIPHICS_EMAIL_SMTP_SECURITY=ssl` for an SSL-wrapped
+SMTP service (commonly port 465). Environment changes take effect after restarting the
+server. If a provider is not configured, messages stay queued and show the missing settings;
+the server never reports them as sent.
+
+Email drafts and messages include the job reference, work, total, due date and balance.
+WhatsApp auto updates use the approved short status template above. A client with no
+WhatsApp number or email, or without recorded consent for a channel, is not automatically
+contacted on that channel.
+
+There is one message per stage per channel, so retrying or repeating a status does not
+double-send it. If job details change before a queued notice is sent, the message is refreshed
+and returned to the queue. A message already accepted by a provider keeps its sent wording.
 
 ## Your data
 

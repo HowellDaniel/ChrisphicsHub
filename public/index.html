@@ -4,6 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CRISPprint Ghana — Printing Records &amp; Accounts</title>
+<meta name="theme-color" content="#1c1517">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="CRISPprint">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/img/mark.png">
 <link rel="stylesheet" href="/styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231c1517'/><g fill='%239a9aa0'><polygon points='16,2.9 21.6,8.5 16,14.1 10.4,8.5'/><polygon points='16,17.9 21.6,23.5 16,29.1 10.4,23.5'/></g><g fill='%23c93a3f'><polygon points='8.5,10.4 14.1,16 8.5,21.6 2.9,16'/><polygon points='23.5,10.4 29.1,16 23.5,21.6 17.9,16'/></g></svg>">
 <script>
@@ -26,10 +32,13 @@
            alt="CRISPprint Ghana">
     </div>
     <p class="brand-sub">Records &amp; account book</p>
+    <p class="network-status" id="networkStatus" role="status" aria-live="polite">Connected to the book</p>
 
     <nav class="nav" id="nav">
       <a href="#/dashboard" data-view="dashboard">Dashboard</a>
       <a href="#/jobs" data-view="jobs">Print jobs</a>
+      <a href="#/spoiled" data-view="spoiled">Spoiled work</a>
+      <a href="#/sync" data-view="sync">Pending sync</a>
       <a href="#/clients" data-view="clients">Clients</a>
       <a href="#/leads" data-view="leads">Enquiries</a>
       <a href="#/accounts" data-view="accounts">Accounts</a>
@@ -77,5 +86,14 @@
 
 <div class="toasts" id="toasts"></div>
 <script src="/app.js"></script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('/sw.js').catch(function (error) {
+      console.error('Offline app support could not start:', error);
+    });
+  });
+}
+</script>
 </body>
 </html>

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """CRISPprint Ghana — printing records & account book.
 
-Local-only app: Python standard library + one SQLite file. No install, no cloud.
+Local-first app: Python standard library + one SQLite file. Optional outbound job notices
+use the shop's configured WhatsApp Business and email providers.
 
     python3 server.py                 # start on http://127.0.0.1:8712
     python3 server.py --seed          # start and load sample records (for a demo)
@@ -12,16 +13,23 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+from email.message import EmailMessage
+from email.utils import formataddr, make_msgid
 import hashlib
 import io
 import json
 import mimetypes
 import os
 import re
+import secrets
 import sqlite3
+import ssl
+import smtplib
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote, quote
@@ -63,7 +71,7 @@ DOC_KINDS = ["Job", "Quote"]
 EXPENSE_CATEGORIES = [
     "Paper / Stock", "Ink / Toner", "Finishing", "Substrate", "Outsourced Printing",
     "Transport", "Rent", "Utilities", "Salaries", "Equipment", "Maintenance",
-    "Design Assets", "Marketing", "Data / Airtime", "Licences", "Bank Charges",
+    "Design Assets", "Marketing", "Data / Airtime", "Licences", "Bank Charges", "Spoilage",
     "Other",
 ]
 
@@ -80,6 +88,9 @@ QUICK_LEAD = {"interest": "text", "value": "money", "follow_up": "date"}
 DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _db = None
+_sessions = {}
+AUTH_PASSWORD = os.environ.get("CHRIPHICS_AUTH_PASSWORD", "")
+_notification_wakeup = threading.Event()
 # Reentrant: route() holds this while the handlers below take it again.
 _lock = threading.RLock()
 
@@ -112,6 +123,18 @@ JOB_MIGRATIONS = [
     ("valid_until", "TEXT"),
     ("converted_at", "TEXT"),
 ]
+CLIENT_MIGRATIONS = [
+    ("whatsapp_updates", "INTEGER NOT NULL DEFAULT 0"),
+    ("email_updates", "INTEGER NOT NULL DEFAULT 0"),
+]
+NOTIFICATION_MIGRATIONS = [
+    ("auto_send", "INTEGER NOT NULL DEFAULT 0"),
+    ("delivery_state", "TEXT NOT NULL DEFAULT 'Manual'"),
+    ("delivery_attempts", "INTEGER NOT NULL DEFAULT 0"),
+    ("delivery_next_at", "REAL"),
+    ("delivery_error", "TEXT NOT NULL DEFAULT ''"),
+    ("provider_id", "TEXT NOT NULL DEFAULT ''"),
+]
 
 
 def migrate():
@@ -123,6 +146,14 @@ def migrate():
     for name, ddl in JOB_MIGRATIONS:
         if name not in have:
             _db.execute("ALTER TABLE jobs ADD COLUMN %s %s" % (name, ddl))
+    for table, migrations in (("clients", CLIENT_MIGRATIONS),
+                              ("notifications", NOTIFICATION_MIGRATIONS)):
+        if table not in tables:
+            continue
+        have = {r["name"] for r in _db.execute("PRAGMA table_info(%s)" % table).fetchall()}
+        for name, ddl in migrations:
+            if name not in have:
+                _db.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, ddl))
     # Quotes predate the kind column, so a book that only ever had jobs needs no backfill;
     # anything already booked keeps its 'Job' default.
     _db.execute("UPDATE jobs SET kind='Job' WHERE kind IS NULL OR kind=''")
@@ -371,6 +402,8 @@ def job_detail(job_id):
              j.due_date, j.valid_until, j.converted_at, j.created_at, j.updated_at, j.closed_at,
              c.name AS client, c.phone AS client_phone, c.whatsapp AS client_whatsapp,
              c.email AS client_email, c.address AS client_address, c.kind AS client_kind,
+             c.whatsapp_updates AS client_whatsapp_updates,
+             c.email_updates AS client_email_updates,
              ja.total, ja.paid, ja.balance, ja.cost, ja.profit, ja.item_count
       FROM jobs j JOIN clients c ON c.id = j.client_id JOIN job_accounts ja ON ja.id = j.id
       WHERE j.id = ?
@@ -486,8 +519,8 @@ def create_job(payload):
         _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'note', ?)",
                     (job_id, "%d item line(s) added" % len(items)))
         _db.commit()
-    # The client is told the work is in hand as soon as the details are entered.
-    queue_message(job_id, "Quote" if data["kind"] == "Quote" else "Booked")
+    # A booked job's initial status is its first customer update; quotes stay manual.
+    queue_message(job_id, "Quote" if data["kind"] == "Quote" else data["status"])
     return job_detail(job_id)
 
 
@@ -566,8 +599,7 @@ def update_job(job_id, payload):
         # A PUT that doesn't mention items must not empty the order.
         if lines is not None:
             update_items(job_id, lines)
-    if existing["status"] != data["status"]:
-        queue_message(job_id, data["status"])
+    queue_message(job_id, data["status"])
     return job_detail(job_id)
 
 
@@ -680,19 +712,28 @@ def convert_quote(job_id, status="Pending"):
         _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'status', ?)",
                     (job_id, "Accepted and booked as %s (was quote %s)" % (new_ref, old_ref)))
         _db.commit()
-    queue_message(job_id, "Booked")
+    queue_message(job_id, status)
     return job_detail(job_id)
 
 
 # ------------------------------------------------------------------ client messages
-#
-# The client hears about their job without the shop having to remember to say so. The moment a
-# job is booked or moved to Printing / Ready / Delivered, the message that event owes the client
-# is written from the job's own numbers and queued in the book. Sending is one press that opens
-# WhatsApp or Mail with the words already in the box — the app never posts anything by itself.
-# That is a deliberate limit, not an omission: WhatsApp will not let a program on this Mac send
-# on a shop's behalf without Meta's Business API, an approved template and a token, and email
-# would need a mailbox password kept here. The queue and the record are what keep it honest.
+
+# Automatic delivery requires explicit client consent and configured provider credentials.
+AUTO_NOTIFY_EVENTS = frozenset(("Pending", "Printing", "Ready"))
+DELIVERY_RETRY_SECONDS = (60, 300, 900, 3600, 21600, 86400, 86400)
+DELIVERY_MAX_ATTEMPTS = len(DELIVERY_RETRY_SECONDS) + 1
+WHATSAPP_API_VERSION = os.environ.get("CHRIPHICS_WHATSAPP_API_VERSION", "v22.0")
+WHATSAPP_TOKEN = os.environ.get("CHRIPHICS_WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.environ.get("CHRIPHICS_WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_TEMPLATE = os.environ.get("CHRIPHICS_WHATSAPP_TEMPLATE", "")
+WHATSAPP_TEMPLATE_LANGUAGE = os.environ.get("CHRIPHICS_WHATSAPP_TEMPLATE_LANGUAGE", "en")
+EMAIL_SMTP_HOST = os.environ.get("CHRIPHICS_EMAIL_SMTP_HOST", "")
+EMAIL_SMTP_PORT = os.environ.get("CHRIPHICS_EMAIL_SMTP_PORT", "587")
+EMAIL_SMTP_USERNAME = os.environ.get("CHRIPHICS_EMAIL_SMTP_USERNAME", "")
+EMAIL_SMTP_PASSWORD = os.environ.get("CHRIPHICS_EMAIL_SMTP_PASSWORD", "")
+EMAIL_FROM = os.environ.get("CHRIPHICS_EMAIL_FROM", EMAIL_SMTP_USERNAME)
+EMAIL_FROM_NAME = os.environ.get("CHRIPHICS_EMAIL_FROM_NAME", SHOP["name"])
+EMAIL_SMTP_SECURITY = os.environ.get("CHRIPHICS_EMAIL_SMTP_SECURITY", "starttls").lower()
 
 COUNTRY_DIAL = "233"        # Ghana: 059 387 2873 and +233 59 387 2873 are the same number.
 NOTIFY_EVENTS = ["Quote", "Booked", "Pending", "Printing", "Ready", "Delivered", "Cancelled"]
@@ -705,10 +746,10 @@ NOTIF_NEWS = {
              "Say the word and we book it for you.",
     "Booked": "Your order {ref} is booked: {what} — {total}. {due}"
               "We will message you when it goes on the press and again when it is ready.",
-    "Pending": "Your order {ref} is confirmed and waiting its turn in the queue. {due}",
-    "Printing": "Your order {ref} is on the press right now. {due}"
+    "Pending": "Your order {ref} for {what} is confirmed and waiting its turn in the queue. {due}",
+    "Printing": "Your order {ref} for {what} is on the press right now. {due}"
                 "We will tell you as soon as it is off the machine.",
-    "Ready": "Good news: your order {ref} is ready for collection at {address}. {balance}"
+    "Ready": "Good news: your order {ref} for {what} is ready for collection at {address}. {balance}"
              "Let us know when you are coming.",
     "Delivered": "Your order {ref} has been delivered. {balance}"
                  "Thank you for your business — we appreciate it.",
@@ -803,6 +844,11 @@ def message_body(job, event, channel):
         f["client"], news, f["shop"], SHOP["tagline"], f["phone"], f["address"])
 
 
+def automatic_whatsapp_body(job, event):
+    return "Hello %s, your print job %s (%s) is now %s. We will keep you updated." % (
+        job.get("client") or "there", job["ref"], job_what(job), event)
+
+
 def message_subject(job, event):
     return "%s %s — %s" % (job["ref"], NOTIF_HEADLINE[event], SHOP["name"])
 
@@ -835,41 +881,385 @@ def notify_rows(job_id=None, event=None):
     return rows
 
 
-def queue_message(job_id, event):
-    """Write the message this event owes the client, once per channel that reaches them."""
+def queue_message(job_id, event, automatic=None):
+    """Queue a customer update for delivery or a deliberate manual handoff."""
     if event not in NOTIFY_EVENTS:
         raise ValueError("There is no client message called " + event)
     job = job_detail(job_id)
     if not job:
         raise LookupError("Job not found")
+    if automatic is None:
+        automatic = event in AUTO_NOTIFY_EVENTS and job["kind"] == "Job"
     with _lock:
-        fresh = []
+        fresh, skipped_consent = [], []
         for channel in NOTIFY_CHANNELS:
             address = message_target(job, channel)
             if not address:
                 continue
-            body = message_body(job, event, channel)
-            subject = message_subject(job, event) if channel == "Email" else ""
-            old = one("SELECT body FROM notifications WHERE job_id = ? AND event = ? AND channel = ?",
+            old = one("SELECT body, subject, to_address, auto_send, state, delivery_state "
+                      "FROM notifications WHERE job_id = ? AND event = ? AND channel = ?",
                       (job_id, event, channel))
+            channel_auto = automatic or bool(
+                old and old["auto_send"] and old["delivery_state"] != "Cancelled")
+            consent_key = "client_%s_updates" % channel.lower()
+            if channel_auto and not job.get(consent_key):
+                skipped_consent.append(channel)
+                continue
+            body = (automatic_whatsapp_body(job, event)
+                    if channel_auto and channel == "WhatsApp" else message_body(job, event, channel))
+            subject = message_subject(job, event) if channel == "Email" else ""
             _db.execute("""
-              INSERT INTO notifications (job_id, client_id, event, channel, to_address, subject, body)
-              VALUES (:job_id, :client_id, :event, :channel, :to_address, :subject, :body)
+              INSERT INTO notifications
+                (job_id, client_id, event, channel, to_address, subject, body, auto_send,
+                 delivery_state, delivery_next_at)
+              VALUES (:job_id, :client_id, :event, :channel, :to_address, :subject, :body,
+                      :auto_send, :delivery_state, :delivery_next_at)
               ON CONFLICT(job_id, event, channel) DO UPDATE SET
-                to_address = excluded.to_address, subject = excluded.subject, body = excluded.body,
-                state = CASE WHEN notifications.body = excluded.body
-                             THEN notifications.state ELSE 'Queued' END,
-                updated_at = datetime('now','localtime')
+                to_address = CASE WHEN notifications.state='Sent'
+                                        THEN notifications.to_address ELSE excluded.to_address END,
+                subject = CASE WHEN notifications.state='Sent'
+                                     THEN notifications.subject ELSE excluded.subject END,
+                body = CASE WHEN notifications.state='Sent'
+                            THEN notifications.body ELSE excluded.body END,
+                state = CASE WHEN notifications.state='Sent' THEN 'Sent'
+                                   WHEN notifications.body <> excluded.body
+                                         OR notifications.subject <> excluded.subject
+                                         OR notifications.to_address <> excluded.to_address
+                                   OR (notifications.auto_send = 0 AND excluded.auto_send = 1)
+                                   OR (notifications.delivery_state = 'Cancelled' AND excluded.auto_send = 1)
+                                   THEN 'Queued' ELSE notifications.state END,
+                auto_send = CASE WHEN notifications.state='Sent'
+                                       THEN notifications.auto_send ELSE excluded.auto_send END,
+                delivery_state = CASE WHEN notifications.state='Sent'
+                                            THEN notifications.delivery_state
+                                            WHEN notifications.body <> excluded.body
+                                                 OR notifications.subject <> excluded.subject
+                                                 OR notifications.to_address <> excluded.to_address
+                                                 OR notifications.auto_send <> excluded.auto_send
+                                                 OR (notifications.delivery_state = 'Cancelled' AND excluded.auto_send = 1)
+                                            THEN excluded.delivery_state ELSE notifications.delivery_state END,
+                delivery_attempts = CASE WHEN notifications.state='Sent'
+                                                    THEN notifications.delivery_attempts
+                                                    WHEN notifications.body <> excluded.body
+                                                    OR notifications.subject <> excluded.subject
+                                                    OR notifications.to_address <> excluded.to_address
+                                                    OR notifications.auto_send <> excluded.auto_send
+                                                    OR (notifications.delivery_state = 'Cancelled' AND excluded.auto_send = 1)
+                                               THEN 0 ELSE notifications.delivery_attempts END,
+                delivery_next_at = CASE WHEN notifications.state='Sent'
+                                                   THEN notifications.delivery_next_at
+                                                   WHEN notifications.body <> excluded.body
+                                                   OR notifications.subject <> excluded.subject
+                                                   OR notifications.to_address <> excluded.to_address
+                                                   OR notifications.auto_send <> excluded.auto_send
+                                                   OR (notifications.delivery_state = 'Cancelled' AND excluded.auto_send = 1)
+                                              THEN NULL ELSE notifications.delivery_next_at END,
+                delivery_error = CASE WHEN notifications.state='Sent'
+                                                 THEN notifications.delivery_error
+                                                 WHEN notifications.body <> excluded.body
+                                                 OR notifications.subject <> excluded.subject
+                                                 OR notifications.to_address <> excluded.to_address
+                                                 OR notifications.auto_send <> excluded.auto_send
+                                                 OR (notifications.delivery_state = 'Cancelled' AND excluded.auto_send = 1)
+                                            THEN '' ELSE notifications.delivery_error END,
+                provider_id = CASE WHEN notifications.state='Sent'
+                                              THEN notifications.provider_id
+                                              WHEN notifications.body <> excluded.body
+                                              OR notifications.subject <> excluded.subject
+                                              OR notifications.to_address <> excluded.to_address
+                                              OR notifications.auto_send <> excluded.auto_send
+                                              OR (notifications.delivery_state = 'Cancelled' AND excluded.auto_send = 1)
+                                         THEN '' ELSE notifications.provider_id END,
+                updated_at = CASE WHEN notifications.state='Sent' THEN notifications.updated_at
+                                         ELSE datetime('now','localtime') END
             """, dict(job_id=job_id, client_id=job["client_id"], event=event, channel=channel,
-                      to_address=address, subject=subject, body=body))
-            if old is None or old["body"] != body:
+                      to_address=address, subject=subject, body=body,
+                      auto_send=1 if channel_auto else 0,
+                      delivery_state="Pending" if channel_auto else "Manual",
+                      delivery_next_at=time.time() + 3 if channel_auto else None))
+            if old is None or (old["state"] != "Sent" and
+                    (old["body"] != body or old["subject"] != subject
+                     or old["to_address"] != address or old["auto_send"] != (1 if channel_auto else 0)
+                     or (old["delivery_state"] == "Cancelled" and channel_auto))):
                 fresh.append(channel)
-        if fresh:
+        if fresh or skipped_consent:
+            details = []
+            if fresh:
+                details.append("%s %s message queued for %s" % (
+                    event, "automatic" if automatic else "manual", ", ".join(fresh)))
+            if skipped_consent:
+                details.append("%s automatic update not queued: no recorded consent for %s" % (
+                    event, ", ".join(skipped_consent)))
             _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'message', ?)",
-                        (job_id, "%s message queued for %s (%s)" % (
-                            event, job["client"], ", ".join(fresh))))
+                        (job_id, "; ".join(details) + " (%s)" % job["client"]))
         _db.commit()
+    if any(row["auto_send"] and row["state"] == "Queued" for row in notify_rows(job_id, event)):
+        _notification_wakeup.set()
     return notify_rows(job_id, event)
+
+
+def refresh_pending_status_notification(job_id):
+    job = one("SELECT kind,status FROM jobs WHERE id=?", (job_id,))
+    if job and job["kind"] == "Job" and job["status"] in AUTO_NOTIFY_EVENTS:
+        queue_message(job_id, job["status"], automatic=True)
+
+
+def notification_config_error(channel):
+    if channel == "WhatsApp":
+        missing = [name for name, value in (
+            ("CHRIPHICS_WHATSAPP_TOKEN", WHATSAPP_TOKEN),
+            ("CHRIPHICS_WHATSAPP_PHONE_NUMBER_ID", WHATSAPP_PHONE_NUMBER_ID),
+            ("CHRIPHICS_WHATSAPP_TEMPLATE", WHATSAPP_TEMPLATE),
+        ) if not value]
+        if not re.fullmatch(r"v\d+\.\d+", WHATSAPP_API_VERSION):
+            missing.append("CHRIPHICS_WHATSAPP_API_VERSION (for example v22.0)")
+        if WHATSAPP_PHONE_NUMBER_ID and not WHATSAPP_PHONE_NUMBER_ID.isdigit():
+            return "WhatsApp phone number ID must contain digits only."
+        if missing:
+            return "Configure " + ", ".join(missing) + " to enable WhatsApp delivery."
+        return ""
+    if channel == "Email":
+        missing = [name for name, value in (
+            ("CHRIPHICS_EMAIL_SMTP_HOST", EMAIL_SMTP_HOST),
+            ("CHRIPHICS_EMAIL_SMTP_USERNAME", EMAIL_SMTP_USERNAME),
+            ("CHRIPHICS_EMAIL_SMTP_PASSWORD", EMAIL_SMTP_PASSWORD),
+            ("CHRIPHICS_EMAIL_FROM", EMAIL_FROM),
+        ) if not value]
+        try:
+            port = int(EMAIL_SMTP_PORT)
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except ValueError:
+            missing.append("a valid CHRIPHICS_EMAIL_SMTP_PORT")
+        if EMAIL_SMTP_SECURITY not in ("starttls", "ssl"):
+            missing.append("CHRIPHICS_EMAIL_SMTP_SECURITY=starttls or ssl")
+        if EMAIL_FROM and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", EMAIL_FROM):
+            return "CHRIPHICS_EMAIL_FROM must be a valid email address."
+        if missing:
+            return "Configure " + ", ".join(missing) + " to enable email delivery."
+        return ""
+    return "Unknown notification channel."
+
+
+def _whatsapp_error_text(error):
+    try:
+        payload = json.loads(error.read(4096).decode("utf-8", errors="replace"))
+        message = payload.get("error", {}).get("message")
+        if message:
+            return str(message)[:350]
+    except (ValueError, AttributeError):
+        pass
+    return "Provider returned HTTP %s" % error.code
+
+
+def send_whatsapp_notification(row):
+    job = job_detail(row["job_id"])
+    if not job:
+        raise RuntimeError("The job or client no longer exists.")
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": row["to_address"],
+        "type": "template",
+        "template": {
+            "name": WHATSAPP_TEMPLATE,
+            "language": {"code": WHATSAPP_TEMPLATE_LANGUAGE},
+            "components": [{
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": job["client"]},
+                    {"type": "text", "text": job["ref"]},
+                    {"type": "text", "text": job_what(job)},
+                    {"type": "text", "text": row["event"]},
+                ],
+            }],
+        },
+    }
+    url = "https://graph.facebook.com/%s/%s/messages" % (
+        WHATSAPP_API_VERSION, WHATSAPP_PHONE_NUMBER_ID)
+    request = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), method="POST",
+        headers={"Authorization": "Bearer " + WHATSAPP_TOKEN,
+                 "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            result = json.loads(response.read(65536).decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        raise RuntimeError("WhatsApp delivery failed: " + _whatsapp_error_text(error)) from None
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError) as error:
+        raise RuntimeError("WhatsApp connection failed: %s" % str(error)[:300]) from None
+    messages = result.get("messages") or []
+    if not messages or not messages[0].get("id"):
+        raise RuntimeError("WhatsApp accepted no message ID; check the provider response.")
+    return messages[0]["id"]
+
+
+def send_email_notification(row):
+    message = EmailMessage()
+    safe_name = EMAIL_FROM_NAME.replace("\r", " ").replace("\n", " ").strip()
+    message["From"] = formataddr((safe_name, EMAIL_FROM))
+    message["To"] = row["to_address"]
+    message["Subject"] = row["subject"]
+    message["Message-ID"] = make_msgid()
+    message.set_content(row["body"])
+    port = int(EMAIL_SMTP_PORT)
+    context = ssl.create_default_context()
+    if EMAIL_SMTP_SECURITY == "ssl":
+        with smtplib.SMTP_SSL(EMAIL_SMTP_HOST, port, timeout=20, context=context) as smtp:
+            smtp.login(EMAIL_SMTP_USERNAME, EMAIL_SMTP_PASSWORD)
+            refused = smtp.send_message(message)
+    else:
+        with smtplib.SMTP(EMAIL_SMTP_HOST, port, timeout=20) as smtp:
+            smtp.ehlo()
+            smtp.starttls(context=context)
+            smtp.ehlo()
+            smtp.login(EMAIL_SMTP_USERNAME, EMAIL_SMTP_PASSWORD)
+            refused = smtp.send_message(message)
+    if refused:
+        raise RuntimeError("Email provider refused the recipient.")
+    return str(message["Message-ID"])
+
+
+def _claim_notification(note_id):
+    with _lock:
+        row = one("""
+          SELECT n.*, c.whatsapp_updates, c.email_updates
+          FROM notifications n JOIN clients c ON c.id=n.client_id WHERE n.id=?
+        """, (note_id,))
+        if not row or not row["auto_send"] or row["state"] != "Queued":
+            return None
+        if row["delivery_state"] not in ("Pending", "Sending"):
+            return None
+        now = time.time()
+        if row["delivery_next_at"] is not None and row["delivery_next_at"] > now:
+            return None
+        consent = row["whatsapp_updates"] if row["channel"] == "WhatsApp" else row["email_updates"]
+        if not consent:
+            _db.execute("""
+              UPDATE notifications SET delivery_state='Cancelled', delivery_next_at=NULL,
+                delivery_error='Automatic delivery cancelled: client withdrew consent',
+                updated_at=datetime('now','localtime') WHERE id=?
+            """, (note_id,))
+            _db.commit()
+            return None
+        attempts = row["delivery_attempts"] + 1
+        _db.execute("""
+          UPDATE notifications SET delivery_state='Sending', delivery_attempts=?,
+            delivery_next_at=?, delivery_error='', updated_at=datetime('now','localtime')
+          WHERE id=? AND delivery_state IN ('Pending','Sending')
+        """, (attempts, now + 300, note_id))
+        _db.commit()
+        row["delivery_attempts"] = attempts
+        return row
+
+
+def _record_delivery_failure(row, reason):
+    attempts = row["delivery_attempts"]
+    if attempts >= DELIVERY_MAX_ATTEMPTS:
+        state, next_at = "Failed", None
+    else:
+        delay = DELIVERY_RETRY_SECONDS[min(attempts - 1, len(DELIVERY_RETRY_SECONDS) - 1)]
+        state, next_at = "Pending", time.time() + delay
+    with _lock:
+        _db.execute("""
+          UPDATE notifications SET delivery_state=?, delivery_next_at=?, delivery_error=?,
+            updated_at=datetime('now','localtime')
+          WHERE id=? AND delivery_state='Sending'
+        """, (state, next_at, str(reason)[:500], row["id"]))
+        _db.commit()
+
+
+def _consent_still_valid(row):
+    column = "whatsapp_updates" if row["channel"] == "WhatsApp" else "email_updates"
+    with _lock:
+        client = one("SELECT %s AS allowed FROM clients WHERE id=?" % column, (row["client_id"],))
+        if client and client["allowed"]:
+            return True
+        _db.execute("""
+          UPDATE notifications SET delivery_state='Cancelled', delivery_next_at=NULL,
+            delivery_error='Automatic delivery cancelled: client withdrew consent',
+            updated_at=datetime('now','localtime') WHERE id=? AND delivery_state='Sending'
+        """, (row["id"],))
+        _db.commit()
+        return False
+
+
+def deliver_pending_notifications():
+    now = time.time()
+    candidates = q("""
+      SELECT id, channel FROM notifications
+      WHERE auto_send=1 AND state='Queued' AND delivery_state IN ('Pending','Sending')
+        AND (delivery_next_at IS NULL OR delivery_next_at<=?)
+      ORDER BY id LIMIT 50
+    """, (now,))
+    for item in candidates:
+        config_error = notification_config_error(item["channel"])
+        if config_error:
+            with _lock:
+                current = one("SELECT delivery_error FROM notifications WHERE id=?", (item["id"],))
+                if current and current["delivery_error"] != config_error:
+                    _db.execute("UPDATE notifications SET delivery_error=? WHERE id=?",
+                                (config_error, item["id"]))
+                    _db.commit()
+            continue
+        row = _claim_notification(item["id"])
+        if not row or not _consent_still_valid(row):
+            continue
+        try:
+            provider_id = (send_whatsapp_notification(row) if row["channel"] == "WhatsApp"
+                           else send_email_notification(row))
+        except Exception as error:  # Provider/transport failures are visible and retried.
+            _record_delivery_failure(row, "%s: %s" % (type(error).__name__, error))
+            continue
+        with _lock:
+            current = one("SELECT delivery_state FROM notifications WHERE id=?", (row["id"],))
+            if current and current["delivery_state"] == "Sending":
+                _db.execute("""
+                  UPDATE notifications SET state='Sent', delivery_state='Sent',
+                    delivery_next_at=NULL, delivery_error='', provider_id=?,
+                    updated_at=datetime('now','localtime') WHERE id=?
+                """, (provider_id, row["id"]))
+                _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'message', ?)",
+                            (row["job_id"], "%s update sent to %s on %s" % (
+                                row["event"], row["to_address"], row["channel"])))
+                _db.commit()
+
+
+def watch_notifications(interval=15):
+    """Retry the durable automatic-delivery queue while the shop server is running."""
+    def loop():
+        while True:
+            _notification_wakeup.clear()
+            try:
+                deliver_pending_notifications()
+            except Exception as error:  # Do not stop the server; retain an explicit log.
+                sys.stderr.write("Notification delivery worker failed: %s: %s\n" %
+                                 (type(error).__name__, error))
+            due = one("""
+              SELECT min(delivery_next_at) AS due FROM notifications
+              WHERE auto_send=1 AND state='Queued'
+                AND delivery_state IN ('Pending','Sending') AND delivery_next_at IS NOT NULL
+            """)
+            delay = max(0, min(interval, due["due"] - time.time())) if due and due["due"] else interval
+            _notification_wakeup.wait(delay)
+    threading.Thread(target=loop, daemon=True, name="notification-delivery").start()
+
+
+def retry_notification(note_id):
+    with _lock:
+        row = one("SELECT auto_send,delivery_state,state FROM notifications WHERE id=?", (note_id,))
+        if not row:
+            raise LookupError("Message not found")
+        if not row["auto_send"] or row["delivery_state"] != "Failed" or row["state"] != "Queued":
+            raise ValueError("Only a failed automatic notification can be retried")
+        _db.execute("""
+          UPDATE notifications SET delivery_state='Pending', delivery_attempts=0,
+            delivery_next_at=NULL, delivery_error='', updated_at=datetime('now','localtime')
+          WHERE id=?
+        """, (note_id,))
+        _db.commit()
+    _notification_wakeup.set()
+    return notify_rows(one("SELECT job_id FROM notifications WHERE id=?", (note_id,))["job_id"])
 
 
 def set_message_state(note_id, state):
@@ -879,6 +1269,8 @@ def set_message_state(note_id, state):
     row = one("SELECT * FROM notifications WHERE id = ?", (note_id,))
     if not row:
         raise LookupError("Message not found")
+    if row["auto_send"]:
+        raise ValueError("Automatic message delivery status is updated by the provider worker")
     with _lock:
         _db.execute("UPDATE notifications SET state = ?, updated_at = datetime('now','localtime') "
                     "WHERE id = ?", (state, note_id))
@@ -916,7 +1308,14 @@ def notify_payload(job_id):
         "whatsapp_to": reachable["WhatsApp"],
         "email_to": reachable["Email"],
         "missing": [c for c in NOTIFY_CHANNELS if not reachable[c]],
-        "to_send": len([r for r in rows if r["state"] == "Queued"]),
+        "to_send": len([r for r in rows
+                        if r["state"] == "Queued" and r["delivery_state"] != "Cancelled"]),
+        "not_consented": [
+            channel for channel, field in (
+                ("WhatsApp", "client_whatsapp_updates"),
+                ("Email", "client_email_updates"),
+            ) if reachable[channel] and not job.get(field)
+        ],
     }
 
 
@@ -1389,7 +1788,9 @@ def list_expenses(params):
         like = "%" + search + "%"
         args += [like] * 5
     rows = q("""
-      SELECT e.*, j.ref, j.title AS job_title FROM expenses e
+      SELECT e.*, j.ref, j.title AS job_title,
+             EXISTS(SELECT 1 FROM spoiled_work s WHERE s.expense_id=e.id) AS is_spoilage
+      FROM expenses e
       LEFT JOIN jobs j ON j.id = e.job_id
       WHERE %s ORDER BY e.spent_on DESC, e.id DESC LIMIT 2000
     """ % " AND ".join(where), args)
@@ -1414,6 +1815,125 @@ def list_expenses(params):
     }
 
 
+def clean_spoilage(payload):
+    try:
+        job_id = int(payload.get("job_id"))
+        quantity = int(payload.get("quantity"))
+    except (TypeError, ValueError):
+        raise ValueError("Choose a job and enter a whole-number quantity")
+    job = one("SELECT id, ref, title, kind FROM jobs WHERE id=?", (job_id,))
+    if not job or job["kind"] != "Job":
+        raise LookupError("Choose an existing print job")
+    if quantity < 1:
+        raise ValueError("Quantity must be at least 1")
+    reason = text(payload.get("reason"), 500, True, "reason")
+    amount_raw = payload.get("amount")
+    try:
+        amount = float(str(amount_raw).replace(",", "").strip())
+    except (TypeError, ValueError):
+        raise ValueError("Enter the spoilage cost (use 0 if there was no extra cost)")
+    if not (amount >= 0 and amount < float("inf")):
+        raise ValueError("Enter a valid spoilage cost of zero or more")
+    spoiled_on = text(payload.get("spoiled_on"), 10) or today()
+    if not DATE_ONLY.fullmatch(spoiled_on):
+        raise ValueError("Enter a valid spoilage date")
+    try:
+        dt.date.fromisoformat(spoiled_on)
+    except ValueError:
+        raise ValueError("Enter a valid spoilage date")
+    return {
+        "job_id": job_id,
+        "quantity": quantity,
+        "reason": reason,
+        "amount": round(amount, 2),
+        "spoiled_on": spoiled_on,
+        "job": job,
+    }
+
+
+def list_spoiled_work():
+    return q("""
+      SELECT s.id, s.job_id, s.quantity, s.reason, s.spoiled_on,
+             e.id AS expense_id, e.amount, j.ref, j.title AS job_title,
+             c.name AS client
+      FROM spoiled_work s
+      JOIN expenses e ON e.id = s.expense_id
+      JOIN jobs j ON j.id = s.job_id
+      JOIN clients c ON c.id = j.client_id
+      ORDER BY s.spoiled_on DESC, s.id DESC
+    """)
+
+
+def create_spoilage(payload):
+    data = clean_spoilage(payload)
+    with _lock:
+        try:
+            cur = _db.execute("""
+              INSERT INTO expenses (spent_on, category, amount, method, job_id, note)
+              VALUES (?, 'Spoilage', ?, 'Other', ?, ?)
+            """, (data["spoiled_on"], data["amount"], data["job_id"],
+                  "%s spoiled · %s" % (data["quantity"], data["reason"])))
+            expense_id = cur.lastrowid
+            cur = _db.execute("""
+              INSERT INTO spoiled_work (job_id, expense_id, quantity, reason, spoiled_on)
+              VALUES (?, ?, ?, ?, ?)
+            """, (data["job_id"], expense_id, data["quantity"], data["reason"], data["spoiled_on"]))
+            spoilage_id = cur.lastrowid
+            _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'note', ?)",
+                        (data["job_id"], "%s spoiled on %s: %s; cost %s %.2f" % (
+                            data["quantity"], data["spoiled_on"], data["reason"],
+                            SHOP["currency_symbol"], data["amount"])))
+            _db.commit()
+        except Exception:
+            _db.rollback()
+            raise
+    return next((row for row in list_spoiled_work() if row["id"] == spoilage_id), None)
+
+
+def update_spoilage(spoilage_id, payload):
+    data = clean_spoilage(payload)
+    with _lock:
+        record = one("SELECT expense_id, job_id FROM spoiled_work WHERE id=?", (spoilage_id,))
+        if not record:
+            raise LookupError("Spoilage record not found")
+        try:
+            _db.execute("""
+              UPDATE spoiled_work SET job_id=?, quantity=?, reason=?, spoiled_on=?
+              WHERE id=?
+            """, (data["job_id"], data["quantity"], data["reason"], data["spoiled_on"], spoilage_id))
+            _db.execute("""
+              UPDATE expenses SET spent_on=?, category='Spoilage', amount=?, job_id=?,
+                note=? WHERE id=?
+            """, (data["spoiled_on"], data["amount"], data["job_id"],
+                  "%s spoiled · %s" % (data["quantity"], data["reason"]), record["expense_id"]))
+            _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'note', ?)",
+                        (data["job_id"], "%s spoiled on %s: %s; cost %s %.2f" % (
+                            data["quantity"], data["spoiled_on"], data["reason"],
+                            SHOP["currency_symbol"], data["amount"])))
+            _db.commit()
+        except Exception:
+            _db.rollback()
+            raise
+    return next((row for row in list_spoiled_work() if row["id"] == spoilage_id), None)
+
+
+def delete_spoilage(spoilage_id):
+    with _lock:
+        row = one("SELECT expense_id, job_id FROM spoiled_work WHERE id=?", (spoilage_id,))
+        if not row:
+            raise LookupError("Spoilage record not found")
+        try:
+            _db.execute("DELETE FROM spoiled_work WHERE id=?", (spoilage_id,))
+            _db.execute("DELETE FROM expenses WHERE id=?", (row["expense_id"],))
+            _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'note', ?)",
+                        (row["job_id"], "Spoilage record removed"))
+            _db.commit()
+        except Exception:
+            _db.rollback()
+            raise
+    return {"ok": True}
+
+
 def create_expense(payload):
     data = clean_expense(payload)
     with _lock:
@@ -1433,6 +1953,8 @@ def create_expense(payload):
 def update_expense(eid, payload):
     if not one("SELECT id FROM expenses WHERE id=?", (eid,)):
         raise LookupError("Expense not found")
+    if one("SELECT id FROM spoiled_work WHERE expense_id=?", (eid,)):
+        raise ValueError("Edit this entry on the Spoiled work screen")
     data = clean_expense(payload)
     with _lock:
         _db.execute("""
@@ -1447,6 +1969,8 @@ def delete_expense(eid):
     row = one("SELECT * FROM expenses WHERE id=?", (eid,))
     if not row:
         raise LookupError("Expense not found")
+    if one("SELECT id FROM spoiled_work WHERE expense_id=?", (eid,)):
+        raise ValueError("Remove this entry on the Spoiled work screen")
     with _lock:
         _db.execute("DELETE FROM expenses WHERE id=?", (eid,))
         if row["job_id"]:
@@ -1659,11 +2183,17 @@ def list_clients(params):
 
 
 def clean_client(payload):
+    def opted_in(key):
+        value = payload.get(key)
+        return 1 if value is True or str(value or "").lower() in ("1", "true", "yes", "on") else 0
+
     data = {
         "name": text(payload.get("name"), 160, True, "client name"),
         "phone": text(payload.get("phone"), 40),
         "whatsapp": text(payload.get("whatsapp") or payload.get("phone"), 40),
         "email": text(payload.get("email"), 160),
+        "whatsapp_updates": opted_in("whatsapp_updates"),
+        "email_updates": opted_in("email_updates"),
         "address": text(payload.get("address"), 400),
         "kind": text(payload.get("kind"), 40) or "Individual",
         "notes": text(payload.get("notes"), 4000),
@@ -1677,8 +2207,10 @@ def create_client(payload):
     data = clean_client(payload)
     with _lock:
         cur = _db.execute("""
-          INSERT INTO clients (name, phone, whatsapp, email, address, kind, notes)
-          VALUES (:name, :phone, :whatsapp, :email, :address, :kind, :notes)
+          INSERT INTO clients (name, phone, whatsapp, email, whatsapp_updates, email_updates,
+                               address, kind, notes)
+          VALUES (:name, :phone, :whatsapp, :email, :whatsapp_updates, :email_updates,
+                  :address, :kind, :notes)
         """, data)
         _db.commit()
         cid = cur.lastrowid
@@ -1686,15 +2218,30 @@ def create_client(payload):
 
 
 def update_client(cid, payload):
-    if not one("SELECT id FROM clients WHERE id=?", (cid,)):
+    before = one("SELECT whatsapp_updates,email_updates FROM clients WHERE id=?", (cid,))
+    if not before:
         raise LookupError("Client not found")
     data = clean_client(payload)
     with _lock:
         _db.execute("""
           UPDATE clients SET name=:name, phone=:phone, whatsapp=:whatsapp, email=:email,
+            whatsapp_updates=:whatsapp_updates, email_updates=:email_updates,
             address=:address, kind=:kind, notes=:notes WHERE id=:id
         """, dict(data, id=cid))
+        for channel, field in (("WhatsApp", "whatsapp_updates"), ("Email", "email_updates")):
+            if before[field] and not data[field]:
+                _db.execute("""
+                  UPDATE notifications
+                  SET delivery_state='Cancelled', delivery_next_at=NULL,
+                      delivery_error='Automatic delivery cancelled: client withdrew consent',
+                      updated_at=datetime('now','localtime')
+                  WHERE client_id=? AND channel=? AND auto_send=1 AND state='Queued'
+                    AND delivery_state IN ('Pending','Failed')
+                """, (cid, channel))
         _db.commit()
+    for job in q("SELECT id FROM jobs WHERE client_id=? AND kind='Job' "
+                 "AND status IN ('Pending','Printing','Ready')", (cid,)):
+        refresh_pending_status_notification(job["id"])
     return client_detail(cid)
 
 
@@ -1771,6 +2318,8 @@ def create_payment(payload):
                             balance["balance"] if balance else 0)))
         _db.commit()
         pid = cur.lastrowid
+    if job_id:
+        refresh_pending_status_notification(job_id)
     return one("SELECT p.*, c.name AS client, j.ref FROM payments p "
                "JOIN clients c ON c.id=p.client_id LEFT JOIN jobs j ON j.id=p.job_id WHERE p.id=?", (pid,))
 
@@ -2312,12 +2861,46 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         path = unquote(url.path)
         params = parse_qs(url.query)
+        self.response_headers = {}
         try:
             with _lock:
+                operation_id = text(self.headers.get("X-Operation-Id"), 120)
+                protected = path.startswith("/api/") and path not in {
+                    "/api/session", "/api/login", "/api/healthz",
+                }
+                if protected and not self.authenticated():
+                    return self.send(401, {"error": "Sign in is required to access the shop book"})
+                if method != "GET" and path.startswith("/api/") and path not in {
+                        "/api/login", "/api/logout"} and operation_id:
+                    replay = one("SELECT status, response FROM sync_requests WHERE operation_id=?",
+                                 (operation_id,))
+                    if replay:
+                        return self.send(replay["status"], json.loads(replay["response"]))
+                if method != "GET" and protected:
+                    base_tag = self.headers.get("If-Match")
+                    resource = self.sync_resource(path)
+                    if base_tag and resource:
+                        current = self.dispatch("GET", resource, {})
+                        if current is None or isinstance(current[1], tuple):
+                            return self.send(409, {"error": "The record is no longer available.",
+                                                   "current": None, "etag": None})
+                        current_tag = self.etag(current[1])
+                        if current_tag != base_tag:
+                            return self.send(409, {"error": "This record changed on another device.",
+                                                   "current": current[1], "etag": current_tag})
                 result = self.dispatch(method, path, params)
             if result is not None:
                 code, payload = result
-                self.emit(code, payload, path, params)
+                headers = dict(self.response_headers)
+                if method == "GET" and path.startswith("/api/") and code == 200 and not isinstance(payload, tuple):
+                    headers["ETag"] = self.etag(payload)
+                if method != "GET" and path not in {"/api/login", "/api/logout"} and operation_id and code < 300 and not isinstance(payload, tuple):
+                    response = json.dumps(payload, default=str, separators=(",", ":"))
+                    with _lock:
+                        _db.execute("INSERT OR IGNORE INTO sync_requests(operation_id,status,response) VALUES (?,?,?)",
+                                    (operation_id, code, response))
+                        _db.commit()
+                self.emit(code, payload, path, params, headers)
         except (ValueError, LookupError) as err:
             self.send(400, {"error": str(err)})
         except sqlite3.Error as err:
@@ -2325,19 +2908,79 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as err:  # noqa: BLE001 - keep the shop running
             self.send(500, {"error": "%s: %s" % (type(err).__name__, err)})
 
-    def emit(self, code, payload, path, params):
+    @staticmethod
+    def etag(payload):
+        raw = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+        return '"' + hashlib.sha256(raw).hexdigest() + '"'
+
+    @staticmethod
+    def sync_resource(path):
+        parts = [part for part in path.split("/") if part]
+        if len(parts) >= 3 and parts[0] == "api" and parts[1] in {
+                "jobs", "clients", "leads", "expenses", "spoiled"}:
+            return "/" + "/".join(parts[:3])
+        return None
+
+    def session_token(self):
+        cookies = self.headers.get("Cookie", "")
+        for item in cookies.split(";"):
+            key, _, value = item.strip().partition("=")
+            if key == "crispprint_session":
+                return value
+        return ""
+
+    def authenticated(self):
+        if not AUTH_PASSWORD:
+            return True
+        token = self.session_token()
+        expires = _sessions.get(token, 0)
+        if expires <= time.time():
+            _sessions.pop(token, None)
+            return False
+        return True
+
+    def emit(self, code, payload, path, params, headers=None):
         if isinstance(payload, tuple) and payload[0] == "csv":
             return self.csv_response(payload[1], payload[2])
         if isinstance(payload, tuple) and payload[0] == "raw":
-            return self.send(code, payload[1], payload[2])
+            return self.send(code, payload[1], payload[2], headers)
         if isinstance(payload, tuple) and payload[0] == "file":
-            with open(payload[1], "rb") as fh:
-                return self.send(200, fh.read(), payload[3],
-                                 {"Content-Disposition": 'attachment; filename="%s"' % payload[2]})
-        return self.send(code, payload)
+            return self.send(200, open(payload[1], "rb").read(), payload[3],
+                             dict(headers or {}, **{"Content-Disposition": 'attachment; filename="%s"' % payload[2]}))
+        return self.send(code, payload, extra=headers)
 
     def dispatch(self, method, path, params):
         seg = [s for s in path.split("/") if s]
+        if method == "GET" and path == "/healthz":
+            return 200, {"ok": True}
+        if method == "GET" and path == "/api/session":
+            return 200, {"required": bool(AUTH_PASSWORD), "authenticated": self.authenticated()}
+        if path == "/api/login" and method == "POST":
+            password = self.body().get("password", "")
+            if not AUTH_PASSWORD:
+                return 200, {"authenticated": True}
+            if not isinstance(password, str) or not secrets.compare_digest(password, AUTH_PASSWORD):
+                return 401, {"error": "Password is incorrect"}
+            token = secrets.token_urlsafe(32)
+            _sessions[token] = time.time() + 7 * 24 * 60 * 60
+            self.response_headers["Set-Cookie"] = (
+                "crispprint_session=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800%s"
+                % (token, "; Secure" if getattr(self.server, "is_tls", False) else "")
+            )
+            return 200, {"authenticated": True}
+        if path == "/api/logout" and method == "POST":
+            _sessions.pop(self.session_token(), None)
+            self.response_headers["Set-Cookie"] = (
+                "crispprint_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0%s"
+                % ("; Secure" if getattr(self.server, "is_tls", False) else "")
+            )
+            return 200, {"authenticated": False}
+        if seg and seg[0] == "api" and not self.authenticated():
+            return 401, {"error": "Sign in is required to access the shop book"}
+
+        return self.dispatch_api(method, path, params, seg)
+
+    def dispatch_api(self, method, path, params, seg):
         if method == "GET" and (not seg or seg[0] != "api"):
             if path.startswith("/print/"):
                 return 200, ("raw", receipt_html(int(path.rsplit("/", 1)[1])), "text/html; charset=utf-8")
@@ -2367,7 +3010,8 @@ class Handler(BaseHTTPRequestHandler):
                          "counts": {r["status"]: r["c"] for r in q(
                              "SELECT status, count(*) c FROM jobs WHERE kind='Job' GROUP BY status")},
                          # Client news the shop still owes somebody.
-                         "to_send": one("SELECT count(*) c FROM notifications WHERE state = 'Queued'")["c"],
+                         "to_send": one("SELECT count(*) c FROM notifications WHERE state='Queued'"
+                                        " AND delivery_state <> 'Cancelled'")["c"],
                          # Payment notices read off the network's alerts, waiting to be booked.
                          "to_check": one("SELECT count(*) c FROM money_signals WHERE state = 'Unreviewed'")["c"]}
         if method == "GET" and head == "dashboard":
@@ -2420,7 +3064,7 @@ class Handler(BaseHTTPRequestHandler):
                     if action == "note":
                         return 200, add_note(jid, self.body().get("note"))
                     if action == "notify":
-                        queue_message(jid, text(self.body().get("event"), 20))
+                        queue_message(jid, text(self.body().get("event"), 20), automatic=False)
                         return 200, notify_payload(jid)
                     if action == "convert":
                         return 200, convert_quote(jid, text(self.body().get("status"), 20) or "Pending")
@@ -2450,6 +3094,20 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, list_expenses(params)
             elif method == "POST":
                 return 201, create_expense(self.body())
+        if head == "spoiled":
+            if len(rest) == 2:
+                sid = int(rest[1])
+                if method == "PUT":
+                    return 200, update_spoilage(sid, self.body())
+                if method == "DELETE":
+                    return 200, delete_spoilage(sid)
+                if method == "GET":
+                    row = next((item for item in list_spoiled_work() if item["id"] == sid), None)
+                    return (200, row) if row else (400, {"error": "Spoilage record not found"})
+            elif method == "GET":
+                return 200, list_spoiled_work()
+            elif method == "POST":
+                return 201, create_spoilage(self.body())
         if head == "leads":
             if len(rest) >= 2:
                 lid = int(rest[1])
@@ -2477,6 +3135,8 @@ class Handler(BaseHTTPRequestHandler):
             nid = int(rest[1]) if len(rest) >= 2 else 0
             if method == "POST" and len(rest) == 3 and rest[2] == "state":
                 return 200, {"messages": set_message_state(nid, text(self.body().get("state"), 20))}
+            if method == "POST" and len(rest) == 3 and rest[2] == "retry":
+                return 200, {"messages": retry_notification(nid)}
             if method == "DELETE" and len(rest) == 2:
                 return 200, {"messages": delete_message(nid)}
         if head == "momo":
@@ -2515,6 +3175,8 @@ class Handler(BaseHTTPRequestHandler):
                     _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'payment', ?)",
                                 (row["job_id"], "Payment of %s %.2f removed" % (SHOP["currency_symbol"], row["amount"])))
                 _db.commit()
+            if row["job_id"]:
+                refresh_pending_status_notification(row["job_id"])
             return 200, {"ok": True}
         if method == "GET" and head == "accounts":
             return 200, accounts_view(params)
@@ -2566,13 +3228,33 @@ def watch_parent():
     threading.Thread(target=loop, daemon=True).start()
 
 
-def serve(port, open_browser, seed_first):
+def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_key=None,
+          trust_proxy=False):
     if seed_first:
         seed()
+    if host not in ("127.0.0.1", "localhost", "::1") and not AUTH_PASSWORD:
+        raise RuntimeError("Set CHRIPHICS_AUTH_PASSWORD before listening beyond this computer.")
+    if bool(tls_cert) != bool(tls_key):
+        raise ValueError("Both --tls-cert and --tls-key are required to enable HTTPS.")
+    if host not in ("127.0.0.1", "localhost", "::1") and not tls_cert and not trust_proxy:
+        raise RuntimeError("HTTPS is required when listening beyond this computer.")
+    if trust_proxy and tls_cert:
+        raise ValueError("Use either direct HTTPS or --trust-proxy, not both.")
     watch_parent()
     watch_messages()
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    url = "http://127.0.0.1:%d/" % port
+    watch_notifications()
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    if tls_cert:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(tls_cert, tls_key)
+        httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+        httpd.is_tls = True
+        scheme = "https"
+    else:
+        httpd.is_tls = bool(trust_proxy)
+        scheme = "https" if trust_proxy else "http"
+    display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    url = "%s://%s:%d/" % (scheme, display_host, port)
     print("%s is running at %s" % (SHOP["name"], url))
     print("Data file: %s" % DB_PATH)
     print("Press Ctrl+C (or close this window) to stop.")
@@ -2587,6 +3269,11 @@ def serve(port, open_browser, seed_first):
 def main():
     ap = argparse.ArgumentParser(description="CRISPprint Ghana records & accounts")
     ap.add_argument("--port", type=int, default=int(os.environ.get("CHRIPHICS_PORT", 8712)))
+    ap.add_argument("--host", default=os.environ.get("CHRIPHICS_HOST", "127.0.0.1"))
+    ap.add_argument("--tls-cert", default=os.environ.get("CHRIPHICS_TLS_CERT"))
+    ap.add_argument("--tls-key", default=os.environ.get("CHRIPHICS_TLS_KEY"))
+    ap.add_argument("--trust-proxy", action="store_true",
+                    help="use only behind a trusted HTTPS-terminating reverse proxy")
     ap.add_argument("--db", default=None, help="alternative SQLite file")
     ap.add_argument("--seed", action="store_true", help="load sample records if the book is empty")
     ap.add_argument("--no-browser", action="store_true")
@@ -2596,7 +3283,8 @@ def main():
     if args.backup:
         print("Backup written to %s" % write_backup())
         return
-    serve(args.port, not args.no_browser, args.seed)
+    serve(args.port, not args.no_browser, args.seed, args.host, args.tls_cert, args.tls_key,
+          args.trust_proxy)
 
 
 if __name__ == "__main__":

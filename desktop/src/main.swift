@@ -676,6 +676,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item("Accounts", #selector(goAccounts), "5"),
             item("Expenses", #selector(goExpenses), "6"),
             item("Reports", #selector(goReports), "7"),
+            item("Spoiled Work", #selector(goSpoiled), "8"),
+            item("Pending Sync", #selector(goSync), "9"),
         ]))
         main.addItem(submenu("Data", [
             item("Back Up Book Now", #selector(backupNow), "b"),
@@ -763,6 +765,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func goAccounts() { go("#/accounts") }
     @objc func goExpenses() { go("#/expenses") }
     @objc func goReports() { go("#/reports") }
+    @objc func goSpoiled() { go("#/spoiled") }
+    @objc func goSync() { go("#/sync") }
 
     @objc func backupNow() {
         guard let base = Engine.shared.base, let web = main?.web else { return }
@@ -784,7 +788,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(newJob), #selector(newQuote), #selector(newEnquiry), #selector(newClient),
              #selector(newExpense), #selector(receivePayment),
              #selector(goDashboard), #selector(goJobs), #selector(goClients), #selector(goLeads),
-             #selector(goAccounts), #selector(goExpenses), #selector(goReports),
+             #selector(goAccounts), #selector(goExpenses), #selector(goReports), #selector(goSpoiled), #selector(goSync),
              #selector(backupNow): return main != nil
         default: return true
         }

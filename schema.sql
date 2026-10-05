@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS clients (
   phone       TEXT,
   whatsapp    TEXT,
   email       TEXT,
+  whatsapp_updates INTEGER NOT NULL DEFAULT 0,
+  email_updates    INTEGER NOT NULL DEFAULT 0,
   address     TEXT,
   kind        TEXT NOT NULL DEFAULT 'Individual',   -- Individual | Business | School | Church | NGO
   notes       TEXT,
@@ -73,6 +75,17 @@ CREATE TABLE IF NOT EXISTS expenses (
   created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+-- Spoilage records pair a production incident with its job-cost expense.
+CREATE TABLE IF NOT EXISTS spoiled_work (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  expense_id  INTEGER NOT NULL UNIQUE REFERENCES expenses(id) ON DELETE CASCADE,
+  quantity    INTEGER NOT NULL CHECK (quantity > 0),
+  reason      TEXT NOT NULL,
+  spoiled_on  TEXT NOT NULL DEFAULT (date('now','localtime')),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
 -- Work that has not become a job yet: someone asked, nothing is booked.
 CREATE TABLE IF NOT EXISTS leads (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,10 +129,8 @@ CREATE TABLE IF NOT EXISTS job_events (
   created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
--- A message the shop owes the client about this job. Written from the job's own details
--- when the job is booked or moves stage, then sent with one press in WhatsApp or Mail —
--- nothing here leaves the Mac by itself, so `state` is the shop's own note of what has gone.
--- One row per (job, event, channel): the same news is not queued twice.
+-- One status message per job, event and channel. Automatic deliveries retry from this
+-- durable queue; manual messages still open in WhatsApp or Mail for staff to send.
 CREATE TABLE IF NOT EXISTS notifications (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -130,6 +141,12 @@ CREATE TABLE IF NOT EXISTS notifications (
   subject     TEXT NOT NULL DEFAULT '',             -- email only; '' for WhatsApp
   body        TEXT NOT NULL,
   state       TEXT NOT NULL DEFAULT 'Queued',       -- Queued | Opened | Sent
+  auto_send   INTEGER NOT NULL DEFAULT 0,
+  delivery_state TEXT NOT NULL DEFAULT 'Manual',    -- Manual | Pending | Sending | Failed | Sent
+  delivery_attempts INTEGER NOT NULL DEFAULT 0,
+  delivery_next_at REAL,
+  delivery_error TEXT NOT NULL DEFAULT '',
+  provider_id TEXT NOT NULL DEFAULT '',
   created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -165,6 +182,13 @@ CREATE TABLE IF NOT EXISTS app_state (
   key         TEXT PRIMARY KEY,                      -- momo_watch | momo_auto | momo_status
   value       TEXT NOT NULL DEFAULT '',
   updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS sync_requests (
+  operation_id TEXT PRIMARY KEY,
+  status       INTEGER NOT NULL,
+  response     TEXT NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 -- A job's money. `total` prefers the item lines and only falls back to the header

@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS clients (
   phone       TEXT,
   whatsapp    TEXT,
   email       TEXT,
+  whatsapp_updates INTEGER NOT NULL DEFAULT 0,
+  email_updates    INTEGER NOT NULL DEFAULT 0,
   address     TEXT,
   kind        TEXT NOT NULL DEFAULT 'Individual',   -- Individual | Business | School | Church | NGO
   notes       TEXT,
@@ -73,6 +75,17 @@ CREATE TABLE IF NOT EXISTS expenses (
   created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+-- Spoilage records pair a production incident with its job-cost expense.
+CREATE TABLE IF NOT EXISTS spoiled_work (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  expense_id  INTEGER NOT NULL UNIQUE REFERENCES expenses(id) ON DELETE CASCADE,
+  quantity    INTEGER NOT NULL CHECK (quantity > 0),
+  reason      TEXT NOT NULL,
+  spoiled_on  TEXT NOT NULL DEFAULT (date('now','localtime')),
+  created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
 -- Work that has not become a job yet: someone asked, nothing is booked.
 CREATE TABLE IF NOT EXISTS leads (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,9 +124,71 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE TABLE IF NOT EXISTS job_events (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-  type        TEXT NOT NULL DEFAULT 'status',       -- status | note | payment | file
+  type        TEXT NOT NULL DEFAULT 'status',       -- status | note | payment | file | message
   detail      TEXT NOT NULL,
   created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+-- One status message per job, event and channel. Automatic deliveries retry from this
+-- durable queue; manual messages still open in WhatsApp or Mail for staff to send.
+CREATE TABLE IF NOT EXISTS notifications (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  client_id   INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  event       TEXT NOT NULL,                        -- Quote | Booked | Pending | Printing | Ready | Delivered | Cancelled
+  channel     TEXT NOT NULL,                        -- WhatsApp | Email
+  to_address  TEXT NOT NULL,                        -- wa.me number (no +) or email address
+  subject     TEXT NOT NULL DEFAULT '',             -- email only; '' for WhatsApp
+  body        TEXT NOT NULL,
+  state       TEXT NOT NULL DEFAULT 'Queued',       -- Queued | Opened | Sent
+  auto_send   INTEGER NOT NULL DEFAULT 0,
+  delivery_state TEXT NOT NULL DEFAULT 'Manual',    -- Manual | Pending | Sending | Failed | Sent
+  delivery_attempts INTEGER NOT NULL DEFAULT 0,
+  delivery_next_at REAL,
+  delivery_error TEXT NOT NULL DEFAULT '',
+  provider_id TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+-- A payment notice the shop did not type: read out of Messages, or pasted in.
+-- The alert text is money news, not a bill, so it waits here until it is matched to a
+-- client and booked — `payment_id` is what makes re-reading the same text harmless.
+CREATE TABLE IF NOT EXISTS money_signals (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  source       TEXT NOT NULL DEFAULT 'Messages',     -- Messages | Pasted
+  source_row   INTEGER NOT NULL DEFAULT 0,           -- chat.db ROWID; 0 for a pasted alert
+  dedupe       TEXT NOT NULL UNIQUE,                 -- 'msg:<rowid>' or 'paste:<sha1>'
+  sender       TEXT,                                 -- who the alert came from, as it appeared
+  raw          TEXT NOT NULL,                        -- the alert itself, kept as the proof
+  amount       REAL,
+  payer        TEXT,                                 -- the name the alert carries, if any
+  payer_phone  TEXT,                                 -- normalised to 233…
+  direction    TEXT NOT NULL DEFAULT 'Unknown',      -- Credit | Out | Unknown
+  state        TEXT NOT NULL DEFAULT 'Unreviewed',   -- Unreviewed | Booked | Ignored
+  client_id    INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+  job_id       INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+  payment_id   INTEGER REFERENCES payments(id) ON DELETE SET NULL,
+  reason       TEXT,                                 -- why it is unsure, for the human to read
+  seen_at      TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  booked_at    TEXT
+);
+
+-- Two switches the shop sets and the app must remember across launches: whether to watch
+-- Messages, and whether a matched alert books itself or waits for a click. `momo_status`
+-- carries what the last read actually returned, so a missing disk permission is said out
+-- loud instead of the panel just looking idle.
+CREATE TABLE IF NOT EXISTS app_state (
+  key         TEXT PRIMARY KEY,                      -- momo_watch | momo_auto | momo_status
+  value       TEXT NOT NULL DEFAULT '',
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS sync_requests (
+  operation_id TEXT PRIMARY KEY,
+  status       INTEGER NOT NULL,
+  response     TEXT NOT NULL,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
 -- A job's money. `total` prefers the item lines and only falls back to the header
@@ -208,3 +283,8 @@ CREATE INDEX IF NOT EXISTS idx_leads_follow  ON leads(follow_up);
 CREATE INDEX IF NOT EXISTS idx_payments_job  ON payments(job_id);
 CREATE INDEX IF NOT EXISTS idx_payments_cust ON payments(client_id);
 CREATE INDEX IF NOT EXISTS idx_events_job    ON job_events(job_id);
+CREATE INDEX IF NOT EXISTS idx_signals_state ON money_signals(state);
+CREATE INDEX IF NOT EXISTS idx_signals_row   ON money_signals(source, source_row);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_notify_slot ON notifications(job_id, event, channel);
+CREATE INDEX IF NOT EXISTS idx_notify_job    ON notifications(job_id);
+CREATE INDEX IF NOT EXISTS idx_notify_state  ON notifications(state);

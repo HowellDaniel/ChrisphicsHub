@@ -10,7 +10,7 @@
 		</data>
 		<key>Resources/app/public/app.js</key>
 		<data>
-		31CniVtodwWbZlgtDhN1eHbXQcw=
+		u+9S2kcBouDKjcj9V4NyZBkzF7I=
 		</data>
 		<key>Resources/app/public/img/brand.png</key>
 		<data>
@@ -22,19 +22,27 @@
 		</data>
 		<key>Resources/app/public/index.html</key>
 		<data>
-		XcBSBuVvQk7XA1mMJYwI+FtS5dQ=
+		1UkfFKwWPlQL7fMzFjsskKY0ByY=
+		</data>
+		<key>Resources/app/public/manifest.webmanifest</key>
+		<data>
+		FJwboXZUQOESKQ37OIN6UaY/Ut4=
 		</data>
 		<key>Resources/app/public/styles.css</key>
 		<data>
-		ejE9GukjaX2jnSI+OLDGsecqHsE=
+		iohvq/rcIela1BP1FG7KBkPSBwc=
+		</data>
+		<key>Resources/app/public/sw.js</key>
+		<data>
+		6frp60nZoH26wHFTjPOVEYfAFX4=
 		</data>
 		<key>Resources/app/schema.sql</key>
 		<data>
-		3MbEIwJesKM0KdEExfIJqXn16WQ=
+		ks+Kno2Z41jZWvevKAZ6jGT7498=
 		</data>
 		<key>Resources/app/server.py</key>
 		<data>
-		FZmZJoyq5x91pKBeAGu4YG+VAVo=
+		ZDJCnGX6KieUXhgxwM2jtQQv1yY=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -50,7 +58,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			77Qmoi3txtcZqqM87H+MAH7SLS7PeUAgN9cFlsxFBu4=
+			YkcI+dTpt9YmibnAxL6c4giPj86UO3dts3L8x0pkeNQ=
 			</data>
 		</dict>
 		<key>Resources/app/public/img/brand.png</key>
@@ -71,28 +79,42 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			F+m3YynZRFoUXFFJ7e82XVM1QSzW/Dahr1atROpEbkc=
+			zx0prjAihIjKXvQ/Tyj1oxSYoojZHxCKuRptgCzRtk8=
+			</data>
+		</dict>
+		<key>Resources/app/public/manifest.webmanifest</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			N8Opb7lmop3ibLF7bFRqTwpEixQVx0xMth51Dy9nC0M=
 			</data>
 		</dict>
 		<key>Resources/app/public/styles.css</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			j6mLhYiY6JBL+b8RU6+63DII2KdnImuriVlRb2Gcq5U=
+			I20r05sSzCWxB9/cSvzAdaqPcPJp9+Z2QGdbLGpd6Hs=
+			</data>
+		</dict>
+		<key>Resources/app/public/sw.js</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			LMxtllfMjekT98EsV9HRouKcFYyHHW/vuK0MsspRqNA=
 			</data>
 		</dict>
 		<key>Resources/app/schema.sql</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			EyvdXFKDC2DtEuYCZlAXMqmN9ETaqH+6ULCih153Tkw=
+			u+oTUhldYq7WJu22DSTxrybNXQP6EHXHRfoJJr7HZxA=
 			</data>
 		</dict>
 		<key>Resources/app/server.py</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			2tVAr/0S0vVnQtk771kekIqx13943zBKyas7ErTivVc=
+			rSauU1eZxFRAjEfkijjTaI/RXRA9vsGLsSgBjsy3Dns=
 			</data>
 		</dict>
 	</dict>

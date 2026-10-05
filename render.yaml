@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: crispprint-ghana
+    runtime: python
+    plan: starter
+    buildCommand: python -m py_compile server.py
+    startCommand: "python server.py --host 0.0.0.0 --port $PORT --no-browser --trust-proxy"
+    healthCheckPath: /healthz
+    disk:
+      name: crispprint-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: CHRIPHICS_DB
+        value: /var/data/chriphics.db
+      - key: CHRIPHICS_BACKUP_DIR
+        value: /var/data/Backups
+      - key: CHRIPHICS_AUTH_PASSWORD
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"

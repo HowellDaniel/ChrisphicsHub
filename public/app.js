@@ -1,9 +1,14 @@
-/* CRISPprint Ghana — front end. Vanilla JS, no build step, no server beyond this Mac.
-   Client messages are written here and opened in WhatsApp or Mail; the press that actually
-   sends one belongs to the shop, so nothing leaves this machine by itself. */
+/* CRISPprint Ghana — front end. Vanilla JS, no build step, local server with offline sync.
+   Selected job-status updates are delivered by the configured shop server; other messages
+   can still be handed off to WhatsApp or Mail for staff to send. */
 'use strict';
 
-const S = { boot: null, clients: [], route: null, timer: null, flash: null, settle: false, notify: { byId: {} }, momo: null };
+const S = { boot: null, clients: [], route: null, timer: null, flash: null, settle: false, notify: { byId: {} }, momo: null, offlineQueuedToast: false, connected: navigator.onLine };
+const OFFLINE_DB = 'crispprint-offline-v1';
+let offlineDbPromise = null;
+let syncingOfflineQueue = false;
+let nextOfflineId = -Date.now();
+let nextOfflineSequence = 0;
 
 /* --------------------------------------------------------------- tiny helpers */
 const $ = (s, r = document) => r.querySelector(s);
@@ -70,14 +75,240 @@ const dateLabel = (j) => (j.kind === 'Quote' ? validityLabel(j) : dueLabel(j));
 const qs = (obj) => Object.keys(obj).filter((k) => obj[k] !== '' && obj[k] !== null && obj[k] !== undefined && obj[k] !== 'all')
   .map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(obj[k])).join('&');
 
+function offlineDB() {
+  if (!offlineDbPromise) offlineDbPromise = new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) return reject(new Error('This browser cannot store offline changes safely.'));
+    const request = indexedDB.open(OFFLINE_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      db.createObjectStore('responses', { keyPath: 'key' });
+      db.createObjectStore('outbox', { keyPath: 'operationId' });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Could not open offline storage.'));
+  });
+  return offlineDbPromise;
+}
+async function offlineRead(store, key) {
+  const db = await offlineDB();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(store, 'readonly').objectStore(store).get(key);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error('Could not read offline storage.'));
+  });
+}
+async function offlineWrite(store, value) {
+  const db = await offlineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).put(value);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('Could not save offline data.'));
+    tx.onabort = () => reject(tx.error || new Error('Offline save was cancelled.'));
+  });
+}
+async function offlineAll(store) {
+  const db = await offlineDB();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(store, 'readonly').objectStore(store).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error || new Error('Could not read offline storage.'));
+  });
+}
+function apiUrl(path) {
+  const url = new URL(path, location.href);
+  return url.pathname + url.search;
+}
+function mutationResource(path) {
+  const parts = new URL(path, location.href).pathname.split('/').filter(Boolean);
+  return parts.length >= 3 && parts[0] === 'api' &&
+    ['jobs', 'clients', 'leads', 'expenses', 'spoiled'].includes(parts[1])
+    ? '/' + parts.slice(0, 3).join('/') : '';
+}
+function makeOfflineResponse(path, payload, id) {
+  if (path === '/api/leads' || path === '/api/clients' || path === '/api/jobs' ||
+      path === '/api/expenses' || path === '/api/payments' || path === '/api/spoiled') {
+    return Object.assign({ id, offlineQueued: true, ref: 'Pending sync' }, payload || {});
+  }
+  if (/^\/api\/leads\/\d+\/convert$/.test(path)) {
+    return { offlineQueued: true, job: { id, ref: 'Pending sync' }, lead: { id: Number(path.split('/')[3]), name: 'Enquiry' } };
+  }
+  return { id, offlineQueued: true };
+}
 async function api(path, opts) {
-  const r = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
-  const ct = r.headers.get('Content-Type') || '';
-  const body = ct.indexOf('json') >= 0 ? await r.json() : await r.text();
-  if (!r.ok) throw new Error((body && body.error) || 'Something went wrong (' + r.status + ')');
-  return body;
+  const options = opts || {};
+  const method = String(options.method || 'GET').toUpperCase();
+  const key = apiUrl(path);
+  if (method === 'GET') {
+    try {
+      const response = await fetch(path, options);
+      const ct = response.headers.get('Content-Type') || '';
+      const body = ct.indexOf('json') >= 0 ? await response.json() : await response.text();
+      if (!response.ok) {
+        const error = new Error((body && body.error) || 'Something went wrong (' + response.status + ')');
+        error.status = response.status;
+        error.body = body;
+        throw error;
+      }
+      if (ct.indexOf('json') >= 0 && !key.startsWith('/api/backup')) {
+        await offlineWrite('responses', { key, value: body, etag: response.headers.get('ETag') || '', savedAt: Date.now() });
+      }
+      S.connected = true;
+      paintNetworkStatus();
+      return body;
+    } catch (error) {
+      if (error instanceof TypeError || !navigator.onLine) {
+        S.connected = false;
+        paintNetworkStatus();
+        const cached = await offlineRead('responses', key);
+        if (cached) return cached.value;
+        throw new Error('No saved copy of this screen is available offline. Connect to the shop Wi-Fi and try again.');
+      }
+      throw error;
+    }
+  }
+
+  let payload = {};
+  try { payload = typeof options.body === 'string' ? JSON.parse(options.body) : (options.body || {}); } catch (_) {}
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+  if (!headers['X-Operation-Id']) headers['X-Operation-Id'] =
+    (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+  const resource = mutationResource(path);
+  if (resource && !headers['If-Match']) {
+    const cached = await offlineRead('responses', resource);
+    if (cached && cached.etag) headers['If-Match'] = cached.etag;
+  }
+  try {
+    const response = await fetch(path, Object.assign({}, options, { headers }));
+    const ct = response.headers.get('Content-Type') || '';
+    const body = ct.indexOf('json') >= 0 ? await response.json() : await response.text();
+    if (!response.ok) {
+      const error = new Error((body && body.error) || 'Something went wrong (' + response.status + ')');
+      error.status = response.status;
+      error.body = body;
+      throw error;
+    }
+    S.connected = true;
+    paintNetworkStatus();
+    return body;
+  } catch (error) {
+    if (!(error instanceof TypeError) && navigator.onLine) throw error;
+    S.connected = false;
+    const tempId = nextOfflineId--;
+    const entry = {
+      operationId: headers['X-Operation-Id'], method, path: key,
+      body: payload, baseEtag: headers['If-Match'] || '',
+      tempId: method === 'POST' && /^\/api\/(clients|jobs|leads|expenses|payments|spoiled)$/.test(new URL(path, location.href).pathname)
+        ? tempId : null,
+      createdAt: new Date().toISOString(), sequence: nextOfflineSequence++, state: 'pending', error: '',
+    };
+    await offlineWrite('outbox', entry);
+    S.offlineQueuedToast = true;
+    paintNetworkStatus();
+    return makeOfflineResponse(new URL(path, location.href).pathname, payload, entry.tempId);
+  }
+}
+async function paintNetworkStatus() {
+  const el = $('#networkStatus');
+  if (!el) return;
+  let pending = 0;
+  try { pending = (await offlineAll('outbox')).filter((row) => row.state === 'pending' || row.state === 'conflict').length; }
+  catch (_) {}
+  el.textContent = S.connected
+    ? (pending ? 'Connected · ' + pending + ' changes waiting' : 'Connected to the book')
+    : 'Offline · saved changes: ' + pending;
+  el.classList.toggle('offline', !S.connected || pending > 0);
+  const sync = $('#nav [data-view="sync"]');
+  if (sync) {
+    const old = sync.querySelector('span');
+    if (old) old.remove();
+    if (pending) sync.insertAdjacentHTML('beforeend', '<span>' + pending + ' waiting</span>');
+  }
+}
+function replaceTemporaryIds(value, map) {
+  if (typeof value === 'number' && value < 0 && map[String(value)]) return map[String(value)];
+  if (typeof value === 'string' && /^-\d+$/.test(value) && map[value]) return map[value];
+  if (Array.isArray(value)) return value.map((item) => replaceTemporaryIds(item, map));
+  if (value && typeof value === 'object') {
+    const copy = {};
+    Object.keys(value).forEach((key) => { copy[key] = replaceTemporaryIds(value[key], map); });
+    return copy;
+  }
+  return value;
+}
+async function syncOfflineQueue() {
+  if (syncingOfflineQueue || !navigator.onLine) return;
+  syncingOfflineQueue = true;
+  let reachedServer = true;
+  try {
+    const entries = (await offlineAll('outbox')).sort((a, b) =>
+      a.createdAt.localeCompare(b.createdAt) || a.sequence - b.sequence);
+    if (!entries.some((entry) => entry.state === 'pending')) return;
+    let syncedAny = false;
+    const idMap = {};
+    entries.filter((entry) => entry.state === 'synced' && entry.tempId && entry.serverId)
+      .forEach((entry) => { idMap[String(entry.tempId)] = entry.serverId; });
+    for (const entry of entries) {
+      if (entry.state === 'synced' || entry.state === 'discarded') continue;
+      if (entry.state === 'conflict') break;
+      let path = entry.path;
+      Object.keys(idMap).forEach((temp) => { path = path.replace('/' + temp, '/' + idMap[temp]); });
+      const headers = {
+        'Content-Type': 'application/json',
+        'X-Operation-Id': entry.operationId,
+      };
+      if (entry.baseEtag) headers['If-Match'] = entry.baseEtag;
+      let response;
+      try {
+        response = await fetch(path, {
+          method: entry.method, headers,
+          body: entry.method === 'DELETE' ? undefined : JSON.stringify(replaceTemporaryIds(entry.body, idMap)),
+        });
+      } catch (_) { reachedServer = false; break; }
+      const ct = response.headers.get('Content-Type') || '';
+      const body = ct.includes('json') ? await response.json() : await response.text();
+      if (response.status === 401) {
+        S.connected = true;
+        loginScreen('Sign in again to sync saved changes.');
+        break;
+      }
+      if (response.status >= 500) { reachedServer = false; break; }
+      if (response.status === 409 || !response.ok) {
+        entry.state = 'conflict';
+        entry.error = (body && body.error) || 'This change needs review before it can sync.';
+        entry.current = body && body.current;
+        entry.currentEtag = body && body.etag;
+        await offlineWrite('outbox', entry);
+        break;
+      }
+      entry.state = 'synced';
+      entry.serverId = body && (body.id || (body.job && body.job.id)) || null;
+      await offlineWrite('outbox', entry);
+      syncedAny = true;
+      if (entry.tempId && entry.serverId) idMap[String(entry.tempId)] = entry.serverId;
+    }
+    if (syncedAny) {
+      const db = await offlineDB();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction('responses', 'readwrite');
+        tx.objectStore('responses').clear();
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error || new Error('Could not refresh offline copies.'));
+      });
+    }
+    S.connected = reachedServer;
+    await paintNetworkStatus();
+    if (S.route && S.route.view === 'sync') await render();
+  } finally {
+    syncingOfflineQueue = false;
+  }
 }
 function toast(msg, kind) {
+  if (S.offlineQueuedToast) {
+    S.offlineQueuedToast = false;
+    msg = 'Saved on this device; waiting to sync when connected to the shop.';
+    kind = 'good';
+  }
   const t = document.createElement('div');
   t.className = 'toast ' + (kind || '');
   t.textContent = msg;
@@ -103,6 +334,7 @@ function paintNav() {
     expenses: '',
     dashboard: '',
     reports: '',
+    sync: '',
   };
   $$('#nav a').forEach((a) => {
     const view = a.dataset.view;
@@ -145,6 +377,32 @@ function emptyState(title, note, action) {
   return '<div class="empty"><b>' + esc(title) + '</b><span>' + esc(note) + '</span>' +
     (action || '') + '</div>';
 }
+function loginScreen(message) {
+  $('#topbar').innerHTML = '';
+  $('#view').innerHTML = '<div class="login-card card"><h1>Sign in to the shop book</h1>' +
+    '<p class="hint">Enter the shop password to access shared records.</p>' +
+    (message ? '<p class="err">' + esc(message) + '</p>' : '') +
+    '<form id="loginForm"><label class="field"><span>Shop password</span>' +
+    '<input name="password" type="password" autocomplete="current-password" required autofocus></label>' +
+    '<button class="btn primary">Sign in</button><div class="err" id="loginErr"></div></form></div>';
+  $('#loginForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    $('#loginErr').textContent = '';
+    try {
+      const response = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: form.password.value }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Sign-in failed');
+      location.reload();
+    } catch (error) {
+      $('#loginErr').textContent = error.message || 'Could not sign in. Reconnect to the shop server and try again.';
+    }
+  });
+}
 
 /* ------------------------------------------------------------------- router */
 function parseHash() {
@@ -165,10 +423,13 @@ function go(view, params, id) {
 async function render() {
   S.route = parseHash();
   paintNav();
+  paintNetworkStatus();
   const v = $('#view');
   const r = S.route;
   try {
     if (r.view === 'jobs') await viewJobs(r);
+    else if (r.view === 'spoiled') await viewSpoiled(r);
+    else if (r.view === 'sync') await viewSyncQueue();
     else if (r.view === 'clients') await viewClients(r);
     else if (r.view === 'accounts') await viewAccounts(r);
     else if (r.view === 'reports') await viewReports(r);
@@ -583,6 +844,8 @@ function syncMomoRow(row) {
 /* The Messages watcher runs on the server, so a payment can arrive while this screen is open.
    A repaint while the shop is typing into the panel would wipe the words, so focus stays safe. */
 let momoTick = null;
+let notifyTick = null;
+let notifyPollBusy = false;
 function watchMomoPanel() {
   if (momoTick) return;
   momoTick = setInterval(async () => {
@@ -807,8 +1070,11 @@ async function viewExpenses(r) {
                        : '<span class="hint">shop overhead</span>') + '</td>' +
       '<td>' + esc(e.method) + '</td>' +
       '<td class="num neg">' + money(e.amount) + '</td>' +
-      '<td class=num><button class="btn sm ghost" data-edit-expense="' + e.id + '">Edit</button> ' +
-      '<button class="btn sm ghost" data-del-expense="' + e.id + '" data-del-amount="' + e.amount + '">Remove</button></td></tr>').join('')
+      '<td class=num>' + (e.is_spoilage
+        ? '<a class="btn sm ghost" href="#/spoiled">Spoiled work</a>'
+        : '<button class="btn sm ghost" data-edit-expense="' + e.id + '">Edit</button> ' +
+          '<button class="btn sm ghost" data-del-expense="' + e.id + '" data-del-amount="' + e.amount + '">Remove</button>') +
+      '</td></tr>').join('')
       : '<tr><td colspan="7">' + emptyState('No expenses recorded',
         'Paper, ink, transport, rent — writing these down is what turns takings into profit.',
         '<button class="btn primary" data-action="new-expense">+ Record the first one</button>') + '</td></tr>') +
@@ -819,6 +1085,87 @@ async function viewExpenses(r) {
 function weekStart() {
   const d = new Date(Date.now() - 6 * 86400000);
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+async function viewSpoiled() {
+  const rows = await api('/api/spoiled');
+  const total = rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const quantity = rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+  topbar('Spoiled work',
+    rows.length + ' record' + (rows.length === 1 ? '' : 's') + ' · ' +
+      quantity + ' item' + (quantity === 1 ? '' : 's') + ' · cost ' + money(total),
+    '', [{ label: '+ Log spoiled work', action: 'new-spoilage', primary: true }]);
+  $('#view').innerHTML = '<div class="card"><div class="tablewrap"><table><thead><tr>' +
+    '<th>Date</th><th>Job</th><th>Client</th><th class=num>Qty</th><th>Reason</th>' +
+    '<th class=num>Cost</th><th></th></tr></thead><tbody>' +
+    (rows.length ? rows.map((row) => '<tr>' +
+      '<td class="ref">' + fdate(row.spoiled_on) + '</td>' +
+      '<td><a href="#/jobs/' + row.job_id + '">' + esc(row.ref) + '</a><div class="ref">' + esc(row.job_title) + '</div></td>' +
+      '<td>' + esc(row.client) + '</td>' +
+      '<td class=num>' + Number(row.quantity).toLocaleString('en-US') + '</td>' +
+      '<td>' + esc(row.reason) + '</td>' +
+      '<td class="num neg">' + money(row.amount) + '</td>' +
+      '<td class=num><button class="btn sm ghost" data-edit-spoilage="' + row.id + '">Edit</button> ' +
+        '<button class="btn sm ghost" data-del-spoilage="' + row.id + '" data-del-quantity="' + row.quantity +
+        '" data-del-job="' + esc(row.ref) + '">Remove</button></td></tr>').join('')
+      : '<tr><td colspan="7">' + emptyState('No spoiled work recorded',
+        'Log spoiled items against a job. Any cost you enter is added to that job’s costs and reduces its profit.',
+        '<button class="btn primary" data-action="new-spoilage">+ Log spoiled work</button>') + '</td></tr>') +
+    '</tbody></table></div></div>' +
+    '<p class="hint">Spoilage costs are recorded as job expenses and included in each job’s profit. Review the reason and quantity here.</p>';
+  restoreFocus();
+}
+function spoilageForm(record, jobs) {
+  const row = record || {};
+  openModal(modalHeader(record ? 'Edit spoiled work' : 'Log spoiled work',
+    'Record the affected job, quantity, reason and extra cost.') +
+    '<form id="spoilageForm" data-spoilage-id="' + (record ? record.id : '') + '"><div class="f-grid">' +
+    '<label class="field wide"><span>Job *</span><select name="job_id" required>' +
+    '<option value="">Choose a job</option>' +
+    jobs.map((j) => '<option value="' + j.id + '"' + (String(row.job_id) === String(j.id) ? ' selected' : '') + '>' +
+      esc(j.ref) + ' · ' + esc(j.client) + ' · ' + esc(j.title) + '</option>').join('') +
+    '</select></label>' +
+    '<label class="field"><span>Quantity spoiled *</span><input name="quantity" type="number" min="1" step="1" required value="' +
+      esc(row.quantity || '') + '" placeholder="e.g. 25"></label>' +
+    '<label class="field"><span>Extra cost *</span><input name="amount" type="number" min="0" step="0.01" required value="' +
+      esc(row.amount === undefined ? '' : n2(row.amount)) + '" placeholder="0.00"></label>' +
+    '<label class="field"><span>Date spoiled</span><input name="spoiled_on" type="date" value="' +
+      esc(day10(row.spoiled_on || todayISO())) + '"></label>' +
+    '<label class="field wide"><span>Reason *</span><textarea name="reason" maxlength="500" rows="3" required placeholder="Describe what went wrong">' +
+      esc(row.reason || '') + '</textarea></label>' +
+    '</div><p class="hint">The cost is included in the selected job’s expenses and profit calculation. Enter 0 if no extra cost was incurred.</p>' +
+    '<div class="err" id="spoilageErr"></div><div class="modal-foot"><span class="spacer"></span>' +
+    '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
+    '<button class="btn primary">' + (record ? 'Save changes' : 'Record spoilage') + '</button></div></form>');
+}
+async function viewSyncQueue() {
+  const rows = (await offlineAll('outbox')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const pending = rows.filter((row) => row.state === 'pending');
+  const conflicts = rows.filter((row) => row.state === 'conflict');
+  topbar('Pending sync',
+    pending.length + ' waiting · ' + conflicts.length + ' need review · ' +
+      rows.filter((row) => row.state === 'synced').length + ' synced on this device',
+    '', [{ label: 'Sync now', action: 'sync-now', primary: true }]);
+  $('#view').innerHTML = '<p class="hint">Changes saved while disconnected stay on this device until it can reach the shop book. ' +
+    'Reconnect to the shop Wi-Fi to sync. The screens show the last saved copy until queued changes have synced.</p>' +
+    (rows.length ? rows.map((row) => {
+      const conflict = row.state === 'conflict';
+      const synced = row.state === 'synced';
+      return '<div class="card sync-entry"><h3>' + esc(row.method + ' ' + row.path) +
+        '<span class="spacer"></span>' + (conflict ? '<span class="pill s-Cancelled">Needs review</span>' :
+          synced ? '<span class="pill s-Delivered">Synced</span>' : '<span class="pill s-Pending">Waiting</span>') +
+        '</h3><div class="card-b"><p class="ref">' + esc(fdatetime(row.createdAt)) + '</p>' +
+        '<details><summary>Your saved change</summary><pre>' + esc(JSON.stringify(row.body, null, 2)) + '</pre></details>' +
+        (conflict ? '<p class="hint">' + esc(row.error) + '</p>' +
+          (row.current ? '<details open><summary>Current shared record</summary><pre>' +
+            esc(JSON.stringify(row.current, null, 2)) + '</pre></details>' : '') +
+          '<div class="row-actions">' +
+            (row.currentEtag ? '<button class="btn sm primary" data-sync-keep="' + esc(row.operationId) + '">Apply my saved change</button>' : '') +
+            '<button class="btn sm" data-sync-discard="' + esc(row.operationId) + '">Keep shared version / discard mine</button>' +
+          '</div>' : '') +
+        '</div></div>';
+    }).join('') : emptyState('Nothing waiting to sync',
+      'This device has no offline changes. It will keep a local copy of screens you have opened for offline viewing.'));
+  restoreFocus();
 }
 function expenseForm(expense, presetJob, jobs) {
   const e = expense || {};
@@ -1069,18 +1416,14 @@ function bucketLabel(bucket, period) {
 
 /* ------------------------------------------------------------------ drawers */
 function closeDrawer() {
+  if (notifyTick) { clearInterval(notifyTick); notifyTick = null; }
   $('#drawer').hidden = true;
   $('#drawerBody').innerHTML = '';
   if (S.route && S.route.id) {
     history.replaceState(null, '', '#/' + S.route.view + (S.route.params.toString() ? '?' + S.route.params.toString() : ''));
   }
 }
-/* ------------------------------------------------------------------ client messages
-   The words are written by the book (server.py) the moment a job is booked or moved. Here we
-   only show them and hand them over: one press opens WhatsApp or Mail with the message already
-   typed, and the shop presses send there. In the native window the handoff goes to the Mac
-   through the `external` message handler; in a browser tab WhatsApp opens in a new tab and a
-   mailto: link is left in place so the page is not navigated away from. */
+/* ------------------------------------------------------------------ client messages */
 function openExternal(url) {
   const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.external;
   if (handler) {
@@ -1097,19 +1440,38 @@ function notifyCard(job, n) {
   const newest = n.messages.reduce((a, b) => (b.state === 'Queued' && b.id > a ? b.id : a), 0);
   const rows = n.messages.map((m) => {
     const waiting = m.state === 'Queued';
-    // Only the newest thing still to send is left open; a job with a week of history stays short.
+    const automatic = !!m.auto_send;
+    const label = automatic
+      ? (m.delivery_state === 'Sent' ? 'Sent automatically'
+        : m.delivery_state === 'Sending' ? 'Sending automatically'
+          : m.delivery_state === 'Failed' ? 'Delivery failed'
+            : m.delivery_state === 'Cancelled' ? 'Cancelled'
+              : 'Automatic · queued')
+      : m.state;
+    const details = automatic
+      ? (m.delivery_error ? '<p class="bad delivery-error">' + esc(m.delivery_error) + '</p>'
+        : m.delivery_state === 'Pending' && m.delivery_attempts
+          ? '<p class="hint delivery-error">Retry scheduled after attempt ' + m.delivery_attempts + '.</p>'
+          : m.delivery_state === 'Cancelled'
+            ? '<p class="hint delivery-error">The client withdrew permission; this message was not sent.</p>'
+            : '<p class="hint">Sent by the shop server when the provider is available.</p>')
+      : '';
     const verb = m.channel === 'WhatsApp' ? 'Open in WhatsApp' : 'Open in Mail';
     return '<details class="msg' + (waiting ? ' waiting' : '') + '"' + (m.id === newest ? ' open' : '') + '>' +
-      '<summary><span class="pill n-' + esc(m.state) + '">' + esc(m.state) + '</span>' +
+      '<summary><span class="pill n-' + esc(automatic ? m.delivery_state : m.state) + '">' + esc(label) + '</span>' +
       '<b>' + esc(m.event) + '</b><span class="m-chan">' + esc(m.channel) + ' &middot; ' + esc(m.to_address) + '</span>' +
       '<span class="spacer"></span><time>' + fdatetime(m.updated_at) + '</time></summary>' +
       '<p class="m-body">' + esc(m.body) + '</p>' +
+      details +
       '<div class="m-act">' +
-      '<button class="btn sm' + (m.channel === 'WhatsApp' ? ' primary' : '') + '" data-notify-open="' + m.id + '">' + verb + '</button>' +
-      '<button class="btn sm ghost" data-notify-copy="' + m.id + '">Copy</button>' +
-      (m.state === 'Sent'
-        ? '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Queued">Back to queued</button>'
-        : '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Sent">Mark as sent</button>') +
+      (automatic
+        ? (m.delivery_state === 'Failed'
+          ? '<button class="btn sm primary" data-notify-retry="' + m.id + '">Retry now</button>' : '')
+        : '<button class="btn sm' + (m.channel === 'WhatsApp' ? ' primary' : '') + '" data-notify-open="' + m.id + '">' + verb + '</button>' +
+          '<button class="btn sm ghost" data-notify-copy="' + m.id + '">Copy</button>' +
+          (m.state === 'Sent'
+            ? '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Queued">Back to queued</button>'
+            : '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Sent">Mark as sent</button>')) +
       '<span class="spacer"></span>' +
       '<button class="btn sm ghost danger" data-notify-del="' + m.id + '">Remove</button>' +
       '</div></details>';
@@ -1120,15 +1482,19 @@ function notifyCard(job, n) {
   const canSend = n.whatsapp_to || n.email_to;
   return '<div class="section-h">Tell the client' +
     (n.to_send ? ' <span class="pill n-Queued">' + pluralise(n.to_send, 'message') + ' to send</span>' : '') +
-    '</div>' +
-    '<p class="hint" style="margin:8px 0 0">Written from this job\u2019s own details. One press opens ' +
-    'WhatsApp or Mail with the words ready and you press send \u2014 the app never sends on its own.</p>' +
+    '</div><p class="hint" style="margin:8px 0 0">Pending, Printing and Ready updates are sent automatically ' +
+    'to channels the client agreed to use. Other messages can still be opened as drafts for staff to send.</p>' +
     (rows ? '<div class="msgs">' + rows + '</div>' : '<p class="hint" style="margin-top:8px">Nothing has been written for this job yet.</p>') +
     (canSend
       ? '<div class="section-h sub">Write it again, or send a stage you skipped</div>' + again
       : '<p class="bad" style="margin:10px 0 0">There is no WhatsApp number or email on file for ' +
         esc(n.client) + ', so there is nothing to send. ' +
         '<a href="#/clients/' + job.client_id + '">Add their contact details</a> and this fills itself in.</p>') +
+    (n.not_consented && n.not_consented.length
+      ? '<p class="hint" style="margin-top:8px">Automatic updates were skipped on ' +
+        n.not_consented.map(esc).join(' and ') +
+        ' because permission is not recorded. Edit the client record to record consent.</p>'
+      : '') +
     (n.missing.length && canSend
       ? '<p class="hint" style="margin-top:8px">' + n.missing.map((c) =>
           'No ' + c.toLowerCase() + ' on file for ' + esc(n.client) + '.').join(' ') + '</p>'
@@ -1141,9 +1507,41 @@ function paintNotify(id) {
   return api('/api/jobs/' + id + '/notifications')
     .then((n) => {
       box.innerHTML = notifyCard(S.notify.job || { id: id, client_id: 0 }, n);
+      S.notify.signature = notificationSignature(n);
       return refreshChrome();
     })
     .catch((e) => { fail(e); });
+}
+
+function notificationSignature(n) {
+  return (n.messages || []).map((m) =>
+    [m.id, m.state, m.delivery_state, m.delivery_attempts, m.delivery_error, m.updated_at].join(':')
+  ).join('|');
+}
+function watchNotificationDelivery() {
+  if (notifyTick) clearInterval(notifyTick);
+  notifyTick = setInterval(async () => {
+    if ($('#drawer').hidden || !S.notify.job) {
+      clearInterval(notifyTick); notifyTick = null; return;
+    }
+    if (notifyPollBusy) return;
+    notifyPollBusy = true;
+    try {
+      const job = S.notify.job;
+      const n = await api('/api/jobs/' + job.id + '/notifications');
+      const signature = notificationSignature(n);
+      if (signature !== S.notify.signature) {
+        const box = document.getElementById('notifyCard');
+        if (box) box.innerHTML = notifyCard(job, n);
+        S.notify.signature = signature;
+        await refreshChrome();
+      }
+    } catch (error) {
+      clearInterval(notifyTick); notifyTick = null; fail(error);
+    } finally {
+      notifyPollBusy = false;
+    }
+  }, 10000);
 }
 
 async function openJobDrawer(id) {
@@ -1154,6 +1552,7 @@ async function openJobDrawer(id) {
     notes = both[1];
   } catch (e) { return fail(e); }
   S.notify.job = { id: job.id, client_id: job.client_id };
+  S.notify.signature = notificationSignature(notes);
   const paid = job.balance <= 0.005;
   const isQuote = job.kind === 'Quote';
   const items = job.items || [];
@@ -1243,8 +1642,10 @@ async function openJobDrawer(id) {
     '<button class="btn">Save note</button></form></div>';
   $('#drawer').hidden = false;
   $('#drawerBody').scrollTop = 0;
+  watchNotificationDelivery();
 }
 async function openClientDrawer(id) {
+  if (notifyTick) { clearInterval(notifyTick); notifyTick = null; }
   let c;
   try { c = await api('/api/clients/' + id); } catch (e) { return fail(e); }
   const openJobs = c.jobs.filter((j) => j.kind !== 'Quote' &&
@@ -1268,6 +1669,8 @@ async function openClientDrawer(id) {
     '<div><span>Phone</span><b>' + (c.phone ? '<a href="tel:' + esc(c.phone) + '">' + esc(c.phone) + '</a>' : '—') + '</b></div>' +
     '<div><span>WhatsApp</span><b>' + esc(c.whatsapp || '—') + '</b></div>' +
     '<div><span>Email</span><b>' + (c.email ? '<a href="mailto:' + esc(c.email) + '">' + esc(c.email) + '</a>' : '—') + '</b></div>' +
+    '<div><span>WhatsApp updates</span><b>' + (c.whatsapp_updates ? 'Agreed' : 'Not opted in') + '</b></div>' +
+    '<div><span>Email updates</span><b>' + (c.email_updates ? 'Agreed' : 'Not opted in') + '</b></div>' +
     '<div><span>Address</span><b>' + esc(c.address || '—') + '</b></div>' +
     '<div><span>Open jobs</span><b>' + openJobs + ' of ' + c.jobs.filter((j) => j.kind !== 'Quote').length + '</b></div>' +
     (c.open_quotes ? '<div><span>Quotes waiting</span><b>' + c.open_quotes + '</b></div>' : '') +
@@ -1415,7 +1818,7 @@ function depositBox() {
     '</div>';
 }
 function clientPicker(selectedId) {
-  return '<label class="field wide"><span>Client</span>' +
+  return '<div class="picker-field wide"><span>Client</span>' +
     '<div class="picker"><input id="clientFind" placeholder="Type to find the client (name or phone)" autocomplete="off">' +
     '<select name="client_id" id="clientSelect" size="4">' + clientOptions(selectedId) + '</select>' +
     '<div class="row-actions"><button type="button" class="btn sm" data-action="toggle-newclient">+ Register a new client</button>' +
@@ -1423,9 +1826,13 @@ function clientPicker(selectedId) {
     '<div id="newClientBox" hidden class="f-grid">' +
     '<label class="field wide"><span>New client name *</span><input name="new_name" maxlength="160" placeholder="Person or business name"></label>' +
     '<label class="field"><span>Phone</span><input name="new_phone" maxlength="40" placeholder="024…"></label>' +
+    '<label class="field"><span>WhatsApp</span><input name="new_whatsapp" maxlength="40" placeholder="024…"></label>' +
+    '<label class="field"><span>Email</span><input name="new_email" type="email" maxlength="160" placeholder="name@example.com"></label>' +
     '<label class="field"><span>Type</span><select name="new_kind">' + S.boot.kinds.map((k) => '<option>' + esc(k) + '</option>').join('') + '</select></label>' +
     '<label class="field wide"><span>Area / address</span><input name="new_address" maxlength="400" placeholder="Neighbourhood, city"></label>' +
-    '</div></div></label>';
+    '<label class="consent wide"><input type="checkbox" name="new_whatsapp_updates"><span>Client agreed to receive job updates on WhatsApp</span></label>' +
+    '<label class="consent wide"><input type="checkbox" name="new_email_updates"><span>Client agreed to receive job updates by email</span></label>' +
+    '</div></div></div>';
 }
 function clientOptions(selectedId, filter) {
   const f = (filter || '').toLowerCase();
@@ -1436,12 +1843,14 @@ function clientOptions(selectedId, filter) {
 }
 function clientForm(client) {
   const c = client || {};
-  openModal(modalHeader(client ? 'Edit client' : 'New client', 'Keep the details you can actually reach them on.') +
+  openModal(modalHeader(client ? 'Edit client' : 'New client', 'Save contact details and record the client’s permission for job updates.') +
     '<form id="clientForm" data-client-id="' + (client ? client.id : '') + '"><div class="f-grid">' +
     '<label class="field wide"><span>Name *</span><input name="name" required maxlength="160" value="' + esc(c.name || '') + '" placeholder="e.g. Kwame Mensah / Bethel Chapel"></label>' +
     '<label class="field"><span>Phone</span><input name="phone" maxlength="40" value="' + esc(c.phone || '') + '" placeholder="0244 000 000"></label>' +
     '<label class="field"><span>WhatsApp</span><input name="whatsapp" maxlength="40" value="' + esc(c.whatsapp || '') + '"></label>' +
     '<label class="field"><span>Email</span><input name="email" type="email" maxlength="160" value="' + esc(c.email || '') + '"></label>' +
+    '<label class="consent wide"><input type="checkbox" name="whatsapp_updates"' + (c.whatsapp_updates ? ' checked' : '') + '><span>Client agreed to receive job updates on WhatsApp</span></label>' +
+    '<label class="consent wide"><input type="checkbox" name="email_updates"' + (c.email_updates ? ' checked' : '') + '><span>Client agreed to receive job updates by email</span></label>' +
     '<label class="field"><span>Type</span><select name="kind">' + S.boot.kinds.map((k) =>
       '<option' + ((c.kind || 'Individual') === k ? ' selected' : '') + '>' + esc(k) + '</option>').join('') + '</select></label>' +
     '<label class="field wide"><span>Address</span><input name="address" maxlength="400" value="' + esc(c.address || '') + '" placeholder="Area, street"></label>' +
@@ -1610,7 +2019,9 @@ function bindModal() {
         let clientId = f.client_id.value;
         if (!clientId && f.new_name && f.new_name.value.trim()) {
           const created = await api('/api/clients', { method: 'POST', body: JSON.stringify({
-            name: f.new_name.value, phone: f.new_phone.value, whatsapp: f.new_phone.value,
+            name: f.new_name.value, phone: f.new_phone.value,
+            whatsapp: f.new_whatsapp.value || f.new_phone.value, email: f.new_email.value,
+            whatsapp_updates: f.new_whatsapp_updates.checked, email_updates: f.new_email_updates.checked,
             kind: f.new_kind.value, address: f.new_address.value }) });
           clientId = created.id;
           S.clients.push(created);
@@ -1629,7 +2040,8 @@ function bindModal() {
         }
         payload.client_id = clientId;
         if (id) {
-          await api('/api/jobs/' + id, { method: 'PUT', body: JSON.stringify(payload) });
+          const saved = await api('/api/jobs/' + id, { method: 'PUT', body: JSON.stringify(payload) });
+          if (saved.offlineQueued) { closeModal(); toast('Job changes saved on this device; waiting to sync.', 'good'); return; }
           closeModal(); toast('Job updated', 'good'); await render(); openJobDrawer(Number(id));
           return;
         }
@@ -1639,6 +2051,10 @@ function bindModal() {
             amount: f.deposit.value, method: f.method.value, kind: 'Deposit' }) });
         }
         closeModal();
+        if (job.offlineQueued) {
+          toast('Job saved on this device; it will appear in Print jobs after sync.', 'good');
+          return;
+        }
         toast((job.kind === 'Quote' ? 'Quoted ' : 'Booked ') + job.ref + ' — ' + money(job.total), 'good');
         await render(); go('jobs', { kind: job.kind }, job.id);
       } catch (err) { $('#jobErr').textContent = err.message; }
@@ -1660,6 +2076,7 @@ function bindModal() {
     try {
       const saved = await api('/api/payments', { method: 'POST', body: JSON.stringify(payload) });
       closeModal();
+      if (saved.offlineQueued) { toast('Payment saved on this device; waiting to sync.', 'good'); return; }
       toast('Received ' + money(saved.amount) + ' from ' + saved.client, 'good');
       await afterMutation();
       if (saved.job_id) openJobDrawer(saved.job_id);
@@ -1671,13 +2088,17 @@ function bindModal() {
     const f = e.target;
     const id = f.dataset.clientId;
     const payload = { name: f.name.value, phone: f.phone.value, whatsapp: f.whatsapp.value,
-      email: f.email.value, kind: f.kind.value, address: f.address.value, notes: f.notes.value };
+      email: f.email.value, whatsapp_updates: f.whatsapp_updates.checked,
+      email_updates: f.email_updates.checked, kind: f.kind.value,
+      address: f.address.value, notes: f.notes.value };
     $('#clientErr').textContent = '';
     try {
       const saved = id ? await api('/api/clients/' + id, { method: 'PUT', body: JSON.stringify(payload) })
                       : await api('/api/clients', { method: 'POST', body: JSON.stringify(payload) });
       S.clients = [];
-      closeModal(); toast(id ? 'Client updated' : 'Client ' + saved.name + ' added', 'good');
+      closeModal();
+      if (saved.offlineQueued) { toast('Client saved on this device; waiting to sync.', 'good'); return; }
+      toast(id ? 'Client updated' : 'Client ' + saved.name + ' added', 'good');
       await refreshChrome();
       await render();
       if (!id) go(S.route.view, {}, saved.id);
@@ -1696,12 +2117,34 @@ function bindModal() {
     };
     $('#expenseErr').textContent = '';
     try {
-      if (id) await api('/api/expenses/' + id, { method: 'PUT', body: JSON.stringify(payload) });
-      else await api('/api/expenses', { method: 'POST', body: JSON.stringify(payload) });
+      const saved = id
+        ? await api('/api/expenses/' + id, { method: 'PUT', body: JSON.stringify(payload) })
+        : await api('/api/expenses', { method: 'POST', body: JSON.stringify(payload) });
+      if (saved.offlineQueued) { closeModal(); toast('Expense saved on this device; waiting to sync.', 'good'); return; }
       closeModal(); toast(id ? 'Expense updated' : 'Money out recorded', 'good');
       await afterMutation(true);
       if (payload.job_id) openJobDrawer(Number(payload.job_id));
     } catch (err) { $('#expenseErr').textContent = err.message; }
+  });
+  const spoilageFormEl = card.querySelector('#spoilageForm');
+  if (spoilageFormEl) spoilageFormEl.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const id = f.dataset.spoilageId;
+    const payload = {
+      job_id: f.job_id.value, quantity: f.quantity.value, amount: f.amount.value,
+      spoiled_on: f.spoiled_on.value, reason: f.reason.value,
+    };
+    $('#spoilageErr').textContent = '';
+    try {
+      const saved = id
+        ? await api('/api/spoiled/' + id, { method: 'PUT', body: JSON.stringify(payload) })
+        : await api('/api/spoiled', { method: 'POST', body: JSON.stringify(payload) });
+      if (saved.offlineQueued) { closeModal(); toast('Spoilage record saved on this device; waiting to sync.', 'good'); return; }
+      closeModal(); toast(id ? 'Spoilage record updated' : 'Spoilage recorded', 'good');
+      await refreshChrome();
+      await render();
+    } catch (err) { $('#spoilageErr').textContent = err.message; }
   });
   const leadFormEl = card.querySelector('#leadForm');
   if (leadFormEl) leadFormEl.addEventListener('submit', async (e) => {
@@ -1717,7 +2160,9 @@ function bindModal() {
     try {
       const saved = id ? await api('/api/leads/' + id, { method: 'PUT', body: JSON.stringify(payload) })
                        : await api('/api/leads', { method: 'POST', body: JSON.stringify(payload) });
-      closeModal(); toast(id ? 'Enquiry updated' : 'Enquiry written down', 'good');
+      closeModal();
+      if (saved.offlineQueued) { toast('Enquiry saved on this device; waiting to sync.', 'good'); return; }
+      toast(id ? 'Enquiry updated' : 'Enquiry written down', 'good');
       const keep = S.route.params.toString();
       const target = '#/leads/' + saved.id + (keep ? '?' + keep : '');
       if (location.hash === target) { await refreshChrome(); await render(); }
@@ -1747,6 +2192,7 @@ function bindModal() {
         const res = await api('/api/leads/' + f.dataset.leadId + '/convert',
           { method: 'POST', body: JSON.stringify(payload) });
         closeModal();
+        if (res.offlineQueued) { toast('Booking saved on this device; waiting to sync.', 'good'); return; }
         S.clients = [];
         toast('Booked ' + res.job.ref + ' for ' + res.lead.name, 'good');
         await afterMutation(true);
@@ -1763,6 +2209,32 @@ async function afterMutation(keepDrawer) {
   if (!keepDrawer) closeDrawer();
 }
 const ACTIONS = {
+  async 'sync-now'() { await syncOfflineQueue(); },
+  async 'sync-keep'(el) {
+    const row = await offlineRead('outbox', el.dataset.syncKeep);
+    if (!row || row.state !== 'conflict' || !row.currentEtag) return;
+    row.baseEtag = row.currentEtag;
+    row.operationId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+    row.state = 'pending';
+    row.error = '';
+    delete row.current;
+    delete row.currentEtag;
+    await offlineWrite('outbox', row);
+    toast('Saved change queued for review-resolved sync', 'good');
+    await paintNetworkStatus();
+    if (navigator.onLine) await syncOfflineQueue();
+    else await render();
+  },
+  async 'sync-discard'(el) {
+    const row = await offlineRead('outbox', el.dataset.syncDiscard);
+    if (!row || !confirm('Discard this saved local change? The shared version will remain.')) return;
+    row.state = 'discarded';
+    await offlineWrite('outbox', row);
+    toast('Local change discarded');
+    await paintNetworkStatus();
+    await render();
+  },
   async 'new-job'(el) { if (!S.clients.length) await loadClients(); jobForm(null, el.dataset.client); },
   async 'new-quote'(el) { if (!S.clients.length) await loadClients(); jobForm(null, el.dataset.client, true); },
   async 'new-client'() { clientForm(null); },
@@ -1861,6 +2333,15 @@ const ACTIONS = {
       if (m) paintNotify(m.job_id);
     } catch (err) { fail(err); }
   },
+  async 'notify-retry'(el) {
+    const id = Number(el.dataset.notifyRetry);
+    try {
+      await api('/api/notifications/' + id + '/retry', { method: 'POST', body: '{}' });
+      toast('Delivery retry queued', 'good');
+      const message = S.notify.byId[id];
+      if (message) await paintNotify(message.job_id);
+    } catch (err) { fail(err); }
+  },
   async 'notify-copy'(el) {
     const m = S.notify.byId[Number(el.dataset.notifyCopy)];
     if (!m) return;
@@ -1888,7 +2369,9 @@ const ACTIONS = {
         'Anything already paid on the quote is kept.')) return;
       const saved = await api('/api/jobs/' + el.dataset.convertJob + '/convert',
         { method: 'POST', body: JSON.stringify({ status: 'Pending' }) });
-      closeModal(); toast('Booked as ' + saved.ref, 'good');
+      closeModal();
+      if (saved.offlineQueued) { toast('Quote booking saved on this device; waiting to sync.', 'good'); return; }
+      toast('Booked as ' + saved.ref, 'good');
       await afterMutation(true);
       go('jobs', { kind: 'Job' }, saved.id);
     } catch (err) { fail(err); }
@@ -1896,6 +2379,25 @@ const ACTIONS = {
   async 'new-expense'(el) {
     const jobs = await api('/api/jobs?status=open&sort=due');
     expenseForm(null, el.dataset.job, jobs);
+  },
+  async 'new-spoilage'() {
+    const jobs = await api('/api/jobs?status=all&kind=Job&sort=created');
+    spoilageForm(null, jobs);
+  },
+  async 'edit-spoilage'(el) {
+    const [row, jobs] = await Promise.all([
+      api('/api/spoiled/' + el.dataset.editSpoilage),
+      api('/api/jobs?status=all&kind=Job&sort=created'),
+    ]);
+    spoilageForm(row, jobs);
+  },
+  async 'del-spoilage'(el) {
+    if (!confirm('Remove the spoiled-work record for ' + el.dataset.delQuantity + ' items on ' +
+        el.dataset.delJob + '? Its spoilage cost will also be removed from that job.')) return;
+    try {
+      await api('/api/spoiled/' + el.dataset.delSpoilage, { method: 'DELETE' });
+      toast('Spoilage record removed'); await refreshChrome(); await render();
+    } catch (err) { fail(err); }
   },
   async 'job-expense'(el) {
     const jobs = await api('/api/jobs?status=open&sort=due');
@@ -2117,6 +2619,15 @@ document.addEventListener('keydown', (e) => {
   }
 });
 window.addEventListener('hashchange', () => { render(); });
+window.addEventListener('online', () => {
+  S.connected = true;
+  paintNetworkStatus();
+  syncOfflineQueue().then(() => render()).catch(fail);
+});
+window.addEventListener('offline', () => {
+  S.connected = false;
+  paintNetworkStatus();
+});
 
 /* The native menu bar has no buttons of its own, so it asks for these by name.
    If the current screen happens to show the matching button, it is handed over
@@ -2134,12 +2645,17 @@ window.chriphics = {
 (async function start() {
   paintTheme(themeMode());
   try {
+    await paintNetworkStatus();
+    const session = await api('/api/session');
+    if (session.required && !session.authenticated) { loginScreen(); return; }
     await boot();
     await refreshChrome();
+    if (navigator.onLine) await syncOfflineQueue();
     if (!location.hash) location.hash = '#/dashboard';
     await render();
   } catch (err) {
-    $('#view').innerHTML = emptyState('The app cannot reach its database', err.message +
-      ' — is the CRISPprint window still open?');
+    if (err.status === 401) loginScreen(err.message);
+    else $('#view').innerHTML = emptyState('The app cannot reach its database', err.message +
+      ' — connect to the shop Wi-Fi to sync; saved changes remain on this device.');
   }
 })();

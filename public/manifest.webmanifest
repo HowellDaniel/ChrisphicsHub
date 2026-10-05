@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "CRISPprint Ghana — Records & Accounts",
+  "short_name": "CRISPprint",
+  "description": "Printing jobs, clients and accounts for CRISPprint Ghana.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#1c1517",
+  "theme_color": "#1c1517",
+  "icons": [
+    {
+      "src": "/img/mark.png",
+      "sizes": "400x400",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
