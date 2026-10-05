@@ -61,6 +61,10 @@ const dueLabel = (job) => {
 const pill = (status) => '<span class="pill s-' + esc(status) + '">' + esc(status) + '</span>';
 const prio = (p) => (p === 'Urgent' ? ' <span class="pill p-Urgent">Urgent</span>' : '');
 const kindTag = (j) => (j.kind === 'Quote' ? ' <span class="pill k-Quote">Quote</span>' : '');
+/* Billed work whose balance has come down to nothing. Overpayment leaves a negative balance,
+   which is credit rather than a settlement, so it does not count as paid in full here. */
+const isSettled = (j) => (j.kind !== 'Quote' && j.status !== 'Cancelled' &&
+  Number(j.total) > 0 && Number(j.balance) >= -0.005 && Number(j.balance) <= 0.005);
 // A job with item lines is priced by its lines, so the header quantity no longer means much.
 const linesLabel = (j) => (j.item_count
   ? j.item_count + ' item line' + (j.item_count === 1 ? '' : 's')
@@ -869,7 +873,7 @@ async function viewJobs(r) {
   const rows = await api('/api/jobs?' + qs({
     status: p.get('status') || 'open', kind: kind, category: p.get('category'), q: p.get('q'),
     sort: p.get('sort'), from: p.get('from'), to: p.get('to'), overdue: p.get('overdue'),
-    debtors: p.get('debtors'), client: p.get('client'),
+    debtors: p.get('debtors'), client: p.get('client'), paid: p.get('paid'),
   }));
   const quoted = kind === 'Quote';
   const total = rows.reduce((a, j) => a + j.total, 0);
@@ -893,6 +897,9 @@ async function viewJobs(r) {
       { v: 'Ready', label: 'Ready', count: S.boot.counts.Ready || 0 },
       { v: 'Delivered', label: 'Delivered', count: S.boot.counts.Delivered || 0 },
       { v: 'Cancelled', label: 'Cancelled', count: S.boot.counts.Cancelled || 0 }]},
+    /* Quotes are an ask, not a bill, so "paid in full" means nothing on that tab. */
+    ...(quoted ? [] : [{ type: 'select', key: 'paid', options: [
+      ['', 'Money: any'], ['due', 'Still owing'], ['full', 'Paid in full']] }]),
     { type: 'search', key: 'q', placeholder: 'Search job, item, client or phone' },
     { type: 'select', key: 'category', options: [['', 'Any service']].concat(S.boot.categories.map((c) => [c, c])) },
     { type: 'select', key: 'sort', options: [['created', 'Newest first'], ['due', quoted ? 'Expiring soonest' : 'Due soonest'], ['balance', 'Biggest balance'], ['value', 'Highest value'], ['profit', 'Best profit'], ['client', 'Client A–Z']] },
@@ -916,7 +923,7 @@ async function viewJobs(r) {
         '<td class=num' + (j.balance > 0.005 ? ' balance neg' : ' pos') + '">' + money(j.balance) + '</td>' +
         '<td class="num' + (j.profit < 0 ? ' neg' : j.cost > 0 ? '' : ' muted') + '" title="' +
           (j.cost > 0 ? '' : 'Nothing has been costed on this job yet') + '">' + money(j.profit) + '</td>') +
-      '<td>' + pill(j.status) + '</td>' +
+      '<td>' + pill(j.status) + (isSettled(j) ? ' <span class="pill k-paid">Paid in full</span>' : '') + '</td>' +
       '<td>' + dateLabel(j) + '</td></tr>').join('')
       : '<tr><td colspan="8">' + emptyState(quoted ? 'No quotes out there' : 'No jobs match this filter',
         quoted ? 'Send a price before the client commits — a quote can be booked as a job in one click.'
@@ -1115,14 +1122,15 @@ async function viewSpoiled() {
     '<p class="hint">Spoilage costs are recorded as job expenses and included in each job’s profit. Review the reason and quantity here.</p>';
   restoreFocus();
 }
-function spoilageForm(record, jobs) {
+function spoilageForm(record, jobs, jobId) {
   const row = record || {};
+  const chosen = record ? record.job_id : jobId;
   openModal(modalHeader(record ? 'Edit spoiled work' : 'Log spoiled work',
     'Record the affected job, quantity, reason and extra cost.') +
     '<form id="spoilageForm" data-spoilage-id="' + (record ? record.id : '') + '"><div class="f-grid">' +
     '<label class="field wide"><span>Job *</span><select name="job_id" required>' +
     '<option value="">Choose a job</option>' +
-    jobs.map((j) => '<option value="' + j.id + '"' + (String(row.job_id) === String(j.id) ? ' selected' : '') + '>' +
+    jobs.map((j) => '<option value="' + j.id + '"' + (String(chosen) === String(j.id) ? ' selected' : '') + '>' +
       esc(j.ref) + ' · ' + esc(j.client) + ' · ' + esc(j.title) + '</option>').join('') +
     '</select></label>' +
     '<label class="field"><span>Quantity spoiled *</span><input name="quantity" type="number" min="1" step="1" required value="' +
@@ -1301,6 +1309,15 @@ async function viewAccounts(r) {
         '" data-pay-amount="' + j.balance + '">Get ' + compact(j.balance) + '</button></td></tr>').join('')
         : '<tr><td colspan="8" class="hint">No outstanding balances. Everything booked has been paid.</td></tr>',
       ['Job', 'Client', 'Status', 'Due', 'Total', 'Paid', 'Balance', '']) +
+    cardTable('Paid in full — settled jobs', '',
+      d.settled.length ? d.settled.map((j) => '<tr data-open="jobs/' + j.id + '">' +
+        '<td><span class="strong">' + esc(j.title) + '</span><div class="ref">' + esc(j.ref) + ' · ' + esc(j.category) + '</div></td>' +
+        '<td>' + esc(j.client) + (j.phone ? '<div class="ref">' + esc(j.phone) + '</div>' : '') + '</td>' +
+        '<td>' + pill(j.status) + ' <span class="pill k-paid">Paid in full</span></td>' +
+        '<td class=num>' + money(j.total) + '</td><td class="num pos">' + money(j.paid) + '</td>' +
+        '<td class="ref">' + (j.settled_on ? fdate(j.settled_on) : '—') + '</td></tr>').join('')
+        : '<tr><td colspan="6" class="hint">Nothing has been cleared in full yet. Take the whole balance on a job and it lands here.</td></tr>',
+      ['Job', 'Client', 'Money', 'Billed', 'Collected', 'Cleared on']) +
     cardTable('Payment ledger', '<button class="btn sm ghost" data-export="payments">Export CSV</button>',
       d.ledger.rows.length ? d.ledger.rows.map((p) => '<tr>' +
         '<td class="ref">' + fdate(p.paid_at) + '<div>' + day10(p.paid_at).slice(8) + '/' + day10(p.paid_at).slice(5, 7) + '</div></td>' +
@@ -1554,15 +1571,19 @@ async function openJobDrawer(id) {
   } catch (e) { return fail(e); }
   S.notify.job = { id: job.id, client_id: job.client_id };
   S.notify.signature = notificationSignature(notes);
-  const paid = job.balance <= 0.005;
   const isQuote = job.kind === 'Quote';
+  const paid = job.balance <= 0.005;
+  const settled = isSettled(job);
   const items = job.items || [];
   const expenses = job.expenses || [];
   const spent = expenses.reduce((a, e) => a + e.amount, 0);
+  const spoiled = job.spoilage || [];
+  const spoilCost = spoiled.reduce((a, s) => a + Number(s.amount || 0), 0);
   $('#drawerBody').innerHTML =
     '<div class="drawer-h"><div><div class="ref">' + esc(job.ref) + ' · ' + (isQuote ? 'quoted' : 'booked') + ' ' + fdatetime(job.created_at) + '</div>' +
     '<h2>' + esc(job.title) + '</h2>' +
     '<div style="margin-top:6px">' + pill(job.status) + prio(job.priority) +
+    (settled ? ' <span class="pill k-paid">Paid in full</span>' : '') +
     (isQuote ? ' <span class="pill k-Quote">Quote</span>' : '') +
     ' <span class="tag">' + esc(job.category) + '</span>' +
     (items.length ? ' <span class="tag">' + items.length + ' item lines</span>' : '') + '</div></div>' +
@@ -1588,6 +1609,9 @@ async function openJobDrawer(id) {
       '<div><span>Profit on this job</span><b class="' + (job.profit < 0 ? 'neg' : 'pos') + '">' + money(job.profit) + '</b></div>' +
       '<div><span>Margin</span><b' + (job.cost > 0 ? '' : ' class="muted" title="Nothing has been costed on this job yet"') + '>' +
         (job.cost <= 0 ? 'not costed' : job.total > 0 ? Math.round((job.profit / job.total) * 100) + '%' : '—') + '</b></div></div>') +
+    (settled ? '<p class="hint">Nothing is owed on this job' +
+      (job.last_paid ? ' — cleared by the payment of ' + fdate(job.last_paid) + '. Any money taken from here on sits as credit on their account.' : '.') +
+      '</p>' : '') +
     '<div><div class="section-h">Move this ' + (isQuote ? 'quote' : 'job') + ' to</div><div class="steps" style="margin-top:9px">' +
     S.boot.statuses.map((s) => '<button class="step' + (s === job.status ? ' on' : '') + '" data-status="' + esc(s) +
       '" data-status-job="' + job.id + '">' + esc(s) + '</button>').join('') + '</div></div>' +
@@ -1627,6 +1651,18 @@ async function openJobDrawer(id) {
         '</tbody></table></div>'
         : '<p class="hint" style="margin-top:8px">No costs recorded against this job, so profit is only reduced by what the item lines cost.</p>') +
       '<p class="hint" style="margin-top:6px">' + money(spent) + ' paid out on ' + expenses.length + ' entr' + (expenses.length === 1 ? 'y' : 'ies') + '.</p></div>') +
+    (isQuote ? '' :
+      '<div><div class="section-h">Spoiled on this job</div>' +
+      '<div style="margin:9px 0 8px"><button class="btn sm" data-new-spoilage="' + job.id + '">+ Log spoiled work</button></div>' +
+      (spoiled.length ? '<div class="tablewrap"><table><thead><tr><th>Date</th><th class=num>Qty</th><th>Reason</th><th class=num>Cost</th><th></th></tr></thead><tbody>' +
+        spoiled.map((s) => '<tr><td class="ref">' + fdate(s.spoiled_on) + '</td>' +
+          '<td class=num>' + Number(s.quantity).toLocaleString('en-US') + '</td>' +
+          '<td>' + esc(s.reason) + '</td><td class="num neg">' + money(s.amount) + '</td>' +
+          '<td class=num><button class="btn sm ghost" data-edit-spoilage="' + s.id + '">Edit</button></td></tr>').join('') +
+        '</tbody></table></div>' +
+        '<p class="hint" style="margin-top:6px">' + money(spoilCost) + ' of waste on ' + pluralise(spoiled.length, 'record') +
+        ', already counted against this job’s profit.</p>'
+        : '<p class="hint" style="margin-top:8px">Nothing spoiled on this job yet. Log it here when a batch goes wrong — the cost lands on this job, not on the client.</p>') + '</div>') +
     '<div><div class="section-h">Payments on this job</div>' +
     (job.payments.length ? '<div class="tablewrap"><table><thead><tr><th>Date</th><th>Type</th><th>Method</th><th class=num>Amount</th><th></th></tr></thead><tbody>' +
       job.payments.map((p) => '<tr><td class="ref">' + fdate(p.paid_at) + '</td><td>' + esc(p.kind) + '</td><td>' + esc(p.method) +
@@ -1934,11 +1970,23 @@ function paymentForm(opts) {
     '<label class="field"><span>Date paid</span><input name="paid_at" type="date" value="' + todayISO() + '"></label>' +
     '<label class="field wide"><span>Note</span><input name="note" maxlength="500" placeholder="anything worth remembering"></label>' +
     '</div><div class="calc"><div class="line"><span id="payHint">Balance after this payment</span><b id="payAfter">' +
-    (o.balance !== undefined ? esc(money(Math.max(o.balance - (Number(o.amount) || 0), 0))) : '—') + '</b></div></div>' +
+    (o.balance !== undefined ? esc(money(Math.max(o.balance - (Number(o.amount) || 0), 0))) : '—') + '</b></div>' +
+    '<button type="button" class="btn sm" id="payFull" hidden>Cover the full balance</button>' +
+    '<p class="settles" id="paySettles" hidden></p></div>' +
     '<div class="err" id="payErr"></div><div class="modal-foot"><span class="spacer"></span>' +
     '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
     '<button class="btn primary">Record payment</button></div></form>');
   const box = $('#payForm');
+  const chip = $('#payFull');
+  const settles = $('#paySettles');
+  let owed = o.balance === undefined ? null : Number(o.balance);
+  chip.addEventListener('click', () => {
+    box.amount.value = n2(owed);
+    if (box.kind.value === 'Deposit' || box.kind.value === 'Credit') box.kind.value = 'Payment';
+    if (!box.note.value) box.note.value = 'Paid in full';
+    box.dispatchEvent(new Event('input'));
+    box.amount.focus();
+  });
   box.addEventListener('input', () => {
     const sel = box.querySelector('[name=job_id]');
     const amount = Number(box.amount.value || 0);
@@ -1956,7 +2004,18 @@ function paymentForm(opts) {
       (balance - sign * amount < -0.005 ? ' (credit)' : '');
     if (balance === null) return;
     if (box.kind.value === 'Deposit' && amount >= balance - 0.005) box.kind.value = 'Payment';
+    owed = balance;
+    const rest = balance - sign * amount;
+    const refunding = box.kind.value === 'Refund';
+    chip.hidden = !(rest > 0.005 && !refunding);
+    if (!chip.hidden) {
+      chip.textContent = (amount > 0.005 ? 'Cover the rest · ' : 'Cover the full balance · ') + money(rest);
+    }
+    const clears = rest <= 0.005 && amount > 0.005 && !refunding;
+    settles.hidden = !clears;
+    if (clears) settles.textContent = 'That is the whole balance — this job will read Paid in full.';
   });
+  box.dispatchEvent(new Event('input'));
 }
 
 /* ------------------------------------------------------------- form binding */
@@ -2191,9 +2250,9 @@ function bindModal() {
         ? await api('/api/spoiled/' + id, { method: 'PUT', body: JSON.stringify(payload) })
         : await api('/api/spoiled', { method: 'POST', body: JSON.stringify(payload) });
       if (saved.offlineQueued) { closeModal(); toast('Spoilage record saved on this device; waiting to sync.', 'good'); return; }
-      closeModal(); toast(id ? 'Spoilage record updated' : 'Spoilage recorded', 'good');
-      await refreshChrome();
-      await render();
+      closeModal(); toast(id ? 'Spoilage record updated' : 'Spoilage recorded against ' + saved.ref, 'good');
+      await afterMutation(true);
+      if (payload.job_id) openJobDrawer(Number(payload.job_id));
     } catch (err) { $('#spoilageErr').textContent = err.message; }
   });
   const leadFormEl = card.querySelector('#leadForm');
@@ -2431,9 +2490,9 @@ const ACTIONS = {
     const jobs = await api('/api/jobs?status=open&sort=due');
     expenseForm(null, el.dataset.job, jobs);
   },
-  async 'new-spoilage'() {
+  async 'new-spoilage'(el) {
     const jobs = await api('/api/jobs?status=all&kind=Job&sort=created');
-    spoilageForm(null, jobs);
+    spoilageForm(null, jobs, el.dataset.newSpoilage || null);
   },
   async 'edit-spoilage'(el) {
     const [row, jobs] = await Promise.all([

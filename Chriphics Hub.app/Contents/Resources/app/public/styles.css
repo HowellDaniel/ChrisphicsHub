@@ -185,6 +185,10 @@ code { font-family: var(--num); font-size: .88em; }
   display: flex; flex-direction: column; gap: 10px;
 }
 .view { padding: var(--pad); display: grid; gap: var(--gap); align-content: start; min-height: 0; }
+/* A .view child is a grid item, and a grid item's automatic minimum size is its min-content:
+   one wide table used to push the whole column past the window and give the page a horizontal
+   scrollbar. Zero the minimum and .tablewrap scrolls the table where it sits. */
+.view > * { min-width: 0; }
 .loading { color: var(--muted); padding: 40px; text-align: center; }
 
 /* ---------- headings ---------- */
@@ -236,7 +240,7 @@ input::placeholder { color: var(--placeholder); }
 
 /* ---------- cards ---------- */
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow); }
-.card > h3, .card > .card-h { padding: 13px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; font-size: .92em; font-weight: 600; }
+.card > h3, .card > .card-h { padding: 13px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; font-size: .92em; font-weight: 600; flex-wrap: wrap; }
 .card > .card-h .spacer, .card > h3 .spacer { flex: 1; }
 .card-b { padding: 14px 16px; }
 .grid { display: grid; gap: var(--gap); }
@@ -326,6 +330,8 @@ tr[data-open]:hover, tr[data-open-lead]:hover { background: var(--surface-hover)
 .s-Cancelled { background: var(--surface-2); color: var(--muted); text-decoration: line-through; }
 .p-Urgent { background: var(--bad-soft); color: var(--bad); }
 .k-Quote { background: var(--cool-soft); color: var(--cool); box-shadow: inset 0 0 0 1px var(--cool-soft); }
+/* A job whose balance has been cleared. Same token pair as Delivered, so it reads as money news. */
+.k-paid { background: var(--ok-soft); color: var(--ok); }
 .i-lines { background: var(--grey-soft); color: var(--muted); font-family: var(--num); font-weight: 500; }
 .g-Prospect { background: var(--grey-soft); color: var(--muted); }
 .g-Meeting { background: var(--cool-soft); color: var(--cool); }
@@ -426,7 +432,6 @@ ul { margin: 0; padding: 0; }
 /* ---------- money in by MoMo ---------- */
 /* Only pairings already used elsewhere: the same -soft pills the message queue uses, and
    link-on-paper for the notes. A new token mix here would be a fresh contrast risk. */
-.momo > h3 { flex-wrap: wrap; }
 .pill.in { background: var(--ok-soft); color: var(--ok); }
 .pill.out { background: var(--bad-soft); color: var(--bad); }
 .pill.maybe { background: var(--warn-soft); color: var(--warn); }
@@ -492,6 +497,8 @@ label.field.wide { grid-column: 1 / -1; }
 .calc .line { display: flex; justify-content: space-between; gap: 12px; }
 .calc .line b { font-family: var(--num); }
 .calc .line.total { border-top: 1px dashed var(--line-2); padding-top: 6px; margin-top: 2px; font-weight: 600; }
+#payFull { justify-self: end; margin-top: 7px; }
+.settles { margin: 0; color: var(--ok); font-weight: 600; font-size: .92em; }
 .modal-foot { display: flex; gap: 8px; align-items: center; }
 .modal-foot .spacer { flex: 1; }
 .err { color: var(--bad); font-size: .86em; min-height: 1.2em; }

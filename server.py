@@ -352,6 +352,13 @@ def job_filters(params):
         args.append(int(client))
     if params.get("debtors", [""])[0] == "1":
         where.append("ja.balance > 0")
+    # `paid=full` is the settled side of the book: work that was billed and has been paid
+    # right down to nothing. Cancelled jobs are not settlements, so they stay out of it.
+    paid = params.get("paid", [""])[0]
+    if paid == "full":
+        where.append("j.kind = 'Job' AND j.status <> 'Cancelled' AND ja.total > 0 AND ja.balance <= 0.005")
+    elif paid == "due":
+        where.append("j.kind = 'Job' AND j.status <> 'Cancelled' AND ja.balance > 0.005")
     if params.get("overdue", [""])[0] == "1":
         where.append("j.status NOT IN ('Delivered','Cancelled') AND j.due_date IS NOT NULL AND j.due_date < ?")
         args.append(today())
@@ -405,7 +412,8 @@ def job_detail(job_id):
              c.email AS client_email, c.address AS client_address, c.kind AS client_kind,
              c.whatsapp_updates AS client_whatsapp_updates,
              c.email_updates AS client_email_updates,
-             ja.total, ja.paid, ja.balance, ja.cost, ja.profit, ja.item_count
+             ja.total, ja.paid, ja.balance, ja.cost, ja.profit, ja.item_count,
+             (SELECT max(p.paid_at) FROM payments p WHERE p.job_id = j.id) AS last_paid
       FROM jobs j JOIN clients c ON c.id = j.client_id JOIN job_accounts ja ON ja.id = j.id
       WHERE j.id = ?
     """, (job_id,))
@@ -414,6 +422,11 @@ def job_detail(job_id):
     job["items"] = items_of(job_id)
     job["payments"] = q("SELECT * FROM payments WHERE job_id = ? ORDER BY paid_at DESC, id DESC", (job_id,))
     job["expenses"] = q("SELECT * FROM expenses WHERE job_id = ? ORDER BY spent_on DESC, id DESC", (job_id,))
+    job["spoilage"] = q("""
+      SELECT s.id, s.quantity, s.reason, s.spoiled_on, e.amount, e.category
+      FROM spoiled_work s JOIN expenses e ON e.id = s.expense_id
+      WHERE s.job_id = ? ORDER BY s.spoiled_on DESC, s.id DESC
+    """, (job_id,))
     job["events"] = q("SELECT * FROM job_events WHERE job_id = ? ORDER BY id DESC", (job_id,))
     return job
 
@@ -2374,7 +2387,17 @@ def accounts_view(params):
       FROM payments p JOIN clients c ON c.id = p.client_id
       WHERE p.job_id IS NULL GROUP BY c.id HAVING credit <> 0 ORDER BY credit DESC
     """)
-    return {"ledger": ledger, "debtors": debtors, "credit": credit,
+    # The settled side of the book: billed work whose balance has been cleared, most recent first.
+    settled = q("""
+      SELECT ja.id, ja.ref, ja.client_id, ja.client, c.phone, ja.title, ja.category, ja.status,
+             ja.total, ja.paid, ja.balance, ja.due_date,
+             (SELECT max(p.paid_at) FROM payments p WHERE p.job_id = ja.id) AS settled_on
+      FROM job_accounts ja JOIN clients c ON c.id = ja.client_id
+      WHERE ja.kind='Job' AND ja.total > 0 AND ja.balance <= 0.005 AND ja.status <> 'Cancelled'
+        AND c.archived = 0
+      ORDER BY settled_on DESC, ja.id DESC LIMIT 80
+    """)
+    return {"ledger": ledger, "debtors": debtors, "credit": credit, "settled": settled,
             "spent": q("SELECT * FROM monthly_pnl LIMIT 13"),
             "totals": one("""
               SELECT round(coalesce(sum(balance),0),2) AS receivable,
