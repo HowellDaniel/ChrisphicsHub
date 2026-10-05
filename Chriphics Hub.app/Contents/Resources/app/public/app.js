@@ -9,6 +9,7 @@ let offlineDbPromise = null;
 let syncingOfflineQueue = false;
 let nextOfflineId = -Date.now();
 let nextOfflineSequence = 0;
+let deferredInstallPrompt = null;
 
 /* --------------------------------------------------------------- tiny helpers */
 const $ = (s, r = document) => r.querySelector(s);
@@ -1713,6 +1714,52 @@ function modalHeader(title, sub) {
   return '<header><div><h2>' + title + '</h2>' + (sub ? '<div class="hint">' + sub + '</div>' : '') +
     '</div><span class="spacer"></span><button class="iconbtn" data-action="close-modal" aria-label="Close">✕</button></header>';
 }
+function installInstructions() {
+  const ua = navigator.userAgent || '';
+  const ios = /iPhone|iPad|iPod/.test(ua) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  let steps;
+  if (!window.isSecureContext) {
+    steps = '<p>This address uses plain HTTP. Browsers require HTTPS before they allow this app ' +
+      'to be installed or its offline app shell to be cached on another device.</p>' +
+      '<p>Keep using it in the browser for now. To enable installation, open the app from a ' +
+      'trusted HTTPS address; a certificate warning that you bypass is not sufficient.</p>';
+  } else if (ios) {
+    steps = '<p>In Safari, tap <b>Share</b>, then choose <b>Add to Home Screen</b> and confirm.</p>';
+  } else if (/Android/.test(ua)) {
+    steps = '<p>In Chrome, open the browser menu and choose <b>Install app</b> or ' +
+      '<b>Add to Home screen</b>.</p>';
+  } else {
+    steps = '<p>In Microsoft Edge or Chrome, use the install icon in the address bar or open ' +
+      'the browser menu and choose <b>Install this site as an app</b>.</p>';
+  }
+  openModal(modalHeader('Install CRISPprint', 'Add an app shortcut to this device') +
+    '<div class="install-note">' + steps +
+    '<p class="hint">Installing adds this app to the device; shop records remain on the shop computer.</p></div>');
+}
+async function installApp() {
+  if (window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true) {
+    toast('CRISPprint is already installed on this device.', 'good');
+    return;
+  }
+  if (deferredInstallPrompt) {
+    const prompt = deferredInstallPrompt;
+    deferredInstallPrompt = null;
+    await prompt.prompt();
+    const choice = await prompt.userChoice;
+    if (choice && choice.outcome === 'accepted') toast('CRISPprint was installed.', 'good');
+    return;
+  }
+  installInstructions();
+}
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+});
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  toast('CRISPprint was installed.', 'good');
+});
 async function jobForm(job, presetClient, asQuote) {
   if (!S.clients.length) await loadClients();
   const j = job || {};
@@ -2209,6 +2256,7 @@ async function afterMutation(keepDrawer) {
   if (!keepDrawer) closeDrawer();
 }
 const ACTIONS = {
+  'install-app'() { installApp().catch(fail); },
   async 'sync-now'() { await syncOfflineQueue(); },
   async 'sync-keep'(el) {
     const row = await offlineRead('outbox', el.dataset.syncKeep);

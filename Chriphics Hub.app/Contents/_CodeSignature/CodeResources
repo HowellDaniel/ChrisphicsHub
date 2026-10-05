@@ -10,7 +10,7 @@
 		</data>
 		<key>Resources/app/public/app.js</key>
 		<data>
-		u+9S2kcBouDKjcj9V4NyZBkzF7I=
+		Zt7nC/UHcbGFtBx3cnYnukvJC/o=
 		</data>
 		<key>Resources/app/public/img/brand.png</key>
 		<data>
@@ -22,7 +22,7 @@
 		</data>
 		<key>Resources/app/public/index.html</key>
 		<data>
-		1UkfFKwWPlQL7fMzFjsskKY0ByY=
+		kL9KC2l4SwKwgJDtrE70f1hJ77E=
 		</data>
 		<key>Resources/app/public/manifest.webmanifest</key>
 		<data>
@@ -30,11 +30,11 @@
 		</data>
 		<key>Resources/app/public/styles.css</key>
 		<data>
-		iohvq/rcIela1BP1FG7KBkPSBwc=
+		5NKzPtKJr6Rop77mR812EIJkRl4=
 		</data>
 		<key>Resources/app/public/sw.js</key>
 		<data>
-		6frp60nZoH26wHFTjPOVEYfAFX4=
+		/cS+HHaFI4KKe+ly0SAQcWDY9U0=
 		</data>
 		<key>Resources/app/schema.sql</key>
 		<data>
@@ -42,7 +42,7 @@
 		</data>
 		<key>Resources/app/server.py</key>
 		<data>
-		ZDJCnGX6KieUXhgxwM2jtQQv1yY=
+		AxxzaUvWrdr/eJ7A3PluofCOUs8=
 		</data>
 	</dict>
 	<key>files2</key>
@@ -58,7 +58,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			YkcI+dTpt9YmibnAxL6c4giPj86UO3dts3L8x0pkeNQ=
+			tIQAJQQUpkA7AP/UcsvG884x5a5dTwq4RE6gYjl+0aU=
 			</data>
 		</dict>
 		<key>Resources/app/public/img/brand.png</key>
@@ -79,7 +79,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			zx0prjAihIjKXvQ/Tyj1oxSYoojZHxCKuRptgCzRtk8=
+			Cy/Os2fg/i1RHsJ7QzbDIlPyKQNV3kGnV1YyRVnBxxM=
 			</data>
 		</dict>
 		<key>Resources/app/public/manifest.webmanifest</key>
@@ -93,14 +93,14 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			I20r05sSzCWxB9/cSvzAdaqPcPJp9+Z2QGdbLGpd6Hs=
+			x0ddolHv4Pg7GZ4bwyiUA2XXYhFP/fL+xWMJwRWOkgE=
 			</data>
 		</dict>
 		<key>Resources/app/public/sw.js</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			LMxtllfMjekT98EsV9HRouKcFYyHHW/vuK0MsspRqNA=
+			p1zsKfHfK3F7fliGlpzD6jB0ZD4lM21kC3S9J6YLhuQ=
 			</data>
 		</dict>
 		<key>Resources/app/schema.sql</key>
@@ -114,7 +114,7 @@
 		<dict>
 			<key>hash2</key>
 			<data>
-			rSauU1eZxFRAjEfkijjTaI/RXRA9vsGLsSgBjsy3Dns=
+			awM/ErDE9gd2koMO94xPyihxS2ysQQIE4yGyyf3k5Kw=
 			</data>
 		</dict>
 	</dict>

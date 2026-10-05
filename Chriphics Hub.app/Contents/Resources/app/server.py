@@ -16,6 +16,7 @@ import datetime as dt
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 import hashlib
+import ipaddress
 import io
 import json
 import mimetypes
@@ -3228,15 +3229,31 @@ def watch_parent():
     threading.Thread(target=loop, daemon=True).start()
 
 
-def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_key=None):
+def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_key=None,
+          trust_proxy=False, allow_insecure_lan=False):
+    global AUTH_PASSWORD
     if seed_first:
         seed()
-    if host not in ("127.0.0.1", "localhost", "::1") and not AUTH_PASSWORD:
+    if allow_insecure_lan:
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError as err:
+            raise ValueError("--allow-insecure-lan requires a private IPv4 address.") from err
+        if (address.version != 4 or not address.is_private or address.is_loopback
+                or address.is_link_local):
+            raise ValueError("--allow-insecure-lan requires a private Wi-Fi IPv4 address.")
+        if tls_cert or tls_key or trust_proxy:
+            raise ValueError("--allow-insecure-lan cannot be combined with HTTPS or a proxy.")
+        AUTH_PASSWORD = ""
+    if host not in ("127.0.0.1", "localhost", "::1") and not AUTH_PASSWORD and not allow_insecure_lan:
         raise RuntimeError("Set CHRIPHICS_AUTH_PASSWORD before listening beyond this computer.")
     if bool(tls_cert) != bool(tls_key):
         raise ValueError("Both --tls-cert and --tls-key are required to enable HTTPS.")
-    if host not in ("127.0.0.1", "localhost", "::1") and not tls_cert:
+    if (host not in ("127.0.0.1", "localhost", "::1") and not tls_cert and not trust_proxy
+            and not allow_insecure_lan):
         raise RuntimeError("HTTPS is required when listening beyond this computer.")
+    if trust_proxy and tls_cert:
+        raise ValueError("Use either direct HTTPS or --trust-proxy, not both.")
     watch_parent()
     watch_messages()
     watch_notifications()
@@ -3248,8 +3265,8 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
         httpd.is_tls = True
         scheme = "https"
     else:
-        httpd.is_tls = False
-        scheme = "http"
+        httpd.is_tls = bool(trust_proxy)
+        scheme = "https" if trust_proxy else "http"
     display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     url = "%s://%s:%d/" % (scheme, display_host, port)
     print("%s is running at %s" % (SHOP["name"], url))
@@ -3269,6 +3286,10 @@ def main():
     ap.add_argument("--host", default=os.environ.get("CHRIPHICS_HOST", "127.0.0.1"))
     ap.add_argument("--tls-cert", default=os.environ.get("CHRIPHICS_TLS_CERT"))
     ap.add_argument("--tls-key", default=os.environ.get("CHRIPHICS_TLS_KEY"))
+    ap.add_argument("--trust-proxy", action="store_true",
+                    help="use only behind a trusted HTTPS-terminating reverse proxy")
+    ap.add_argument("--allow-insecure-lan", action="store_true",
+                    help="disable login and HTTPS only when bound to a private Wi-Fi IPv4 address")
     ap.add_argument("--db", default=None, help="alternative SQLite file")
     ap.add_argument("--seed", action="store_true", help="load sample records if the book is empty")
     ap.add_argument("--no-browser", action="store_true")
@@ -3278,7 +3299,8 @@ def main():
     if args.backup:
         print("Backup written to %s" % write_backup())
         return
-    serve(args.port, not args.no_browser, args.seed, args.host, args.tls_cert, args.tls_key)
+    serve(args.port, not args.no_browser, args.seed, args.host, args.tls_cert, args.tls_key,
+          args.trust_proxy, args.allow_insecure_lan)
 
 
 if __name__ == "__main__":

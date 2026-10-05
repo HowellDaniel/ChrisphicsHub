@@ -466,6 +466,9 @@ ul { margin: 0; padding: 0; }
 .modal-card { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-lg); width: min(680px, 100%); max-height: min(88vh, 860px); overflow: auto; padding: clamp(16px, 2vw, 24px); display: grid; gap: 15px; align-content: start; }
 .modal-card header { display: flex; align-items: center; gap: 12px; }
 .modal-card header h2 { font-size: 1.18em; } .modal-card header .spacer { flex: 1; }
+.install-note { display: grid; gap: 10px; line-height: 1.55; }
+.install-note p { margin: 0; }
+.install-note .hint { color: var(--muted); }
 /* The lines editor is a table of inputs, so the job form needs more room than a plain form. */
 .modal-card:has(#jobForm) { width: min(960px, 100%); }
 .items { display: grid; gap: 7px; }

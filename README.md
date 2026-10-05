@@ -89,6 +89,8 @@ HTTPS shop address on the server computer too; it is the shared book for every d
 
 Open the HTTPS shop address once on each device while connected to the shop Wi-Fi:
 
+- Use the app's **Install app** button to open the browser's install prompt where supported,
+  or show device-specific steps.
 - **Windows / Edge:** use the browser's **Install this site as an app** command.
 - **Android / Chrome:** use **Install app** or **Add to Home screen**.
 - **iPhone / iPad:** in Safari, choose **Share → Add to Home Screen**.

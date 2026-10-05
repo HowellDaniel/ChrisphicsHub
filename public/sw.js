@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE_NAME = 'crispprint-shell-v1';
+const CACHE_NAME = 'crispprint-shell-v2';
 const APP_SHELL = [
   '/',
   '/index.html',
