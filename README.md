@@ -105,6 +105,27 @@ The native Mac desktop app is a separate single-computer mode, not a client for 
 LAN server. When using shared mode on a Mac, use the HTTPS shop address in its browser rather
 than opening `Chriphics Hub.app`.
 
+### Open on the same Wi-Fi without signing in
+
+For a quick, no-login connection on the shop Wi-Fi only, bind the server to the Mac's private
+Wi-Fi IPv4 address instead of `0.0.0.0`. For example:
+
+```sh
+WIFI_IP="$(ipconfig getifaddr en0)"
+./run.sh --host "$WIFI_IP" --port 8834 --allow-insecure-lan --no-browser
+```
+
+On another device connected to that same Wi-Fi, open `http://<WIFI_IP>:8834/`, replacing
+`<WIFI_IP>` with the address printed by `ipconfig getifaddr en0` (for this setup, currently
+`192.168.100.29`). Reserve that address in the router if it should stay the same. Keep the Mac
+awake and the server running.
+
+This explicit mode has **no login and no HTTPS**. Anyone who can join or reach that Wi-Fi can
+read and change the whole shop book. Do not use it on public/shared guest Wi-Fi or expose the
+port to the internet; stop the server to close access. Browsers also require trusted HTTPS for
+service-worker installation on other devices, so this HTTP address opens the app but does not
+enable PWA installation/offline caching there.
+
 ### Host on Render
 
 `render.yaml` defines a single-instance paid web service with a persistent disk for the
