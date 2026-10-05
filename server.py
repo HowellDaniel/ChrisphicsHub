@@ -47,11 +47,13 @@ BACKUP_DIR = os.environ.get("CHRISPHICS_BACKUP_DIR") or os.path.join(SUPPORT, "B
 LEGACY_DB = os.path.expanduser("~/Library/Application Support/Chriphics Hub/chriphics.db")
 
 SHOP = {
-    # The shop's trading name, as it appears on a job sheet.
-    "name": "CRISPprint Ghana",
-    "tagline": "Printing & Design Services",
-    "phone": "+233 000 000 000",
-    "address": "Accra, Ghana",
+    # The shop's trading name, as it appears on a job sheet. The phone stays empty until the shop
+    # sets CHRISPHICS_SHOP_PHONE: these details go out to customers, and a number that reaches
+    # nobody is worse than no number at all.
+    "name": os.environ.get("CHRISPHICS_SHOP_NAME", "CRISPprint Ghana"),
+    "tagline": os.environ.get("CHRISPHICS_SHOP_TAGLINE", "Printing & Design Services"),
+    "phone": os.environ.get("CHRISPHICS_SHOP_PHONE", "").strip(),
+    "address": os.environ.get("CHRISPHICS_SHOP_ADDRESS", "Accra, Ghana"),
     "currency": "GHS",
     "currency_symbol": "\u20b5",
 }
@@ -150,6 +152,7 @@ def connect(path=None):
     with open(os.path.join(ROOT, "schema.sql"), "r", encoding="utf-8") as fh:
         _db.executescript(fh.read())
     _db.commit()
+    default_updates_consent()
 
 
 # executescript() creates missing tables, but CREATE TABLE IF NOT EXISTS can never add a
@@ -172,6 +175,11 @@ NOTIFICATION_MIGRATIONS = [
     ("delivery_error", "TEXT NOT NULL DEFAULT ''"),
     ("provider_id", "TEXT NOT NULL DEFAULT ''"),
 ]
+SIGNAL_MIGRATIONS = [
+    # A send that names nobody in the book is money out, so the notice needs a second
+    # way to be recorded than a payment against a client.
+    ("expense_id", "INTEGER REFERENCES expenses(id) ON DELETE SET NULL"),
+]
 
 
 def migrate():
@@ -184,7 +192,8 @@ def migrate():
         if name not in have:
             _db.execute("ALTER TABLE jobs ADD COLUMN %s %s" % (name, ddl))
     for table, migrations in (("clients", CLIENT_MIGRATIONS),
-                              ("notifications", NOTIFICATION_MIGRATIONS)):
+                              ("notifications", NOTIFICATION_MIGRATIONS),
+                              ("money_signals", SIGNAL_MIGRATIONS)):
         if table not in tables:
             continue
         have = {r["name"] for r in _db.execute("PRAGMA table_info(%s)" % table).fetchall()}
@@ -194,6 +203,21 @@ def migrate():
     # Quotes predate the kind column, so a book that only ever had jobs needs no backfill;
     # anything already booked keeps its 'Job' default.
     _db.execute("UPDATE jobs SET kind='Job' WHERE kind IS NULL OR kind=''")
+
+
+def default_updates_consent():
+    """The shop asked for clients to be told when their job has been processed, but the two
+    consent columns arrived in a book that was already written, and every row in it defaulted to
+    no. Each client is opted in once here, on the first launch that carries this code; after that
+    only the client screen decides."""
+    if state_value("consent_default"):
+        return
+    with _lock:
+        _db.execute("UPDATE clients SET whatsapp_updates = 1, email_updates = 1 WHERE archived = 0")
+        _db.commit()
+    set_state("consent_default", "1")
+    sys.stdout.write("Clients are opted in to WhatsApp and email job updates "
+                     "(turn it off per client on their record)\n")
 
 
 def q(sql, args=()):
@@ -793,7 +817,9 @@ def convert_quote(job_id, status="Pending"):
 # ------------------------------------------------------------------ client messages
 
 # Automatic delivery requires explicit client consent and configured provider credentials.
-AUTO_NOTIFY_EVENTS = frozenset(("Pending", "Printing", "Ready"))
+# The four stages a client is waiting on: that the order is in, on the press, off the press,
+# and delivered. A quote or a cancellation is the shop's judgement, so those stay manual.
+AUTO_NOTIFY_EVENTS = frozenset(("Pending", "Printing", "Ready", "Delivered"))
 DELIVERY_RETRY_SECONDS = (60, 300, 900, 3600, 21600, 86400, 86400)
 DELIVERY_MAX_ATTEMPTS = len(DELIVERY_RETRY_SECONDS) + 1
 WHATSAPP_API_VERSION = os.environ.get("CHRISPHICS_WHATSAPP_API_VERSION", "v22.0")
@@ -912,10 +938,14 @@ def message_body(job, event, channel):
     f = message_fields(job)
     news = NOTIF_NEWS[event].format(**f)
     if channel == "WhatsApp":
-        return "Hello %s, %s here.\n\n%s\n\nCall or WhatsApp %s if anything needs changing." % (
-            f["client"], f["shop"], news, f["phone"])
-    return "Hello %s,\n\n%s\n\nKind regards,\n%s — %s\n%s | %s" % (
-        f["client"], news, f["shop"], SHOP["tagline"], f["phone"], f["address"])
+        # Until the shop sets its own number, the message says nothing rather than handing the
+        # client a placeholder that reaches nobody.
+        return "Hello %s, %s here.\n\n%s%s" % (
+            f["client"], f["shop"], news,
+            "\n\nCall or WhatsApp %s if anything needs changing." % f["phone"] if f["phone"] else "")
+    sign = "Kind regards,\n%s — %s" % (f["shop"], SHOP["tagline"])
+    contact = " | ".join(x for x in (f["phone"], f["address"]) if x)
+    return "Hello %s,\n\n%s\n\n%s%s" % (f["client"], news, sign, "\n" + contact if contact else "")
 
 
 def automatic_whatsapp_body(job, event):
@@ -979,8 +1009,13 @@ def queue_message(job_id, event, automatic=None):
             if channel_auto and not job.get(consent_key):
                 skipped_consent.append(channel)
                 continue
+            # The short wording exists for the WhatsApp template, which is all an automatic send
+            # can carry. Until a provider is set up the message leaves through the shop's own
+            # WhatsApp or Mail, so it should go out in the shop's full voice instead.
+            provider_ready = not notification_config_error(channel)
             body = (automatic_whatsapp_body(job, event)
-                    if channel_auto and channel == "WhatsApp" else message_body(job, event, channel))
+                    if channel_auto and channel == "WhatsApp" and provider_ready
+                    else message_body(job, event, channel))
             subject = message_subject(job, event) if channel == "Email" else ""
             _db.execute("""
               INSERT INTO notifications
@@ -1343,16 +1378,36 @@ def set_message_state(note_id, state):
     row = one("SELECT * FROM notifications WHERE id = ?", (note_id,))
     if not row:
         raise LookupError("Message not found")
-    if row["auto_send"]:
-        raise ValueError("Automatic message delivery status is updated by the provider worker")
+    automatic = bool(row["auto_send"])
+    # An automatic message normally belongs to the delivery worker. While its channel has no
+    # provider set up it cannot leave this Mac on its own, so the shop is allowed to record that
+    # staff carried the news themselves; the delivery columns move with the answer, so the same
+    # words are not sent twice if a provider is configured later.
+    if automatic and not notification_config_error(row["channel"]):
+        raise ValueError(row["channel"] + " updates go out on their own once the provider is set up")
+    if automatic and row["delivery_state"] == "Cancelled":
+        # The client asked not to be written to. Recording that a message reached them anyway
+        # would be a note about a conversation that did not happen.
+        raise ValueError("This update was called off when " + row["channel"] +
+                         " permission was withdrawn, so there is nothing to mark")
     with _lock:
-        _db.execute("UPDATE notifications SET state = ?, updated_at = datetime('now','localtime') "
-                    "WHERE id = ?", (state, note_id))
+        if automatic:
+            _db.execute("""UPDATE notifications SET state = ?, delivery_state = ?,
+                                  delivery_next_at = ?, delivery_error = '',
+                                  updated_at = datetime('now','localtime')
+                           WHERE id = ?""",
+                        (state, "Sent" if state == "Sent" else "Pending",
+                         None if state == "Sent" else time.time() + 3, note_id))
+        else:
+            _db.execute("UPDATE notifications SET state = ?, "
+                        "updated_at = datetime('now','localtime') WHERE id = ?", (state, note_id))
         if state == "Sent" and row["state"] != "Sent":
             client = one("SELECT name FROM clients WHERE id = ?", (row["client_id"],))
             _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'message', ?)",
-                        (row["job_id"], "%s message sent to %s on %s (%s)" % (
-                            row["event"], client["name"] if client else "the client",
+                        (row["job_id"], "%s %s to %s on %s (%s)" % (
+                            row["event"],
+                            "update carried by the shop" if automatic else "message sent",
+                            client["name"] if client else "the client",
                             row["channel"], row["to_address"])))
         _db.commit()
     return notify_rows(row["job_id"])
@@ -1375,6 +1430,7 @@ def notify_payload(job_id):
         raise LookupError("Job not found")
     rows = notify_rows(job_id)
     reachable = {c: message_target(job, c) for c in NOTIFY_CHANNELS}
+    agreed = {c: bool(job.get("client_%s_updates" % c.lower())) for c in NOTIFY_CHANNELS}
     return {
         "messages": rows,
         "client": job["client"],
@@ -1384,12 +1440,12 @@ def notify_payload(job_id):
         "missing": [c for c in NOTIFY_CHANNELS if not reachable[c]],
         "to_send": len([r for r in rows
                         if r["state"] == "Queued" and r["delivery_state"] != "Cancelled"]),
-        "not_consented": [
-            channel for channel, field in (
-                ("WhatsApp", "client_whatsapp_updates"),
-                ("Email", "client_email_updates"),
-            ) if reachable[channel] and not job.get(field)
-        ],
+        "not_consented": [c for c in NOTIFY_CHANNELS if reachable[c] and not agreed[c]],
+        # Queued is not the same as sent. Where a client can be reached and has agreed, say what
+        # still stops the message leaving this Mac on its own.
+        "blocked": [{"channel": c, "reason": notification_config_error(c)}
+                    for c in NOTIFY_CHANNELS
+                    if reachable[c] and agreed[c] and notification_config_error(c)],
     }
 
 
@@ -1437,6 +1493,8 @@ PAYER_RE = re.compile(r"\bfrom\s+([A-Za-z][A-Za-z .'\-]{1,30})(?!\w)", re.I)
 REF_RE = re.compile(r"\b(?:ref|reference|name|customer|by)\s*[:#\- ]\s*([A-Za-z][A-Za-z .'\-]{2,29})(?!\w)", re.I)
 # MTN signs a credit the other way round: "Kofi paid you GHS 450.00", with the name in front.
 PAID_YOU_RE = re.compile(r"\b([A-Za-z][A-Za-z '\-]{2,29}?)\s+(?:paid|sent)\s+you\b", re.I)
+# A send names whoever received it after "to", which is the only way to tell where it went.
+PAYEE_RE = re.compile(r"\bto\s+([A-Za-z][A-Za-z .'\-]{2,29})(?!\w)", re.I)
 # Text that is money news but is plainly not a client settling a bill.
 MONEY_JUNK = ("won", "prize", "claim", "lottery", "congratul", "winner", "promo", "bonus offer")
 # What the words after a payer name actually describe, so the name stops there.
@@ -1464,6 +1522,7 @@ def momo_watching():
 
 
 def momo_auto():
+    """Writing money into the book with no human in the middle stays a choice the shop makes."""
     return state_value("momo_auto", "0") == "1"
 
 
@@ -1534,12 +1593,30 @@ def parse_money_alert(raw):
 
     numbers = [n for n in phones_in(body) if n != wa_number(MOMO_NUMBER)]
     read["payer_phone"] = numbers[0] if numbers else ""
-    hit = PAYER_RE.search(body) or PAID_YOU_RE.search(body) or REF_RE.search(body)
+    named = PAYER_RE.search(body) or PAID_YOU_RE.search(body)
+    ref = None if named else REF_RE.search(body)
+    hit = named or ref
     read["payer"] = payer_name(hit.group(1) if hit else "")
 
+    amount = money_amount(body)
+    if amount:
+        read["amount"] = amount[1]
+        read["amount_text"] = amount[2]
+
     if any(w in low for w in MONEY_OUT):
+        # Money leaving the wallet is a movement the book still has to hold on to: it is either
+        # back to a client or out to somebody else, and it names its receiver after "to".
         read["direction"] = "Out"
-        read["reason"] = "This reads as money going out of the wallet, not a client paying in."
+        owed = PAYEE_RE.search(body)
+        if owed and (not read["payer"] or ref):
+            # Who the money went to is the only name that matters on a send, and it beats a
+            # word lifted out of the reference.
+            read["payer"] = payer_name(owed.group(1))
+        if read["amount"]:
+            read["reason"] = "Read %s going out%s — record it against the client, or as money out." % (
+                read["amount_text"], (" to " + read["payer"]) if read["payer"] else "")
+        else:
+            read["reason"] = "Money left the wallet, but no amount could be read from the alert."
         return read
     if any(w in low for w in MONEY_JUNK):
         # A prize or promo is not money news at all, so it never reaches the notices list.
@@ -1548,12 +1625,9 @@ def parse_money_alert(raw):
         return read
     read["direction"] = "Credit" if any(w in low for w in MONEY_CUE) else "Unknown"
 
-    amount = money_amount(body)
     if not amount:
         read["reason"] = "No amount could be read from it — check the wording or type the figure."
         return read
-    read["amount"] = amount[1]
-    read["amount_text"] = amount[2]
     if read["direction"] == "Unknown":
         read["reason"] = "Read %s but cannot tell which way the money moved." % amount[2]
         return read
@@ -1593,10 +1667,12 @@ def pick_job(client_id, amount):
 
 
 def signal_row(row_id):
-    return one("""SELECT s.*, c.name AS client, j.ref AS job_ref
+    return one("""SELECT s.*, c.name AS client, j.ref AS job_ref,
+                         e.category AS expense_category, e.payee AS expense_payee
                   FROM money_signals s
                   LEFT JOIN clients c ON c.id = s.client_id
                   LEFT JOIN jobs j ON j.id = s.job_id
+                  LEFT JOIN expenses e ON e.id = s.expense_id
                   WHERE s.id = ?""", (row_id,))
 
 
@@ -1624,10 +1700,16 @@ def ingest_alert(raw, source="Pasted", sender="", source_row=0):
     client = match_client(row["payer_phone"], row["payer"])
     job = None
     note = row["reason"]
+    going_out = row["direction"] == "Out"
     if client and row["amount"]:
         job = pick_job(client["id"], row["amount"])
-        note = "" if job else ("Matches %s, who has nothing outstanding — this would sit as "
-                               "credit on their account." % client["name"])
+        if going_out:
+            note = "Money out to %s — record it as a refund to %s%s." % (
+                client["name"], client["name"],
+                (" against " + job["ref"]) if job else ", or as money out")
+        else:
+            note = "" if job else ("Matches %s, who has nothing outstanding — this would sit as "
+                                   "credit on their account." % client["name"])
         with _lock:
             _db.execute("UPDATE money_signals SET client_id = ?, job_id = ?, reason = ? WHERE id = ?",
                         (client["id"], job["id"] if job else None, note, row["id"]))
@@ -1663,7 +1745,7 @@ def book_signal(row_id, payload=None):
     row = one("SELECT * FROM money_signals WHERE id = ?", (row_id,))
     if not row:
         raise LookupError("There is no payment notice with that number")
-    if row["payment_id"]:
+    if row["payment_id"] or row["expense_id"]:
         raise ValueError("This notice is already booked")
     amount = num(payload.get("amount"), row["amount"] or 0, 0, MONEY_MAX)
     if amount >= MONEY_MAX:
@@ -1704,12 +1786,69 @@ def book_signal(row_id, payload=None):
     return pay
 
 
+def record_send(row_id, payload=None):
+    """Record money the wallet sent out, so no MoMo movement leaves the book unread.
+
+    A send that names one of our clients is money back to them, so it goes on their account as
+    a refund and lowers what they have paid us. A send that names nobody in the book is the shop
+    spending — it goes to the expenses ledger. Never done on its own: an outgoing alert could be
+    airtime, rent or a supplier, and only the shop knows which."""
+    payload = payload or {}
+    row = one("SELECT * FROM money_signals WHERE id = ?", (row_id,))
+    if not row:
+        raise LookupError("There is no payment notice with that number")
+    if row["payment_id"] or row["expense_id"]:
+        raise ValueError("This notice is already recorded")
+    amount = num(payload.get("amount"), row["amount"] or 0, 0, MONEY_MAX)
+    if amount >= MONEY_MAX:
+        raise ValueError("That figure is too large for the book — check the amount")
+    if amount <= 0:
+        raise ValueError("No amount was read from this notice — type the figure in first")
+    note = "MoMo send %s%s" % (("#%d" % row["id"]),
+                               (": " + row["raw"][:120]) if row["raw"] else "")
+    client_id = int(num(payload.get("client_id"), row["client_id"] or 0))
+    client = one("SELECT id, name FROM clients WHERE id = ?", (client_id,)) if client_id > 0 else None
+    if "job_id" in payload:
+        wanted = payload.get("job_id")
+        job_id = int(wanted) if wanted not in (None, "", "0", 0, "none", "credit") else None
+    else:
+        job_id = row["job_id"] if row["client_id"] == client_id else None
+    if job_id:
+        owner = one("SELECT client_id FROM jobs WHERE id = ?", (job_id,))
+        if not owner:
+            raise LookupError("That job is not in the book")
+        if client and owner["client_id"] != client["id"]:
+            raise ValueError("That job belongs to another client")
+    if client:
+        rec = create_payment({"client_id": client["id"], "job_id": job_id, "amount": amount,
+                              "kind": "Refund", "method": "MoMo", "reference": client["name"],
+                              "note": note})
+        with _lock:
+            _db.execute("""UPDATE money_signals SET state = 'Booked', client_id = ?, job_id = ?,
+                           payment_id = ?, amount = ?, reason = '', booked_at = datetime('now','localtime')
+                           WHERE id = ?""", (client["id"], job_id, rec["id"], round(amount, 2), row_id))
+            _db.commit()
+        return dict(rec, recorded_as="refund")
+    payee = text(payload.get("payee") or row["payer"], 160)
+    exp = create_expense({
+        "amount": amount, "category": payload.get("category") or "Other",
+        "payee": payee or "MoMo send", "method": "MoMo", "reference": payee, "job_id": job_id,
+        "note": note, "spent_on": text(payload.get("spent_on"), 10) or today(),
+    })
+    with _lock:
+        _db.execute("""UPDATE money_signals SET state = 'Booked', job_id = ?, expense_id = ?, amount = ?,
+                       reason = '', booked_at = datetime('now','localtime') WHERE id = ?""",
+                    (job_id, exp["id"], round(amount, 2), row_id))
+        _db.commit()
+    return dict(exp, recorded_as="expense")
+
+
 def ignore_signal(row_id):
     row = one("SELECT * FROM money_signals WHERE id = ?", (row_id,))
     if not row:
         raise LookupError("There is no payment notice with that number")
-    if row["payment_id"]:
-        raise ValueError("Already booked — take it back off in Accounts, not here")
+    if row["payment_id"] or row["expense_id"]:
+        raise ValueError("Already booked — take it back off in Accounts or Expenses, not here")
     with _lock:
         _db.execute("UPDATE money_signals SET state = 'Ignored', reason = 'Put aside by the shop' WHERE id = ?",
                     (row_id,))
@@ -1785,13 +1924,17 @@ def paste_alert(raw):
 
 
 def momo_payload():
-    rows = q("""SELECT s.*, c.name AS client, j.ref AS job_ref
-                FROM money_signals s
-                LEFT JOIN clients c ON c.id = s.client_id
-                LEFT JOIN jobs j ON j.id = s.job_id
-                ORDER BY s.id DESC LIMIT 40""")
+    rows = q("""SELECT s.*, c.name AS client, j.ref AS job_ref,
+                      e.category AS expense_category, e.payee AS expense_payee
+               FROM money_signals s
+               LEFT JOIN clients c ON c.id = s.client_id
+               LEFT JOIN jobs j ON j.id = s.job_id
+               LEFT JOIN expenses e ON e.id = s.expense_id
+               ORDER BY s.id DESC LIMIT 40""")
     waiting = [r for r in rows if r["state"] == "Unreviewed"]
-    booked = [r for r in rows if r["payment_id"]]
+    out = [r for r in rows if (r["direction"] or "") == "Out"]
+    booked = [r for r in rows if r["payment_id"] and (r["direction"] or "") != "Out"]
+    sent = [r for r in out if r["payment_id"] or r["expense_id"]]
     return {
         "signals": rows,
         "watching": momo_watching(),
@@ -1803,6 +1946,10 @@ def momo_payload():
         "booked": len(booked),
         "booked_total": round(sum(r["amount"] or 0 for r in booked), 2),
         "waiting_total": round(sum(r["amount"] or 0 for r in waiting), 2),
+        # Money out is counted apart, so a send never looks like a missing payment.
+        "waiting_out": len([r for r in out if r["state"] == "Unreviewed"]),
+        "sent": len(sent),
+        "sent_total": round(sum(r["amount"] or 0 for r in sent), 2),
         # So the panel can ask "whose money is this?" without another round trip.
         "clients": q("SELECT id, name FROM clients WHERE archived = 0 ORDER BY name"),
     }
@@ -2052,6 +2199,10 @@ def delete_expense(eid):
     if one("SELECT id FROM spoiled_work WHERE expense_id=?", (eid,)):
         raise ValueError("Remove this entry on the Spoiled work screen")
     with _lock:
+        # A send read out of Messages is not deleted with the entry: it goes back to the panel.
+        _db.execute("""UPDATE money_signals SET state = 'Unreviewed', expense_id = NULL, booked_at = NULL,
+                       reason = 'Taken back off the book — it waits to be recorded again.'
+                       WHERE expense_id = ?""", (eid,))
         _db.execute("DELETE FROM expenses WHERE id=?", (eid,))
         if row["job_id"]:
             _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'note', ?)",
@@ -2265,7 +2416,11 @@ def list_clients(params):
 def clean_client(payload):
     def opted_in(key):
         value = payload.get(key)
-        return 1 if value is True or str(value or "").lower() in ("1", "true", "yes", "on") else 0
+        # A record that says nothing is taken as yes: the shop's standing instruction is that
+        # clients are told when their job moves. Only an explicit no turns a channel off.
+        if value is None or value == "":
+            return 1
+        return 0 if value is False or str(value).strip().lower() in ("0", "false", "no", "off", "none") else 1
 
     data = {
         "name": text(payload.get("name"), 160, True, "client name"),
@@ -2302,6 +2457,11 @@ def update_client(cid, payload):
     if not before:
         raise LookupError("Client not found")
     data = clean_client(payload)
+    # A PUT that does not mention a channel leaves the client's own answer alone: consent changes
+    # only when the record screen actually says so.
+    for key in ("whatsapp_updates", "email_updates"):
+        if key not in payload:
+            data[key] = before[key]
     with _lock:
         _db.execute("""
           UPDATE clients SET name=:name, phone=:phone, whatsapp=:whatsapp, email=:email,
@@ -2320,7 +2480,7 @@ def update_client(cid, payload):
                 """, (cid, channel))
         _db.commit()
     for job in q("SELECT id FROM jobs WHERE client_id=? AND kind='Job' "
-                 "AND status IN ('Pending','Printing','Ready')", (cid,)):
+                 "AND status IN ('Pending','Printing','Ready','Delivered')", (cid,)):
         refresh_pending_status_notification(job["id"])
     return client_detail(cid)
 
@@ -2394,9 +2554,11 @@ def create_payment(payload):
               text(payload.get("reference"), 80), text(payload.get("note"), 500), paid_at))
         if job_id:
             balance = one("SELECT balance FROM job_accounts WHERE id=?", (job_id,))
+            # A refund is money handed back, so the job history must not claim it was received.
             _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'payment', ?)",
-                        (job_id, "%s %.2f received (%s) - balance now %.2f" % (
-                            SHOP["currency_symbol"], amount, method,
+                        (job_id, ("%s %.2f refunded to the client (%s) - balance now %.2f"
+                                  if kind == "Refund" else "%s %.2f received (%s) - balance now %.2f")
+                         % (SHOP["currency_symbol"], amount, method,
                             balance["balance"] if balance else 0)))
         _db.commit()
         pid = cur.lastrowid
@@ -2684,9 +2846,9 @@ def receipt_html(job_id):
  <tr><td>Quoted total</td><td class="r big">%(sym)s %(total).2f</td></tr>
  <tr><td>Valid until</td><td class=r>%(valid)s</td></tr></tbody></table>
 <p class=terms>Prices hold until the date above. Booking this quote starts the work and lets us
-take a deposit. To accept, reply to %(phone)s or %(address)s.</p>""" % {
+take a deposit. To accept, reply to %(contact)s.</p>""" % {
             "sym": sym, "total": job["total"], "valid": esc(job["valid_until"] or "not set"),
-            "phone": esc(SHOP["phone"]), "address": esc(SHOP["name"])}
+            "contact": esc(SHOP["phone"] or SHOP["name"])}
     else:
         money_block = """<table class=totals><tbody>
  <tr><td>Total</td><td class="r big">%(sym)s %(total).2f</td></tr>
@@ -2715,7 +2877,7 @@ take a deposit. To accept, reply to %(phone)s or %(address)s.</p>""" % {
  @media print{body{margin:0 auto}.noprint{display:none}}
  a{color:#0a58ca}
 </style></head><body>
-<header><div><img class=logo src="/img/brand.png" alt="%(shop)s"><div class=muted>%(tagline)s &middot; %(phone)s &middot; %(address)s</div></div>
+<header><div><img class=logo src="/img/brand.png" alt="%(shop)s"><div class=muted>%(tagline)s &middot; %(contact)s</div></div>
 <div style=text-align:right><div class=big>%(ref)s</div>
 <div class=badge>%(heading)s</div><div class=muted>%(status)s &middot; %(created)s</div></div></header>
 <div class=grid>
@@ -2733,7 +2895,8 @@ take a deposit. To accept, reply to %(phone)s or %(address)s.</p>""" % {
 <a href="/#/jobs/%(id)s">Back to the record</a></p>
 </body></html>""" % {
         "ref": esc(job["ref"]), "shop": SHOP["name"], "tagline": SHOP["tagline"],
-        "phone": SHOP["phone"], "address": SHOP["address"], "status": esc(job["status"]),
+        "contact": " · ".join(x for x in (SHOP["phone"], SHOP["address"]) if x),
+        "status": esc(job["status"]),
         "heading": "Estimate" if is_quote else "Job sheet",
         "created": esc(job["created_at"][:10]), "client": esc(job["client"]),
         "phone_c": esc(job["client_phone"] or "not on file"),
@@ -2767,7 +2930,10 @@ def seed():
     ]
     with _lock:
         for name, phone, kind, address in people:
-            _db.execute("INSERT INTO clients (name, phone, kind, address) VALUES (?,?,?,?)",
+            # The sample book follows the same default the app uses: a client is told about their
+            # job unless the shop records that they did not agree.
+            _db.execute("""INSERT INTO clients (name, phone, kind, address,
+                          whatsapp_updates, email_updates) VALUES (?,?,?,?,1,1)""",
                         (name, phone, kind, address))
         jobs = [
             (1, "500 business cards", "Business Cards", "250gsm gloss, double sided", 5, "set", 45.0, 20.0, 0, "Ready", "2 boxes"),
@@ -3251,7 +3417,13 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and len(rest) == 3:
                 sid = path_id(rest[1])
                 if rest[2] == "book":
-                    return 200, dict(momo_payload(), payment=book_signal(sid, self.body()))
+                    # The write happens first: a payload gathered before it would still show the
+                    # notice as unbooked, exactly the thing the press was meant to change.
+                    pay = book_signal(sid, self.body())
+                    return 200, dict(momo_payload(), payment=pay)
+                if rest[2] == "send":
+                    rec = record_send(sid, self.body())
+                    return 200, dict(momo_payload(), recorded=rec)
                 if rest[2] == "ignore":
                     ignore_signal(sid)
                     return 200, momo_payload()
@@ -3264,6 +3436,12 @@ class Handler(BaseHTTPRequestHandler):
             if not row:
                 raise LookupError("Payment not found")
             with _lock:
+                # The alert the money came from is not deleted with the entry: it waits in the
+                # panel to be booked again, so an undo never loses the notice itself.
+                _db.execute("""UPDATE money_signals SET state = 'Unreviewed', payment_id = NULL,
+                               booked_at = NULL,
+                               reason = 'Taken back off the book — it waits to be booked again.'
+                               WHERE payment_id = ?""", (row["id"],))
                 _db.execute("DELETE FROM payments WHERE id=?", (row["id"],))
                 if row["job_id"]:
                     _db.execute("INSERT INTO job_events (job_id, type, detail) VALUES (?, 'payment', ?)",

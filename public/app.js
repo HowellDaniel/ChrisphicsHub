@@ -689,7 +689,8 @@ function refreshQuiet() {
 /* --------------------------------------------------------------- dashboard */
 async function viewDashboard() {
   const d = await api('/api/dashboard');
-  let momo = { signals: [], waiting: 0, booked: 0, booked_total: 0, waiting_total: 0, clients: [], number: '' };
+  let momo = { signals: [], waiting: 0, booked: 0, booked_total: 0, waiting_total: 0, sent: 0,
+    sent_total: 0, clients: [], number: '' };
   try { momo = await loadMomo(); } catch (e) { /* the dashboard still draws without the notices */ }
   watchMomoPanel();
   const k = d.kpi;
@@ -853,60 +854,83 @@ function momoGuess(clientId, amount) {
   return jobs.map((j) => ({ id: j.id, gap: Math.abs(j.balance - amount) }))
     .sort((a, b) => a.gap - b.gap)[0].id;
 }
-function momoJobOptions(clientId, picked) {
+function momoJobOptions(clientId, picked, blank) {
   const jobs = momoDebtors.filter((j) => String(j.client_id) === String(clientId) && j.balance > 0.005);
-  return '<option value="">Kept on their account (credit)</option>' + jobs.map((j) =>
+  return '<option value="">' + esc(blank || 'Kept on their account (credit)') + '</option>' + jobs.map((j) =>
     '<option value="' + j.id + '"' + (String(j.id) === String(picked || '') ? ' selected' : '') + '>' +
     esc(j.ref) + ' · owes ' + esc(money(j.balance)) + '</option>').join('');
 }
 function momoSig(s) {
   const clients = (S.momo && S.momo.clients) || [];
+  const cats = (S.boot && S.boot.expense_categories) || [];
   const amt = (s.amount === null || s.amount === undefined) ? '' : n2(s.amount);
   const payer = [s.payer, s.payer_phone ? momoPhone(s.payer_phone) : ''].filter(Boolean).join(' · ');
   const meta = [s.source === 'Messages' ? 'read from Messages' : 'pasted in', fdatetime(s.seen_at)];
-  return '<div class="sig" data-sig="' + s.id + '">' +
+  const out = s.direction === 'Out';
+  const unclear = s.direction !== 'Credit' && s.direction !== 'Out';
+  return '<div class="sig" data-sig="' + s.id + '"' + (out || unclear ? ' data-out="1">' : '>') +
     '<div class="sig-h"><b class="money big">' +
     (amt ? esc(money(Number(amt))) : '<span class="muted">no figure read</span>') + '</b>' + momoWay(s) +
     '<span class="spacer"></span><span class="ref">' + esc(meta.join(' · ')) + '</span></div>' +
-    (payer ? '<p class="sig-by">Sent by <b>' + esc(payer) + '</b></p>' : '') +
+    (payer ? '<p class="sig-by">' + (out ? 'Sent to <b>' : unclear ? 'A name in it: <b>' : 'Sent by <b>') +
+      esc(payer) + '</b></p>' : '') +
     (s.reason ? '<p class="sig-note">' + esc(s.reason) + '</p>' : '') +
     '<div class="sig-f">' +
     '<label><span>Amount</span><input type="number" class="momo-amt" min="0.01" step="0.01" placeholder="0.00" value="' + esc(amt) + '"></label>' +
-    '<label><span>Whose money</span><select class="momo-client"><option value="">Choose a client…</option>' +
+    '<label><span>' + (out || unclear ? 'Who this went to' : 'Whose money') + '</span><select class="momo-client"><option value="">' +
+    (out || unclear ? 'Nobody in the book — money out' : 'Choose a client…') + '</option>' +
     clients.map((c) => '<option value="' + c.id + '"' + (String(c.id) === String(s.client_id || '') ? ' selected' : '') +
       '>' + esc(c.name) + '</option>').join('') + '</select></label>' +
-    '<label><span>Put it against</span><select class="momo-job">' + momoJobOptions(s.client_id || '', s.job_id) + '</select></label>' +
-    '<div class="row-actions"><button class="btn sm primary" data-momo-book>Book it</button>' +
+    (out || unclear ? '<label><span>Money out for</span><select class="momo-cat">' +
+      cats.map((c) => '<option value="' + esc(c) + '"' + (c === 'Other' ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
+      '</select></label>' : '') +
+    '<label><span>' + (out ? 'Refund it against' : 'Put it against') + '</span><select class="momo-job">' +
+      momoJobOptions(s.client_id || '', s.job_id,
+        out ? 'Money back on their account' : (unclear ? 'No job of theirs' : '')) + '</select></label>' +
+    '<div class="row-actions">' +
+    (out ? '<button class="btn sm primary" data-momo-send>Record send</button>'
+      : '<button class="btn sm primary" data-momo-book>Book it</button>') +
+    (unclear ? '<button class="btn sm" data-momo-send>Record as a send</button>' : '') +
     '<button class="btn sm" data-momo-ignore>Put aside</button></div>' +
     '</div><details class="sig-raw"><summary>The alert as it arrived</summary><p>' + esc(s.raw) + '</p></details>' +
     '</div>';
 }
 function momoDone(s) {
-  const booked = !!s.payment_id;
   const figure = s.amount ? money(s.amount) : 'no figure';
-  return '<div class="sig done' + (booked ? '' : ' aside') + '">' +
+  const who = s.client_id ? '<a href="#/clients/' + s.client_id + '">' + esc(s.client || 'a client') + '</a>' : '';
+  let what;
+  if (s.state === 'Ignored') what = 'put aside by the shop';
+  else if (s.expense_id) what = 'money out · ' + esc(s.expense_category || 'Other') +
+    (s.expense_payee ? ' · to ' + esc(s.expense_payee) : '');
+  else if (s.direction === 'Out') what = 'refunded to ' + who +
+    ' · ' + esc(s.job_ref ? s.job_ref : 'their account');
+  else what = 'booked to ' + who + ' · reference ' + esc(s.client || '') + ' · ' +
+    esc(s.job_ref ? s.job_ref : 'account credit');
+  return '<div class="sig done' + (s.state === 'Ignored' ? ' aside' : '') + '">' +
     '<b class="money">' + esc(figure) + '</b>' +
-    (booked
-      ? '<span>booked to <a href="#/clients/' + s.client_id + '">' + esc(s.client || 'a client') + '</a> · ' +
-        'reference ' + esc(s.client || '') + ' · ' + esc(s.job_ref ? s.job_ref : 'account credit') + '</span>'
-      : '<span>put aside by the shop</span>') +
+    '<span>' + what + '</span>' +
     '<span class="spacer"></span><time>' + esc(fdatetime(s.booked_at || s.seen_at)) + '</time></div>';
 }
 function momoInner(m) {
   const waiting = m.signals.filter((s) => s.state === 'Unreviewed');
+  const sends = waiting.filter((s) => s.direction === 'Out');
   const done = m.signals.filter((s) => s.state !== 'Unreviewed').slice(0, 6);
   const toggle = (key, on, label, note) => '<button class="btn sm' + (on ? ' primary' : '') + '" data-momo-' + key +
     ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + esc(note) + '">' + (on ? '✓ ' : '') + esc(label) + '</button>';
-  return '<h3>Money in by MoMo<span class="spacer"></span><span class="momo-ctl">' +
-    toggle('watch', m.watching, 'Watch Messages', 'Read Messages every twenty seconds for payment alerts.') +
-    toggle('auto', m.auto, 'Book without asking', 'Post a matched alert on its own. Off means you see each one first.') +
+  return '<h3>MoMo money in and out<span class="spacer"></span><span class="momo-ctl">' +
+    toggle('watch', m.watching, 'Watch Messages', 'Read Messages every twenty seconds for MoMo alerts, both ways.') +
+    toggle('auto', m.auto, 'Book without asking',
+      'Post a matched payment in on its own, the moment the alert arrives. A send out always waits for you, ' +
+      'because only you can say whether it was money back to a client or the shop paying for something.') +
     '<button class="btn sm" data-momo-check>Check Messages now</button></span></h3><div class="card-b">' +
     '<p class="momo-sum">' + (waiting.length
       ? (m.waiting_total
-        ? '<b>' + esc(money(m.waiting_total)) + '</b> in ' + pluralise(waiting.length, 'notice') + ' to check'
+        ? '<b>' + esc(money(m.waiting_total)) + '</b> in ' + pluralise(waiting.length, 'notice') + ' to check' +
+          (sends.length ? ' · ' + pluralise(sends.length, 'send') + ' going out' : '')
         : waiting.length + (waiting.length === 1 ? ' notice with no figure' : ' notices with no figure') + ' to check')
       : '<b>Nothing is waiting.</b>') +
     (m.booked ? '<span>· ' + m.booked + ' booked, ' + esc(money(m.booked_total)) + ' in</span>' : '') +
+    (m.sent ? '<span>· ' + m.sent + ' out, ' + esc(money(m.sent_total)) + '</span>' : '') +
     '<span>· clients pay into <b>' + esc(m.number) + '</b></span>' +
     (m.checked ? '<span>· last looked ' + esc(fdatetime(m.checked)) + '</span>' : '') + '</p>' +
     (m.status ? '<p class="sig-note">' + esc(m.status) + '</p>' : '') +
@@ -935,7 +959,9 @@ function paintMomo(payload) {
 function syncMomoRow(row) {
   const clientId = row.querySelector('.momo-client').value;
   const amount = Number(row.querySelector('.momo-amt').value || 0);
-  row.querySelector('.momo-job').innerHTML = momoJobOptions(clientId, momoGuess(clientId, amount));
+  const out = row.dataset.out === '1';
+  row.querySelector('.momo-job').innerHTML = momoJobOptions(clientId, momoGuess(clientId, amount),
+    out ? 'Money back on their account' : '');
 }
 /* The Messages watcher runs on the server, so a payment can arrive while this screen is open.
    A repaint while the shop is typing into the panel would wipe the words, so focus stays safe. */
@@ -951,7 +977,8 @@ function watchMomoPanel() {
     const before = S.momo || { signals: [] };
     let res;
     try { res = await loadMomo(); } catch (e) { return; }
-    const moved = res.waiting !== before.waiting || res.booked_total !== before.booked_total;
+    const moved = res.waiting !== before.waiting || res.booked_total !== before.booked_total ||
+      res.sent_total !== before.sent_total;
     if (!moved) return;
     render();   /* a fresh notice or a fresh booking moves the KPI figures too */
   }, 20000);
@@ -1546,12 +1573,16 @@ function notifyCard(job, n) {
   S.notify.byId = {};
   S.notify.client = n.client;
   n.messages.forEach((m) => { S.notify.byId[m.id] = m; });
+  /* An automatic message with no provider set up would sit queued and give the shop no way to
+     actually tell the client, so on those channels the handoff buttons stay available. */
+  const blocked = {};
+  (n.blocked || []).forEach((b) => { blocked[b.channel] = b.reason; });
   const newest = n.messages.reduce((a, b) => (b.state === 'Queued' && b.id > a ? b.id : a), 0);
   const rows = n.messages.map((m) => {
     const waiting = m.state === 'Queued';
     const automatic = !!m.auto_send;
     const label = automatic
-      ? (m.delivery_state === 'Sent' ? 'Sent automatically'
+      ? (m.delivery_state === 'Sent' ? (m.provider_id ? 'Sent automatically' : 'Sent by the shop')
         : m.delivery_state === 'Sending' ? 'Sending automatically'
           : m.delivery_state === 'Failed' ? 'Delivery failed'
             : m.delivery_state === 'Cancelled' ? 'Cancelled'
@@ -1563,9 +1594,14 @@ function notifyCard(job, n) {
           ? '<p class="hint delivery-error">Retry scheduled after attempt ' + m.delivery_attempts + '.</p>'
           : m.delivery_state === 'Cancelled'
             ? '<p class="hint delivery-error">The client withdrew permission; this message was not sent.</p>'
-            : '<p class="hint">Sent by the shop server when the provider is available.</p>')
+            : m.delivery_state === 'Sent' && !m.provider_id
+              ? '<p class="hint">Carried by the shop and closed here by hand.</p>'
+              : '<p class="hint">Sent by the shop server when the provider is available.</p>')
       : '';
     const verb = m.channel === 'WhatsApp' ? 'Open in WhatsApp' : 'Open in Mail';
+    /* A client who withdrew permission is not to be written to, buttons or otherwise. */
+    const aside = m.delivery_state !== 'Cancelled';
+    const handoff = aside && (!automatic || !!blocked[m.channel]);
     return '<details class="msg' + (waiting ? ' waiting' : '') + '"' + (m.id === newest ? ' open' : '') + '>' +
       '<summary><span class="pill n-' + esc(automatic ? m.delivery_state : m.state) + '">' + esc(label) + '</span>' +
       '<b>' + esc(m.event) + '</b><span class="m-chan">' + esc(m.channel) + ' &middot; ' + esc(m.to_address) + '</span>' +
@@ -1573,14 +1609,16 @@ function notifyCard(job, n) {
       '<p class="m-body">' + esc(m.body) + '</p>' +
       details +
       '<div class="m-act">' +
-      (automatic
-        ? (m.delivery_state === 'Failed'
-          ? '<button class="btn sm primary" data-notify-retry="' + m.id + '">Retry now</button>' : '')
-        : '<button class="btn sm' + (m.channel === 'WhatsApp' ? ' primary' : '') + '" data-notify-open="' + m.id + '">' + verb + '</button>' +
+      (automatic && m.delivery_state === 'Failed'
+        ? '<button class="btn sm primary" data-notify-retry="' + m.id + '">Retry now</button>' : '') +
+      (handoff
+        ? '<button class="btn sm' + (m.channel === 'WhatsApp' && handoff ? ' primary' : '') +
+          '" data-notify-open="' + m.id + '">' + verb + '</button>' +
           '<button class="btn sm ghost" data-notify-copy="' + m.id + '">Copy</button>' +
           (m.state === 'Sent'
             ? '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Queued">Back to queued</button>'
-            : '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Sent">Mark as sent</button>')) +
+            : '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Sent">Mark as sent</button>')
+        : '') +
       '<span class="spacer"></span>' +
       '<button class="btn sm ghost danger" data-notify-del="' + m.id + '">Remove</button>' +
       '</div></details>';
@@ -1591,8 +1629,9 @@ function notifyCard(job, n) {
   const canSend = n.whatsapp_to || n.email_to;
   return '<div class="section-h">Tell the client' +
     (n.to_send ? ' <span class="pill n-Queued">' + pluralise(n.to_send, 'message') + ' to send</span>' : '') +
-    '</div><p class="hint" style="margin:8px 0 0">Pending, Printing and Ready updates are sent automatically ' +
-    'to channels the client agreed to use. Other messages can still be opened as drafts for staff to send.</p>' +
+    '</div><p class="hint" style="margin:8px 0 0">Pending, Printing, Ready and Delivered updates go out ' +
+    'automatically on the channels the client agreed to. Other messages can still be opened as drafts ' +
+    'for staff to send.</p>' +
     (rows ? '<div class="msgs">' + rows + '</div>' : '<p class="hint" style="margin-top:8px">Nothing has been written for this job yet.</p>') +
     (canSend
       ? '<div class="section-h sub">Write it again, or send a stage you skipped</div>' + again
@@ -1603,6 +1642,13 @@ function notifyCard(job, n) {
       ? '<p class="hint" style="margin-top:8px">Automatic updates were skipped on ' +
         n.not_consented.map(esc).join(' and ') +
         ' because permission is not recorded. Edit the client record to record consent.</p>'
+      : '') +
+    (n.blocked && n.blocked.length
+      ? '<p class="sig-note" style="margin-top:8px">' + n.blocked.map((b) =>
+          esc(b.channel) + ' is queued and waiting, but cannot leave this Mac on its own: ' +
+          esc(b.reason)).join(' ') +
+        ' Until that is set up, press ' + (n.blocked[0].channel === 'WhatsApp' ? 'WhatsApp' : 'Email') +
+        ' above — the message opens ready to send, and Mark as sent closes it here.</p>'
       : '') +
     (n.missing.length && canSend
       ? '<p class="hint" style="margin-top:8px">' + n.missing.map((c) =>
@@ -2007,8 +2053,8 @@ function clientPicker(selectedId) {
     '<label class="field"><span>Email</span><input name="new_email" type="email" maxlength="160" placeholder="name@example.com"></label>' +
     '<label class="field"><span>Type</span><select name="new_kind">' + S.boot.kinds.map((k) => '<option>' + esc(k) + '</option>').join('') + '</select></label>' +
     '<label class="field wide"><span>Area / address</span><input name="new_address" maxlength="400" placeholder="Neighbourhood, city"></label>' +
-    '<label class="consent wide"><input type="checkbox" name="new_whatsapp_updates"><span>Client agreed to receive job updates on WhatsApp</span></label>' +
-    '<label class="consent wide"><input type="checkbox" name="new_email_updates"><span>Client agreed to receive job updates by email</span></label>' +
+    '<label class="consent wide"><input type="checkbox" name="new_whatsapp_updates" checked><span>Client agreed to receive job updates on WhatsApp</span></label>' +
+    '<label class="consent wide"><input type="checkbox" name="new_email_updates" checked><span>Client agreed to receive job updates by email</span></label>' +
     '</div></div></div>';
 }
 function clientOptions(selectedId, filter) {
@@ -2679,7 +2725,7 @@ const ACTIONS = {
       const n = res.notice;
       if (!n) { toast('That notice was already in the list'); box.value = ''; paintMomo(res); return; }
       if (n.state === 'Booked') toast('Booked ' + money(n.amount) + ' for ' + (n.client || 'the client'), 'good');
-      else if (n.direction === 'Out') toast('That reads as money going out, not in — left for a look');
+      else if (n.direction === 'Out') toast('That reads as money going out — press Record send on it');
       else toast('Read ' + (n.amount ? money(n.amount) : 'a notice') + ' from it' +
         (n.client ? ' · ' + n.client : '') + ' — check it below', 'good');
       box.value = '';
@@ -2698,6 +2744,32 @@ const ACTIONS = {
       });
       toast('Booked ' + money(res.payment.amount) + ' for ' + res.payment.client +
         ' · ' + (res.payment.ref ? 'against ' + res.payment.ref : 'kept as account credit'), 'good');
+      await afterMutation(true);
+    } catch (err) { fail(err); }
+  },
+  async 'momo-send'(el) {
+    const row = el.closest('.sig');
+    const clientId = row.querySelector('.momo-client').value;
+    const amount = row.querySelector('.momo-amt').value;
+    const cat = row.querySelector('.momo-cat');
+    if (!(Number(amount) > 0)) { toast('Type the amount that went out', 'bad'); return; }
+    if (!clientId && !confirm('Nobody in the book is chosen, so this goes in as the shop paying out ' +
+      money(Number(amount)) + (cat ? ' for ' + cat.value.toLowerCase() : '') + '.\n\n' +
+      'Press Cancel instead if the money actually went back to one of your clients — then choose them ' +
+      'and it books as a refund on their account.')) return;
+    try {
+      const res = await api('/api/momo/' + row.dataset.sig + '/send', {
+        method: 'POST', body: JSON.stringify({
+          amount: amount, client_id: clientId, job_id: row.querySelector('.momo-job').value,
+          category: cat ? cat.value : '',
+        }),
+      });
+      const r = res.recorded;
+      toast(r.recorded_as === 'refund'
+        ? 'Refunded ' + money(r.amount) + ' to ' + r.client +
+          ' · ' + (r.ref ? 'against ' + r.ref : 'their account')
+        : 'Recorded ' + money(r.amount) + ' as money out · ' + r.category +
+          (r.payee ? ' · ' + r.payee : ''), 'good');
       await afterMutation(true);
     } catch (err) { fail(err); }
   },

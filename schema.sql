@@ -168,7 +168,8 @@ CREATE TABLE IF NOT EXISTS money_signals (
   state        TEXT NOT NULL DEFAULT 'Unreviewed',   -- Unreviewed | Booked | Ignored
   client_id    INTEGER REFERENCES clients(id) ON DELETE SET NULL,
   job_id       INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
-  payment_id   INTEGER REFERENCES payments(id) ON DELETE SET NULL,
+  payment_id   INTEGER REFERENCES payments(id) ON DELETE SET NULL,   -- money in, or a refund out
+  expense_id   INTEGER REFERENCES expenses(id) ON DELETE SET NULL,   -- a send to someone who is not a client
   reason       TEXT,                                 -- why it is unsure, for the human to read
   seen_at      TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   booked_at    TEXT

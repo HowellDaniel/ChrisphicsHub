@@ -231,15 +231,16 @@ well; the app's backup action writes to the mounted disk, which is not an indepe
 
 The hosted book starts empty. It does not import or change the records on the shop computer.
 Configure WhatsApp and email provider secrets separately in the Render service environment
-if automatic customer messages are wanted. Record each client's channel consent in the app;
-without provider settings, those messages cannot be delivered.
+if automatic customer messages are wanted. New clients start opted in on both channels, which
+their record can turn off; without provider settings the messages queue and wait for staff to
+carry them from the job screen instead.
 
 ## The nine screens
 
 **Dashboard** — money in today / this week / month to date, what customers still owe,
 what is late, what is ready for pickup, a 15-day cash chart, and what you print most.
-Above the tiles sits **Money in by MoMo**: payment alerts the shop did not type, read out of
-Messages or pasted in, waiting to be booked ([see below](#money-in-by-momo)).
+Above the tiles sits **Money in and out by MoMo**: wallet alerts the shop did not type, read
+out of Messages or pasted in, waiting to be booked ([see below](#money-in-and-out-by-momo)).
 Below that: quotes still waiting for an answer, enquiries due for a chase, and where the
 month's money went.
 
@@ -326,11 +327,11 @@ costs or an expense and it turns into a real figure.
 Every change is written to the job's record: status moves, edits (shown as
 `Unit price: ₵ 45.00 -> ₵ 50.00`), notes and payments. Nothing is silently overwritten.
 
-## Money in by MoMo
+## Money in and out by MoMo
 
 Clients pay into **0506399641**. When a payment alert arrives as an SMS in **Messages** on
-this Mac, the dashboard should already know about it — the *Money in by MoMo* card at the top
-of the Dashboard is how that happens.
+this Mac, the dashboard should already know about it — the *MoMo money in and out* card at the
+top of the Dashboard is how that happens.
 
 **Watch Messages** turns on a reader that looks at Messages every twenty seconds. It opens
 `~/Library/Messages/chat.db` **read-only**, never writes to it, and never sends anything.
@@ -354,9 +355,9 @@ Number and name are what tie an alert to a client: the payer's number is matched
 client's phone and WhatsApp (normalised to the same 233 form), and if no number matches, the
 name is tried. That is as far as it goes — nothing is guessed, and an alert that cannot be
 placed waits in the panel with the reason written out, so a person can name the client and
-pick the job. **Money going out** (`you paid`, `withdraw`, `debited`…) is flagged and never
-booked as a payment in; airtime messages, prizes and promotions are dropped and never appear
-as a notice at all.
+pick the job. **Money going out** (`you sent`, `sent to`, `paid to`, `withdraw`, `debited`…)
+is flagged and never booked as a payment in — it has its own recording path below. Airtime
+messages, prizes and promotions are dropped and never appear as a notice at all.
 
 Press **Book it** and the money enters the book like any other payment: `MoMo` as the method,
 **the client's own name as the transaction reference**, the amount, the job you chose (or left
@@ -364,6 +365,22 @@ as *Kept on their account (credit)* when nothing is owed), and the raw alert kep
 as the proof. The collected and owed figures on the Dashboard move at once, and while the
 Dashboard is open the card refreshes on its own every twenty seconds, so an alert that arrives
 while you are working shows itself without a click.
+
+**A send out belongs in the book as well.** Money leaving the wallet is either the shop paying
+for something or money handed back to a client, and only the person at the counter knows which
+— so a send never books itself, whatever **Book without asking** is set to. The row asks
+**Who this went to**, and the two answers are recorded differently:
+
+* choose the client and **Record send** writes a **Refund** on their account. The amount comes
+  off what they had paid, the job's balance grows back, and the job timeline says
+  *refunded to the client* — never *received*;
+* leave it on **Nobody in the book — money out**, choose a **Money out for** category, and it
+  enters the Expenses ledger against the payee named in the alert, with the raw text kept as
+  the proof.
+
+The panel counts sends separately from money in, so the two never add up to the wrong total.
+Delete that payment or expense later and the notice comes back to the waiting list with a line
+saying why, instead of vanishing from both places at once.
 
 **Book without asking** takes the last click away: an alert whose amount, direction and client
 all read cleanly books itself the moment it is seen. It is off by default and asks you to
@@ -382,12 +399,19 @@ name and the direction come back as they should.
 
 ## Telling the client
 
-When a job is first booked and when its status changes to **Pending**, **Printing** or
-**Ready**, the shop server automatically sends an update to each channel the client has
-agreed to use. **Quotes, Delivered and Cancelled** messages remain available as drafts for
-staff to open and send. Both channels are optional; edit a client and tick the matching
-permission box only after they have agreed to receive job updates on that channel. Existing
-clients are opted out until the shop records that permission.
+When a job is first booked and when its status changes to **Pending**, **Printing**, **Ready**
+or **Delivered**, the shop server automatically writes an update for each channel the client
+has agreed to use. **Quotes and Cancelled** messages remain available as drafts for staff to
+open and send, because those are the shop's judgement rather than a stage the client is
+waiting on. Both channels are optional. A client added from now on is opted in on both, and
+the first launch of this build opts in every client already in the book once — untick the
+matching permission box on a client's record to stop one channel, which also calls off
+anything still queued on it.
+
+An automatic message whose channel the client has not agreed to is never written, and the job
+screen says which channel was skipped and why. A client with no WhatsApp number or no email on
+file cannot be reached on that channel either; the job screen shows the gap and links to their
+record so it can be filled in.
 
 Automatic messages are written to the job's durable queue first. If the provider is
 unavailable or the shop server has no internet, it retries later; after eight unsuccessful
@@ -395,6 +419,14 @@ attempts the message is marked failed and the job screen offers **Retry now**. T
 provider error remain visible for review. Successful deliveries appear in the job timeline.
 Provider acceptance is recorded, but email/WhatsApp cannot guarantee that the recipient's
 device displayed or read a message.
+
+**Until a provider is set up, the shop carries the news itself and the book keeps the record.**
+A queued message with nothing behind it still shows **Open in WhatsApp** or **Open in Mail**,
+**Copy** and **Mark as sent** on the job screen, and the card names the exact settings that are
+missing. Marking one sent closes it and writes *update carried by the shop* into the job
+timeline, and the message is not sent a second time if a provider is configured afterwards —
+press **Back to queued** on it if you want the server to take it from there. A message the
+client asked not to receive is called off and gets no buttons at all.
 
 Before automatic delivery can work on a channel, configure that provider in the environment
 of the computer running `server.py` (never paste credentials into the app, source files or
@@ -430,12 +462,19 @@ $env:CHRISPHICS_EMAIL_SMTP_SECURITY = "starttls"
 Port 587 uses STARTTLS by default; set `CHRISPHICS_EMAIL_SMTP_SECURITY=ssl` for an SSL-wrapped
 SMTP service (commonly port 465). Environment changes take effect after restarting the
 server. If a provider is not configured, messages stay queued and show the missing settings;
-the server never reports them as sent.
+the server never reports them as sent, and the job screen hands them to the shop to send by
+hand instead.
 
-Email drafts and messages include the job reference, work, total, due date and balance.
-WhatsApp auto updates use the approved short status template above. A client with no
-WhatsApp number or email, or without recorded consent for a channel, is not automatically
-contacted on that channel.
+Email drafts and messages include the job reference, work, total, due date and balance. Once
+WhatsApp is configured, automatic updates use the approved short status template above; until
+then the queued message carries the shop's full wording, because it leaves through the shop's
+own WhatsApp. Either way the words are written before you press anything, and **Copy** always
+gives you the exact text in the book.
+
+Set `CHRISPHICS_SHOP_PHONE` (and optionally `CHRISPHICS_SHOP_NAME`, `CHRISPHICS_SHOP_TAGLINE`,
+`CHRISPHICS_SHOP_ADDRESS`) in the same environment: the number is what the client is told to
+call. With no number set, the message simply leaves that line out rather than hand the client a
+placeholder that reaches nobody.
 
 There is one message per stage per channel, so retrying or repeating a status does not
 double-send it. If job details change before a queued notice is sent, the message is refreshed
@@ -477,11 +516,13 @@ address and the currency symbol that appears on job sheets. The lists of service
 units, payment methods and client types are the `CATEGORIES`, `UNITS`, `PAY_METHODS`
 and `KINDS` lines just below it; add or rename entries as you like.
 
-The phone (`+233 000 000 000`) and address (`Accra, Ghana`) in that block are still
-placeholders. They print at the top of every job sheet, and since the client messages sign
-off with them ("Call or WhatsApp +233 000 000 000…", "ready for collection at Accra, Ghana"),
-they land in front of your customers either way. Set them to the shop's real details before
-handing a sheet — or a message — to anyone.
+The phone in that block is empty and the address (`Accra, Ghana`) is still a placeholder. Both
+print at the top of every job sheet, and the client messages sign off with them, so they land in
+front of your customers either way. Rather than edit the program, set them in the environment of
+whatever starts the server — `CHRISPHICS_SHOP_PHONE`, `CHRISPHICS_SHOP_ADDRESS`,
+`CHRISPHICS_SHOP_NAME`, `CHRISPHICS_SHOP_TAGLINE` — and restart. Until a number is set, messages
+simply leave the "Call or WhatsApp…" line out; a customer is never handed a number that reaches
+nobody.
 
 The `.app` carries its own copy of the program, so after editing anything run
 `./desktop/build-app.sh` and reopen the app. That only rebuilds the program — your data
