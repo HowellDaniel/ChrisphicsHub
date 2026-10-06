@@ -328,6 +328,14 @@ async function boot() {
   if (S.boot.db) $('#footDb').textContent = S.boot.db;
   paintNav();
 }
+/* Whether *this* device is holding the book open with a session of its own. The shop's own
+   computer never does — it is the machine the records sit on — so it gets no sign-out button. */
+function paintSession() {
+  const btn = $('#signOut');
+  if (!btn) return;
+  const s = S.session || {};
+  btn.hidden = !(s.required && s.authenticated && !s.this_is_the_shop_computer);
+}
 function paintNav() {
   const b = S.boot;
   const badges = {
@@ -340,6 +348,7 @@ function paintNav() {
     dashboard: '',
     reports: '',
     sync: '',
+    shop: '',
   };
   $$('.navlink[data-view]').forEach((a) => {
     const view = a.dataset.view;
@@ -362,6 +371,14 @@ function paintFoot() {
   if (b.open_quotes) bits.push(plural(b.open_quotes, 'quote'));
   if (b.open_leads) bits.push(plural(b.open_leads, 'enquiry'));
   $('#footCounts').textContent = bits.join(' · ');
+  // One book, in one file, on one Mac: how recently it was copied belongs where it can be seen
+  // from any screen, because the screens that need it are the ones that come after a loss.
+  const foot = $('#footBackup');
+  const copy = b.backup || {};
+  if (foot) {
+    foot.textContent = copy.at ? fdate(copy.at.slice(0, 10)) : 'never';
+    foot.classList.toggle('late', !!copy.stale);
+  }
 }
 async function refreshChrome() {
   try { S.boot = await api('/api/bootstrap'); } catch (e) { /* keep going */ }
@@ -474,6 +491,8 @@ function emptyState(title, note, action) {
     (action || '') + '</div>';
 }
 function loginScreen(message) {
+  S.session = { required: true, authenticated: false };
+  paintSession();
   $('#topbar').innerHTML = '';
   $('#view').innerHTML = '<div class="login-card card"><h1>Sign in to the shop book</h1>' +
     '<p class="hint">Enter the shop password to access shared records.</p>' +
@@ -531,11 +550,13 @@ async function render() {
     else if (r.view === 'reports') await viewReports(r);
     else if (r.view === 'leads') await viewLeads(r);
     else if (r.view === 'expenses') await viewExpenses(r);
+    else if (r.view === 'shop') await viewShop(r);
     else await viewDashboard(r);
     if (r.id && r.view === 'jobs') openJobDrawer(Number(r.id));
     if (r.id && r.view === 'clients') openClientDrawer(Number(r.id));
     if (r.id && r.view === 'leads') openLeadDrawer(Number(r.id));
   } catch (err) {
+    if (err.status === 401) { loginScreen('This device has been out of the book for a while. Enter the shop password again.'); return; }
     v.innerHTML = emptyState('Could not load this page', err.message,
       '<button class="btn" onclick="location.reload()">Try again</button>');
   }
@@ -1212,6 +1233,167 @@ function weekStart() {
   const d = new Date(Date.now() - 6 * 86400000);
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
+
+/* ------------------------------------------------------------- shop & devices
+   The counter's own screen: where the book lives on the Wi-Fi, how a phone gets it,
+   who is signed in, and whether the book has been copied lately. Everything here is
+   about the shop, not about a job. */
+async function viewShop() {
+  const shop = await api('/api/shop');
+  let devices = [];
+  try { devices = (await api('/api/devices')).devices || []; } catch (e) { /* hosted or signed out */ }
+  const login = shop.login, copy = shop.backup;
+  const address = shop.address;
+  topbar('Shop & devices',
+    (shop.secure ? 'HTTPS' : 'plain HTTP') + ' · ' + devices.length + ' signed in · ' +
+    (copy.at ? 'book copied ' + fdate(copy.at.slice(0, 10)) : 'the book has never been copied'),
+    '', [{ label: login.chosen_on_this_mac ? 'Change the password' : 'Choose a password',
+          action: 'shop-password', primary: true },
+         { label: 'Install page', action: 'setup-page' },
+         { label: '+ New job', action: 'new-job' }]);
+  $('#view').innerHTML =
+    '<div class="grid kpis">' +
+      stat('Shop address', '<span class="amt">' + esc(address.replace(/^https?:\/\//, '').replace(/\/$/, '')) + '</span>',
+           shop.reachable_from_wifi ? 'devices on this Wi-Fi reach the book here'
+                                    : 'only this Mac can reach it right now') +
+      stat('Sign-in', login.required ? (login.from_environment ? 'Set by the service' : 'One shop password') : 'Not required',
+           login.required ? 'every other device has to know it'
+                          : 'anyone on this network could read the book',
+           login.required ? '' : 'warn') +
+      stat('Signed-in devices', devices.length, devices.length
+           ? 'phones and laptops holding the book open' : 'nothing but this Mac') +
+      stat('Copies of the book', copy.copies || 0,
+           copy.at ? 'last one ' + copy.note : 'none yet — the book exists in one place only',
+           copy.stale ? 'warn' : '') +
+    '</div>' +
+    (login.required ? '' : '<div class="card warn-card"><div class="card-b">' +
+      '<b>The book is open to anything on this Wi-Fi.</b>' +
+      '<p class="hint">Choose one shop password and a phone left on the counter stops being the ' +
+      'whole ledger. It is kept as a scrambled hash inside the book file, never as the word itself, ' +
+      'and every device is signed out whenever it changes.</p>' +
+      '<button class="btn primary" data-action="shop-password">Choose the shop password</button>' +
+      '</div></div>') +
+    '<div class="grid split">' +
+    '<div class="card"><h3>Put the book on a device</h3><div class="card-b">' +
+      '<p class="hint">A phone or laptop opens one page, trusts the shop certificate once, then ' +
+      'keeps the app on its home screen. The records stay on this Mac — the device only ever ' +
+      'holds a window onto them.</p>' +
+      '<p><a class="btn primary" data-action="setup-page" href="/setup">Open the install page</a></p>' +
+      (shop.secure
+        ? '<p class="hint">This address is HTTPS, so a browser will allow it to be installed.' +
+          (shop.certificate ? ' The shop certificate is on that page, with its fingerprint.' : ' No certificate file has been made yet; run <code>tools/shop-server.sh certs</code> on this Mac.')
+        + '</p>'
+        : '<p class="err">Plain HTTP will open the book but will not let a device install it or keep ' +
+          'it offline. Run <code>tools/shop-server.sh install</code> on this Mac for the HTTPS address.</p>') +
+      '<p class="hint">' + (shop.reachable_from_wifi
+        ? 'Devices on this Wi-Fi can reach the book now.'
+        : 'Only this Mac can reach the book. Start the shop server with <code>tools/shop-server.sh install</code> to let the counter’s phone in.') + '</p>' +
+    '</div></div>' +
+    '<div class="card"><h3>Kept awake for the shop<span class="spacer"></span></h3><div class="card-b">' +
+      '<p class="hint">' + (shop.awake
+        ? 'This Mac is being held awake while the book is served, so a phone on the counter can always reach it.'
+        : 'If this Mac sleeps, every installed device goes quiet with it. The always-on server asks ' +
+          'for it to stay awake; this window was opened without that request.') + '</p>' +
+    '</div></div>' +
+    '</div>' +
+    '<div class="card"><h3>Signed in on these devices<span class="spacer"></span>' +
+      '<button class="btn sm ghost" data-action="shop-devices">Refresh</button></h3>' +
+      '<div class="tablewrap"><table><thead><tr><th>Device</th><th>Since</th><th>Last used</th><th></th></tr></thead><tbody>' +
+      (devices.length ? devices.map((d) => '<tr><td><span class="strong">' + esc(d.device || 'a device') + '</span></td>' +
+        '<td class="ref">' + fdate((d.created_at || '').slice(0, 10)) + '</td>' +
+        '<td class="ref">' + fdate((d.last_seen || '').slice(0, 10)) + '</td>' +
+        '<td class="num"><button class="btn sm ghost" data-device-revoke="' + d.id + '">Sign out</button></td></tr>').join('')
+        : '<tr><td colspan="4" class="hint">No other device is signed in. Once a phone installs the ' +
+          'app and knows the password, it appears here — and can be thrown out from here.</td></tr>') +
+      '</tbody></table></div>' +
+      '<p class="hint">A device stays signed in for thirty days of ordinary use. Signing one out here ' +
+      'takes effect the next time it asks for something.</p></div>' +
+    '<div class="card"><h3>The shop password<span class="spacer"></span></h3><div class="card-b">' +
+      '<p class="hint">' + (login.from_environment
+        ? 'This server takes its password from the environment (<code>CHRISPHICS_AUTH_PASSWORD</code>), ' +
+          'so it cannot be changed from here. Remove it from the service settings to choose one in the app.'
+        : login.required
+          ? 'Chosen on this Mac and kept in the book as a hash. Anyone who knows it can read the ' +
+            'records, so treat it like the till key: hand it to staff, not to a screen.'
+          : 'Nothing is set. Until it is, the book is readable by any device that finds the address.') + '</p>' +
+      '<p>' + (login.from_environment ? ''
+        : '<button class="btn" data-action="shop-password">' +
+          (login.required ? 'Change the shop password' : 'Choose the shop password') + '</button> ' +
+          (login.required && !shop.reachable_from_wifi
+            ? '<button class="btn ghost" data-action="shop-password-off">Switch sign-in off</button>' : '')) + '</p>' +
+    '</div></div>' +
+    '<div class="card"><h3>Copies of the book<span class="spacer"></span>' +
+      '<button class="btn sm ghost" data-action="backup">Copy it now</button></h3><div class="card-b">' +
+      (copy.at
+        ? '<p class="hint">Last copy: <b>' + esc(copy.file) + '</b> on ' + esc(copy.at) + ' — ' + esc(copy.note) + '.</p>'
+        : '<p class="hint">The book has not been copied yet. One file holds every job, client and ' +
+          'payment, so a failed disk takes the whole account book with it.</p>') +
+      (copy.stale && copy.at
+        ? '<p class="err">More than a day without a copy. If the always-on server is running, the ' +
+          'nightly job at 22:30 is missing — check <code>tools/shop-server.sh status</code>.</p>' : '') +
+      '<p class="hint">Folder: <code>' + esc(copy.folder) + '</code>. Fourteen nights, one copy for each ' +
+      'of the last twelve months, and the last twelve copies asked for by hand — each one opened and '
+      + 'counted against the book before the older ones are cleared.</p>' +
+    '</div></div>';
+  restoreFocus();
+}
+
+function passwordForm(login) {
+  const changing = login.required && !login.from_environment;
+  openModal(modalHeader(changing ? 'Change the shop password' : 'Choose the shop password',
+    changing ? 'Every device is signed out, and each one has to be told the new password.'
+             : 'Long beats clever: four ordinary words are easier to remember than a trick') +
+    '<form id="shopPasswordForm">' +
+    (changing ? '<label class="field wide"><span>What it is now</span>' +
+      '<input name="current" type="password" autocomplete="current-password" required></label>' : '') +
+    '<label class="field wide"><span>New shop password</span>' +
+    '<input name="password" type="password" minlength="8" maxlength="200" autocomplete="new-password" required></label>' +
+    '<label class="field wide"><span>Once more</span>' +
+    '<input name="again" type="password" autocomplete="new-password" required></label>' +
+    '<p class="hint">Kept in the book as a salted hash, never as the word. Staff sign in on each ' +
+    'device with it; a wrong password five times makes that device wait.</p>' +
+    '<div class="err" id="shopPasswordErr"></div>' +
+    '<button class="btn primary">Save</button></form>');
+  $('#shopPasswordForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    if (f.password.value !== f.again.value) {
+      $('#shopPasswordErr').textContent = 'The two do not match yet';
+      return;
+    }
+    $('#shopPasswordErr').textContent = '';
+    try {
+      await api('/api/shop-password', { method: 'POST', body: JSON.stringify({
+        password: f.password.value, current: f.current ? f.current.value : '',
+      }) });
+      closeModal();
+      toast('The shop password is set. Every other device has to be told.', 'good');
+      await render();
+    } catch (err) { $('#shopPasswordErr').textContent = err.message; }
+  });
+}
+
+function passwordOffForm(login) {
+  openModal(modalHeader('Switch sign-in off', 'Only do this if every device is inside the shop'),
+    '<form id="shopPasswordOffForm">' +
+    '<label class="field wide"><span>The shop password</span>' +
+    '<input name="current" type="password" autocomplete="current-password" required></label>' +
+    '<p class="hint">Any device that can reach this address will then read the whole book without ' +
+    'asking — including a stranger’s phone on the same Wi-Fi.</p>' +
+    '<div class="err" id="shopOffErr"></div><button class="btn">Switch it off</button></form>');
+  $('#shopPasswordOffForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    $('#shopOffErr').textContent = '';
+    try {
+      await api('/api/shop-password', { method: 'DELETE',
+        body: JSON.stringify({ current: e.target.current.value }) });
+      closeModal();
+      toast('Sign-in is off. The book is open on this network.', 'warn');
+      await render();
+    } catch (err) { $('#shopOffErr').textContent = err.message; }
+  });
+}
+
 async function viewSpoiled() {
   const rows = await api('/api/spoiled');
   const total = rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
@@ -1895,11 +2077,12 @@ function installInstructions() {
   if (!window.isSecureContext) {
     steps = '<p>This address uses plain HTTP. Browsers require HTTPS before they allow this app ' +
       'to be installed or its offline app shell to be cached on another device.</p>' +
-      '<p>On this shop Wi-Fi, first download and trust the ' +
-      '<a href="http://' + location.hostname + ':8835/shop-root-ca.cer" download="CRISPprint-Shop-Root-CA.cer">CRISPprint shop certificate</a> ' +
-      'on this device, then open the HTTPS address supplied by the shop.</p>' +
-      '<p class="hint">Install a certificate only for a shop you trust. The fingerprint and ' +
-      'device setup steps are in the setup guide.</p>';
+      '<p>The shop’s install page carries the address, the certificate to trust and the steps for ' +
+      'this kind of device: <a href="/setup" target="_blank">open /setup</a> — or just the ' +
+      '<a href="/shop-root-ca.cer" download="CRISPprint-Shop-Root-CA.cer">shop certificate</a> ' +
+      'if this device already has the HTTPS address.</p>' +
+      '<p class="hint">Install a certificate only for a shop you trust. The page prints its ' +
+      'fingerprint so you can check the file is the one the shop made.</p>';
   } else if (ios) {
     steps = '<p>In Safari, tap <b>Share</b>, then choose <b>Add to Home Screen</b> and confirm.</p>';
   } else if (/Android/.test(ua)) {
@@ -2456,6 +2639,27 @@ async function afterMutation(keepDrawer) {
 }
 const ACTIONS = {
   'install-app'() { installApp().catch(fail); },
+  async 'shop-password'(el) {
+    try { passwordForm((await api('/api/shop')).login); } catch (err) { fail(err); }
+  },
+  async 'shop-password-off'() {
+    try { passwordOffForm((await api('/api/shop')).login); } catch (err) { fail(err); }
+  },
+  'setup-page'() { window.open('/setup', '_blank'); },
+  'shop-devices'() { render().catch(fail); },
+  async 'device-revoke'(el) {
+    try {
+      await api('/api/devices/' + el.dataset.deviceRevoke, { method: 'DELETE' });
+      toast('That device is signed out.', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  async 'sign-out'() {
+    try {
+      await api('/api/logout', { method: 'POST', body: '{}' });
+      loginScreen('Signed out of the shop book.');
+    } catch (err) { fail(err); }
+  },
   'toggle-more'() {
     const sheet = $('#moresheet');
     if (!sheet) return;
@@ -2928,6 +3132,8 @@ window.chrisphics = {
   try {
     await paintNetworkStatus();
     const session = await api('/api/session');
+    S.session = session;
+    paintSession();
     if (session.required && !session.authenticated) { loginScreen(); return; }
     await boot();
     await refreshChrome();

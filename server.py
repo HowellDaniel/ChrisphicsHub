@@ -23,6 +23,7 @@ import mimetypes
 import os
 import re
 import secrets
+import subprocess
 import sqlite3
 import ssl
 import smtplib
@@ -39,7 +40,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
 # One book wherever Chrisphics Hub is started from — the app, the .command or a bare
 # `python3 server.py` — so records never fork into two copies.
-SUPPORT = os.path.expanduser("~/Library/Application Support/Chrisphics Hub")
+SUPPORT = os.environ.get("CHRISPHICS_SUPPORT") or os.path.expanduser(
+    "~/Library/Application Support/Chrisphics Hub")
 DB_PATH = os.environ.get("CHRISPHICS_DB") or os.path.join(SUPPORT, "chrisphics.db")
 BACKUP_DIR = os.environ.get("CHRISPHICS_BACKUP_DIR") or os.path.join(SUPPORT, "Backups")
 # Where the book lived while the shop's name was misspelled. adopt_legacy_book() copies it
@@ -98,8 +100,17 @@ QUICK_LEAD = {"interest": "text", "value": "money", "follow_up": "date"}
 DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _db = None
-_sessions = {}
-AUTH_PASSWORD = os.environ.get("CHRISPHICS_AUTH_PASSWORD", "")
+# The shop's own sign-in. Chosen inside the app and kept in the book as a salted hash, so an
+# always-on server needs no secret in a plist and a copied backup gives away nothing.
+AUTH_PASSWORD = os.environ.get("CHRISPHICS_AUTH_PASSWORD", "").strip()
+SESSION_SECONDS = 30 * 24 * 60 * 60
+PBKDF2_ROUNDS = 200_000
+LOGIN_ALLOWED_FAILS = 5
+_login_tries = {}       # address -> [wrong answers, quiet until]
+LAN_NO_LOGIN = False    # --allow-unauthenticated-lan
+THROUGH_PROXY = False   # --trust-proxy: every visitor arrives as loopback, so loopback proves nothing
+SERVE = {"host": "127.0.0.1", "port": 8712, "tls": False}
+KEEP_AWAKE = False      # true while caffeinate is holding this Mac open for the shop Wi-Fi
 _notification_wakeup = threading.Event()
 # Reentrant: route() holds this while the handlers below take it again.
 _lock = threading.RLock()
@@ -1515,6 +1526,324 @@ def set_state(key, value):
                     " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
                     " updated_at = excluded.updated_at", (key, str(value)))
         _db.commit()
+
+
+# ----------------------------------------------------------------------- sign-in
+
+def hash_password(password, salt=None, rounds=PBKDF2_ROUNDS):
+    """Salted and deliberately slow: the book keeps this, never the words themselves. Hex, not
+    the digest's repr — a raw byte can print as a dollar sign, and the parts are split on those."""
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), rounds)
+    return "pbkdf2_sha256$%d$%s$%s" % (rounds, salt, digest.hex())
+
+
+def book_password():
+    return state_value("shop_password")
+
+
+def auth_required():
+    """True once a password exists — typed into the app on the shop Mac, or handed over in the
+    environment by a hosted service such as Render."""
+    return bool(AUTH_PASSWORD or book_password())
+
+
+def password_matches(candidate):
+    if not isinstance(candidate, str):
+        return False
+    if AUTH_PASSWORD:
+        return secrets.compare_digest(candidate, AUTH_PASSWORD)
+    record = book_password()
+    parts = record.split("$") if record else []
+    if len(parts) != 4 or parts[0] != "pbkdf2_sha256":
+        return False
+    try:
+        rounds = int(parts[1])
+    except ValueError:
+        return False
+    if not 1000 <= rounds <= 5_000_000:
+        return False
+    return secrets.compare_digest(record, hash_password(candidate, parts[2], rounds))
+
+
+def quiet_seconds(address):
+    """Wrong passwords get answered more slowly, so a neighbour cannot run a list at the shop."""
+    _wrong, until = _login_tries.get(address, (0, 0.0))
+    return max(0, int(round(until - time.time()))) if until > time.time() else 0
+
+
+def note_bad_login(address):
+    wrong, until = _login_tries.get(address, (0, 0.0))
+    wrong += 1
+    if wrong >= LOGIN_ALLOWED_FAILS:
+        until = time.time() + min(900, 30 * 2 ** (wrong - LOGIN_ALLOWED_FAILS))
+    _login_tries[address] = (wrong, until)
+    return max(0, int(round(until - time.time()))) if until > time.time() else 0
+
+
+def token_digest(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def device_name(user_agent):
+    """A short label for the list of signed-in devices, so a lost phone can be recognised and
+    thrown out. It names the machine, never the person."""
+    low = (user_agent or "").lower()
+    browser = ("Safari" if "safari" in low and "chrome" not in low else
+               "Edge" if "edg" in low else
+               "Chrome" if "chrome" in low else
+               "Firefox" if "firefox" in low else
+               "the app" if "chrisphicshub" in low or "crispprint" in low else "a browser")
+    if "iphone" in low or "ipod" in low:
+        machine = "iPhone"
+    elif "ipad" in low:
+        machine = "iPad"
+    elif "android" in low:
+        machine = "Android"
+    elif "windows" in low:
+        machine = "Windows"
+    elif "macintosh" in low or "mac os" in low:
+        machine = "Mac"
+    elif "crispprint" in low or "chrisphicshub" in low:
+        machine = "this Mac"
+    else:
+        machine = "a device"
+    return "%s · %s" % (machine, browser)
+
+
+def open_session(user_agent):
+    token = secrets.token_urlsafe(32)
+    with _lock:
+        _db.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
+        _db.execute("INSERT INTO sessions (token_hash, device, expires_at) VALUES (?, ?, ?)",
+                    (token_digest(token), device_name(user_agent)[:60],
+                     time.time() + SESSION_SECONDS))
+        _db.commit()
+    return token
+
+
+def touch_session(token):
+    """A device that keeps being used never has to sign in again; one idle for a month does."""
+    if not token:
+        return False
+    with _lock:
+        row = one("SELECT id, expires_at FROM sessions WHERE token_hash = ?", (token_digest(token),))
+        if not row:
+            return False
+        now = time.time()
+        if row["expires_at"] <= now:
+            _db.execute("DELETE FROM sessions WHERE id = ?", (row["id"],))
+            _db.commit()
+            return False
+        if row["expires_at"] - now < SESSION_SECONDS - 24 * 3600:
+            _db.execute("UPDATE sessions SET expires_at = ?, last_seen = datetime('now','localtime')"
+                        " WHERE id = ?", (now + SESSION_SECONDS, row["id"]))
+        else:
+            _db.execute("UPDATE sessions SET last_seen = datetime('now','localtime') WHERE id = ?",
+                        (row["id"],))
+        _db.commit()
+    return True
+
+
+def close_session(token):
+    with _lock:
+        _db.execute("DELETE FROM sessions WHERE token_hash = ?", (token_digest(token),))
+        _db.commit()
+
+
+def signed_in_devices():
+    return [dict(r) for r in q("SELECT id, device, created_at, last_seen FROM sessions"
+                               " WHERE expires_at > ? ORDER BY last_seen DESC", (time.time(),))]
+
+
+def revoke_device(device_id):
+    """Throw one device out of the book. Its cookie stays on the phone but no longer opens
+    anything, so the next time it is picked up it is asked for the password."""
+    with _lock:
+        cursor = _db.execute("DELETE FROM sessions WHERE id = ?", (int(device_id),))
+        _db.commit()
+    if not cursor.rowcount:
+        raise LookupError("That device is not signed in any more")
+    return {"revoked": int(device_id), "devices": len(signed_in_devices())}
+
+
+def set_shop_password(password, current):
+    """Replacing a password means knowing the one before it, and every device signs out when it
+    changes — a password lost with a stolen phone has to stay lost."""
+    password = "" if not isinstance(password, str) else password
+    if len(password) < 8:
+        raise ValueError("A shop password wants at least 8 characters — long beats clever here")
+    if len(password) > 200:
+        raise ValueError("That password is too long to keep")
+    if AUTH_PASSWORD:
+        raise ValueError("Sign-in is being set by CHRISPHICS_AUTH_PASSWORD in this server's"
+                         " environment. Take it out of the service settings to choose a"
+                         " password here instead.")
+    if book_password() and not password_matches(current):
+        raise ValueError("That is not the password the shop uses now")
+    set_state("shop_password", hash_password(password))
+    with _lock:
+        _db.execute("DELETE FROM sessions")
+        _db.commit()
+    return {"password_set": True, "devices": 0}
+
+
+def clear_shop_password(current):
+    if AUTH_PASSWORD:
+        raise ValueError("This server takes its sign-in from CHRISPHICS_AUTH_PASSWORD;"
+                         " clear it in the service settings to switch sign-in off")
+    if not book_password():
+        return {"password_set": False}
+    if not password_matches(current):
+        raise ValueError("That is not the password the shop uses now")
+    set_state("shop_password", "")
+    return {"password_set": False}
+
+
+# ------------------------------------------------------------------- shop Wi-Fi
+# One page a device opens before it installs the app: the address, a QR to point a camera at,
+# the shop certificate to trust, and the steps for that particular kind of device.
+
+TLS_DIR = os.path.expanduser("~/Library/Application Support/CRISPprint TLS")
+CA_DOWNLOAD = os.path.join(TLS_DIR, "device-download", "shop-root-ca.cer")
+QR_HELPER = os.path.join(SUPPORT, "qr-encode")
+
+
+def private_address(host):
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback
+
+
+def ca_fingerprint():
+    """Printed on the install page so a device can check the certificate it is about to trust
+    against the one written in the README, rather than taking a stranger's word for it."""
+    try:
+        with open(CA_DOWNLOAD, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return ""
+    return ":".join("%02X" % b for b in hashlib.sha256(raw).digest())
+
+
+def shop_url(fallback_host=""):
+    scheme = "https" if SERVE["tls"] else "http"
+    host, port = SERVE["host"], SERVE["port"]
+    if host in ("0.0.0.0", "::", ""):
+        # Bound to every address, so this device's own Host header is the only thing that says
+        # which of them it reached. Only a shape that cannot carry markup is allowed through
+        # (\Z, not $: a trailing newline would still match $).
+        named = re.match(r"^([A-Za-z0-9.\-]{1,120})(?::(\d{1,5}))?\Z", fallback_host or "")
+        if named:
+            host = named.group(1)
+            if named.group(2):
+                port = int(named.group(2))
+    return "%s://%s:%d/" % (scheme, host, port)
+
+
+def qr_png(words, pixels=560):
+    """The address as a QR, drawn by the small helper `tools/shop-server.sh` compiles into the
+    support folder. Without it the page still shows the address in type, so nothing is lost."""
+    if not (os.path.isfile(QR_HELPER) and os.access(QR_HELPER, os.X_OK)):
+        return None
+    out = os.path.join(SUPPORT, "qr-%s.png" % hashlib.sha1(
+        ("%s|%d" % (words, pixels)).encode("utf-8")).hexdigest()[:16])
+    if not os.path.isfile(out):
+        try:
+            subprocess.run([QR_HELPER, words, out, str(pixels)], timeout=20, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (subprocess.SubprocessError, OSError):
+            return None
+    try:
+        with open(out, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def setup_html(request_host=""):
+    url = shop_url(request_host)
+    fingerprint = ca_fingerprint()
+    secure = SERVE["tls"]
+
+    def esc(value):
+        return (str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace('"', "&quot;"))
+
+    trust = ("" if secure else
+             '<p class="warn">This address is plain HTTP. A browser will open the book but will'
+             ' not let it be installed as an app or keep it offline. Ask the shop to run'
+             ' <code>tools/shop-server.sh certs</code> and <code>install</code> on the shop Mac,'
+             ' then use the HTTPS address instead.</p>')
+    cert = ("" if not fingerprint else
+            '<h2>One certificate to trust first</h2>'
+            '<p>Phones and laptops will not open a shop address that they cannot check.'
+            ' Download the shop\'s own certificate once per device, then trust it in that'
+            ' device\'s settings.</p>'
+            '<p><a class="big" href="/shop-root-ca.cer">Download CRISPprint-Shop-Root-CA.cer</a></p>'
+            '<p class="fingerprint">It must read<br><code>%s</code></p>' % esc(fingerprint))
+    steps = [
+        ("iPhone or iPad", "Settings ▸ General ▸ VPN &amp; Device Management ▸ Download the"
+         " certificate, then Settings ▸ General ▸ About ▸ Certificate Trust Settings and turn"
+         " full trust on for it. Then open the address in Safari and use Share ▸ Add to Home Screen."),
+        ("Android", "Open the downloaded certificate in Settings ▸ Security ▸"
+         " Encryption &amp; credentials ▸ Install a certificate ▸ CA certificate. Then open the"
+         " address in Chrome and use the menu ▸ Install app."),
+        ("Windows", "Double-click the certificate ▸ Install Certificate ▸ Local Machine ▸ place"
+         " it in Trusted Root Certification Authorities. Then open the address in Edge and use the"
+         " install icon in the address bar."),
+        ("Another Mac", "Open the certificate and trust it in Keychain Access, then open the"
+         " address in Safari. On this Mac the desktop app already holds the same book."),
+    ]
+    return """<!doctype html><html lang=en><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<meta name=robots content="noindex">
+<title>Put %(shop)s on this device</title>
+<style>
+:root{color-scheme:light dark}
+body{font:16px/1.55 -apple-system,"Poppins",Segoe UI,Roboto,sans-serif;margin:0 auto;padding:28px 20px 60px;
+max-width:660px;color:#211a1c;background:#faf7f6}
+h1{font-size:26px;margin:0 0 4px}h2{font-size:18px;margin:30px 0 8px}
+.sub{color:#6d6165;margin:0 0 22px}
+.url{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid #e2d8d6;
+border-radius:12px;padding:14px 16px}
+.url a{font-weight:600;color:#a8232c;word-break:break-all;text-decoration:none}
+.qr{margin:14px 0 0}.qr img{width:184px;height:184px;image-rendering:pixelated;border-radius:10px;
+background:#fff;padding:8px;border:1px solid #e2d8d6}
+.big{display:inline-block;background:#c93a3f;color:#fff;padding:11px 16px;border-radius:10px;
+text-decoration:none;font-weight:600}
+ol{padding-left:22px}li{margin:14px 0}li b{display:block}
+code{font:13px ui-monospace,Menlo,Consolas,monospace}
+/* Only the fingerprint is one unbroken token that has to be allowed to split mid-run. */
+.fingerprint code{word-break:break-all}
+.fingerprint{background:#fff;border:1px solid #e2d8d6;border-radius:10px;padding:10px 14px;font-size:13px}
+.warn{background:#fdf0ee;border:1px solid #e9b7b3;border-radius:10px;padding:12px 14px}
+.note{color:#6d6165;font-size:14px}
+@media (prefers-color-scheme:dark){body{color:#eceaea;background:#1c1517}
+.url,.fingerprint,.qr img{background:#241d1f;border-color:#3a2f32}.warn{background:#2d1d1e;border-color:#5a2f31}}
+</style>
+<h1>Put %(shop)s on this device</h1>
+<p class=sub>Install the shop's records as an app. Nothing is copied to this device to keep:
+the book stays on the shop's own computer, and this is a window onto it.</p>
+<div class=url><span>The shop address</span><a href="%(url)s">%(url)s</a></div>
+%(qr)s%(trust)s
+<h2>Sign in</h2>
+<p>The shop keeps one password for its devices. Ask whoever runs the counter — it was chosen on
+the shop computer, and every device is signed out whenever it changes.</p>
+%(cert)s
+<h2>Install it</h2>
+<ol>%(steps)s</ol>
+<p class=note><a href="%(url)s">Open the shop book now</a> · Setup for the person at the counter is
+in the README under “Open and install over HTTPS on the same Wi-Fi”.</p>
+</html>""" % {
+        "shop": esc(SHOP["name"]), "url": esc(url), "cert": cert, "trust": trust,
+        "qr": ('<p class=qr><img src="/setup-qr.png" width="184" height="184" alt="QR code for'
+               ' the shop address"><br><span class=note>Camera on this text, or type the address.</span></p>'
+               if qr_png(url) else ""),
+        "steps": "".join("<li><b>%s</b>%s</li>" % (esc(t), d) for t, d in steps),
+    }
 
 
 def momo_watching():
@@ -3060,6 +3389,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        # Nothing on this server may be framed, sniffed as another type, or pulled at by a
+        # stranger's page. Inline style and script stay allowed because the pages here use them.
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Content-Security-Policy",
+                         "base-uri 'none'; object-src 'none'; frame-ancestors 'self';"
+                         " form-action 'self'")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -3124,7 +3461,7 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 operation_id = text(self.headers.get("X-Operation-Id"), 120)
                 protected = path.startswith("/api/") and path not in {
-                    "/api/session", "/api/login",
+                    "/api/session", "/api/login", "/api/logout",
                 }
                 if protected and not self.authenticated():
                     return self.send(401, {"error": "Sign in is required to access the shop book"})
@@ -3189,15 +3526,32 @@ class Handler(BaseHTTPRequestHandler):
                 return value
         return ""
 
-    def authenticated(self):
-        if not AUTH_PASSWORD:
-            return True
-        token = self.session_token()
-        expires = _sessions.get(token, 0)
-        if expires <= time.time():
-            _sessions.pop(token, None)
+    def client_ip(self):
+        if THROUGH_PROXY:
+            forwarded = self.headers.get("X-Forwarded-For", "")
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first[:60]
+        return self.client_address[0] if self.client_address else "?"
+
+    def is_shop_computer(self):
+        """Loopback means this Mac — the counter's own screen, which the shop already controls.
+        Behind a proxy every visitor arrives from the proxy's address, so loopback proves nothing."""
+        if THROUGH_PROXY:
             return False
-        return True
+        ip = self.client_ip()
+        return ip.startswith("127.") or ip == "::1"
+
+    def authenticated(self):
+        if not auth_required() or LAN_NO_LOGIN or self.is_shop_computer():
+            return True
+        return touch_session(self.session_token())
+
+    def cookie(self, token, max_age):
+        secure = "; Secure" if getattr(self.server, "is_tls", False) else ""
+        self.response_headers["Set-Cookie"] = (
+            "crispprint_session=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s"
+            % (token, max_age, secure))
 
     def emit(self, code, payload, path, params, headers=None):
         if isinstance(payload, tuple) and payload[0] == "csv":
@@ -3214,26 +3568,32 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/healthz":
             return 200, {"ok": True}
         if method == "GET" and path == "/api/session":
-            return 200, {"required": bool(AUTH_PASSWORD), "authenticated": self.authenticated()}
+            signed_in = self.authenticated()
+            return 200, {"required": auth_required(), "authenticated": signed_in,
+                         "from_environment": bool(AUTH_PASSWORD),
+                         "this_is_the_shop_computer": self.is_shop_computer()}
         if path == "/api/login" and method == "POST":
-            password = self.body().get("password", "")
-            if not AUTH_PASSWORD:
+            if not auth_required():
                 return 200, {"authenticated": True}
-            if not isinstance(password, str) or not secrets.compare_digest(password, AUTH_PASSWORD):
+            wait = quiet_seconds(self.client_ip())
+            if wait:
+                self.response_headers["Retry-After"] = str(wait)
+                return 429, {"error": "Too many wrong passwords from here. Wait %d seconds." % wait}
+            if not password_matches(self.body().get("password", "")):
+                wait = note_bad_login(self.client_ip())
+                if wait:
+                    self.response_headers["Retry-After"] = str(wait)
+                    return 429, {"error": "Password is incorrect. Wait %d seconds before"
+                                          " trying again." % wait}
                 return 401, {"error": "Password is incorrect"}
-            token = secrets.token_urlsafe(32)
-            _sessions[token] = time.time() + 7 * 24 * 60 * 60
-            self.response_headers["Set-Cookie"] = (
-                "crispprint_session=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800%s"
-                % (token, "; Secure" if getattr(self.server, "is_tls", False) else "")
-            )
+            _login_tries.pop(self.client_ip(), None)
+            self.cookie(open_session(self.headers.get("User-Agent", "")), SESSION_SECONDS)
             return 200, {"authenticated": True}
         if path == "/api/logout" and method == "POST":
-            _sessions.pop(self.session_token(), None)
-            self.response_headers["Set-Cookie"] = (
-                "crispprint_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0%s"
-                % ("; Secure" if getattr(self.server, "is_tls", False) else "")
-            )
+            token = self.session_token()
+            if token:
+                close_session(token)
+            self.cookie("", 0)
             return 200, {"authenticated": False}
         if seg and seg[0] == "api" and not self.authenticated():
             return 401, {"error": "Sign in is required to access the shop book"}
@@ -3244,6 +3604,26 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and (not seg or seg[0] != "api"):
             if path.startswith("/print/"):
                 return 200, ("raw", receipt_html(path_id(path.rsplit("/", 1)[1])), "text/html; charset=utf-8")
+            if path == "/setup":
+                return 200, ("raw", setup_html(self.headers.get("Host", "")), "text/html; charset=utf-8")
+            if path == "/setup-qr.png":
+                png = qr_png(shop_url(self.headers.get("Host", "")))
+                if not png:
+                    self.send(404, "No QR helper on this Mac", "text/plain")
+                    return None
+                return 200, ("raw", png, "image/png")
+            if path == "/shop-root-ca.cer":
+                # The shop's root certificate, handed to a device standing on the same Wi-Fi. A
+                # hosted deployment has no business distributing a Mac's trust root.
+                if not private_address(self.client_ip()):
+                    self.send(404, "The shop certificate is only handed out on the shop Wi-Fi",
+                              "text/plain")
+                    return None
+                if not os.path.isfile(CA_DOWNLOAD):
+                    self.send(404, "No certificate has been made for this shop", "text/plain")
+                    return None
+                return 200, ("file", CA_DOWNLOAD, "CRISPprint-Shop-Root-CA.cer",
+                             "application/x-x509-ca-cert")
             if not seg:
                 return 200, ("raw", open(os.path.join(PUBLIC, "index.html"), encoding="utf-8").read(),
                              "text/html; charset=utf-8")
@@ -3273,9 +3653,48 @@ class Handler(BaseHTTPRequestHandler):
                          "to_send": one("SELECT count(*) c FROM notifications WHERE state='Queued'"
                                         " AND delivery_state <> 'Cancelled'")["c"],
                          # Payment notices read off the network's alerts, waiting to be booked.
-                         "to_check": one("SELECT count(*) c FROM money_signals WHERE state = 'Unreviewed'")["c"]}
+                         "to_check": one("SELECT count(*) c FROM money_signals WHERE state = 'Unreviewed'")["c"],
+                         # What the shop screen and the sidebar need to know about the sign-in,
+                         # the address devices install from, and the book's own copies.
+                         "login": {"required": auth_required(), "from_environment": bool(AUTH_PASSWORD),
+                                   "chosen": bool(book_password())},
+                         "address": shop_url(self.headers.get("Host", "")),
+                         "secure": bool(getattr(self.server, "is_tls", False)),
+                         "backup": backup_report()}
         if method == "GET" and head == "dashboard":
             return 200, dashboard()
+        if method == "GET" and head == "shop":
+            return 200, {"shop": SHOP,
+                         "address": shop_url(self.headers.get("Host", "")),
+                         "setup": "/setup",
+                         "secure": bool(getattr(self.server, "is_tls", False)),
+                         "reachable_from_wifi": SERVE["host"] not in ("127.0.0.1", "localhost", "::1"),
+                         "awake": KEEP_AWAKE,
+                         "qr": os.path.isfile(QR_HELPER) and os.access(QR_HELPER, os.X_OK),
+                         "certificate": bool(ca_fingerprint()),
+                         "login": {"required": auth_required(),
+                                   "from_environment": bool(AUTH_PASSWORD),
+                                   "chosen_on_this_mac": bool(book_password())},
+                         "backup": backup_report()}
+        if head == "shop-password":
+            if method == "POST":
+                if not self.is_shop_computer() and not book_password():
+                    return 403, {"error": "The first shop password has to be chosen on the shop's"
+                                          " own computer, not over the Wi-Fi"}
+                body = self.body()
+                return 200, set_shop_password(body.get("password"), body.get("current"))
+            if method == "DELETE":
+                if not self.is_shop_computer():
+                    return 403, {"error": "Sign-in is switched off on the shop's own computer,"
+                                          " so that this device cannot leave the book open"}
+                return 200, clear_shop_password(self.body().get("current"))
+            return 405, {"error": "Use POST to set the shop password, DELETE to switch it off"}
+        if head == "devices":
+            if method == "GET":
+                return 200, {"devices": signed_in_devices()}
+            if method == "DELETE" and len(rest) == 2:
+                return 200, revoke_device(path_id(rest[1]))
+            return 405, {"error": "Use DELETE /api/devices/<number> to sign one device out"}
         if head == "clients":
             if len(rest) >= 2:
                 cid = path_id(rest[1])
@@ -3459,15 +3878,25 @@ class Handler(BaseHTTPRequestHandler):
             rows, filename, _count = export_rows(name, params)
             return 200, ("csv", rows, filename)
         if method == "GET" and head == "backup":
-            tmp = write_backup()
+            tmp = write_backup("manual")
             return 200, ("file", tmp, os.path.basename(tmp), "application/x-sqlite3")
         raise LookupError("Unknown route " + method + " " + path)
 
 
-def write_backup():
-    """Snapshot the book into BACKUP_DIR and return the new file's path."""
-    path = os.path.join(BACKUP_DIR, "backup-%s.db" % dt.datetime.now().strftime("%Y%m%d-%H%M%S"))
+def write_backup(kind="backup"):
+    """Snapshot the book into BACKUP_DIR and return the new file's path. `manual` marks a copy
+    the shop asked for, which retention keeps for longer than the nightly ones."""
     os.makedirs(BACKUP_DIR, exist_ok=True)
+    # The name only carries to the second, and a copy that quietly overwrote an earlier one is a
+    # copy lost — so if this second is already taken, wait for the next name that is free.
+    for attempt in range(60):
+        path = os.path.join(BACKUP_DIR,
+                            "%s-%s.db" % (kind, dt.datetime.now().strftime("%Y%m%d-%H%M%S")))
+        if not os.path.exists(path):
+            break
+        time.sleep(0.2)
+    else:
+        raise RuntimeError("The backups folder already holds a copy from this second, again and again")
     with _lock:
         dest = sqlite3.connect(path)
         with dest:
@@ -3481,6 +3910,130 @@ def write_backup():
         except OSError:
             pass
     return path
+
+
+# A copy that was never opened again is only a copy of a guess, and a folder of copies nobody
+# prunes ends full. So the nightly run checks its own work, then tidies behind itself.
+BACKUP_KEEP_DAYS = 14
+BACKUP_KEEP_MONTHS = 12
+BACKUP_KEEP_MANUAL = 12
+STAMPED_BACKUP = re.compile(r"^(backup|manual)-(\d{8})-(\d{6})\.db$")
+
+
+def backup_time(name):
+    match = STAMPED_BACKUP.match(name)
+    if not match:
+        return None
+    try:
+        return dt.datetime.strptime(match.group(2) + match.group(3), "%Y%m%d%H%M%S")
+    except ValueError:
+        return None
+
+
+def check_backup(path):
+    """Read the new copy back: is it a database, and does it hold the same records as the book
+    it came from? Returns a short note, or raises when the copy is not trustworthy."""
+    check = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    try:
+        verdict = check.execute("PRAGMA integrity_check").fetchone()[0]
+        if verdict != "ok":
+            raise RuntimeError("The copy of the book does not pass its own check: %s" % verdict)
+        counts = {}
+        for table in ("jobs", "clients", "payments", "expenses", "notifications"):
+            mine = q("SELECT count(*) c FROM %s" % table)[0]["c"]
+            theirs = check.execute("SELECT count(*) FROM %s" % table).fetchone()[0]
+            if theirs != mine:
+                raise RuntimeError("The copy holds %d %s but the book holds %d"
+                                  % (theirs, table, mine))
+            counts[table] = theirs
+        return counts
+    finally:
+        check.close()
+
+
+def tend_backup_folder(now=None):
+    """Keep one night's copies for two weeks, one copy for each month before that for a year, and
+    the last dozen copies the shop asked for by hand. Anything else goes."""
+    now = now or dt.datetime.now()
+    try:
+        names = [n for n in os.listdir(BACKUP_DIR) if STAMPED_BACKUP.match(n)]
+    except OSError:
+        return {"kept": 0, "gone": 0}
+    stamped = sorted(((n, backup_time(n)) for n in names), key=lambda pair: pair[1], reverse=True)
+    keep, months, manual = set(), {}, 0
+    for name, when in stamped:
+        age = (now - when).days
+        if name.startswith("manual"):
+            manual += 1
+            if manual <= BACKUP_KEEP_MANUAL:
+                keep.add(name)
+            continue
+        if age <= BACKUP_KEEP_DAYS:
+            keep.add(name)
+            continue
+        key = when.strftime("%Y-%m")
+        if key not in months and len(months) < BACKUP_KEEP_MONTHS:
+            months[key] = name
+            keep.add(name)
+    gone = 0
+    for name, _when in stamped:
+        if name in keep:
+            continue
+        try:
+            os.remove(os.path.join(BACKUP_DIR, name))
+            gone += 1
+        except OSError:
+            pass
+    return {"kept": len(keep), "gone": gone}
+
+
+def run_backup():
+    """One nightly run, end to end, with the result written into the book so the screens can say
+    when the records were last copied."""
+    path = write_backup()
+    counts = check_backup(path)
+    tidy = tend_backup_folder()
+    set_state("last_backup_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    set_state("last_backup_file", os.path.basename(path))
+    set_state("last_backup_note", "checked, %d jobs · kept %d, cleared %d"
+              % (counts["jobs"], tidy["kept"], tidy["gone"]))
+    return path, counts, tidy
+
+
+def backup_report():
+    """What the shop screen says about the book's copies."""
+    at = state_value("last_backup_at")
+    age = None
+    if at:
+        try:
+            age = (dt.datetime.now() - dt.datetime.strptime(at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+        except ValueError:
+            age = None
+    try:
+        copies = len([n for n in os.listdir(BACKUP_DIR) if n.endswith(".db")])
+    except OSError:
+        copies = 0
+    return {"at": at, "file": state_value("last_backup_file"), "note": state_value("last_backup_note"),
+            "age_hours": round(age, 1) if age is not None else None,
+            "stale": age is None or age > 26, "copies": copies,
+            "folder": BACKUP_DIR.replace(os.path.expanduser("~"), "~")}
+
+
+CAFFEINATE = "/usr/bin/caffeinate"
+
+
+def keep_mac_awake():
+    """A phone can only reach the book while this Mac is awake. While the shop server listens
+    beyond this computer, ask the Mac not to idle away; caffeinate stops on its own when we do."""
+    if not os.path.exists(CAFFEINATE):
+        return False
+    try:
+        subprocess.Popen([CAFFEINATE, "-i", "-s", "-w", str(os.getpid())],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except OSError:
+        return False
+
 
 
 def watch_parent():
@@ -3505,8 +4058,10 @@ class ShopHTTPServer(ThreadingHTTPServer):
 
 
 def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_key=None,
-          trust_proxy=False, allow_unauthenticated_lan=False):
-    global AUTH_PASSWORD
+          trust_proxy=False, allow_unauthenticated_lan=False, keep_awake=None):
+    global AUTH_PASSWORD, LAN_NO_LOGIN, THROUGH_PROXY, KEEP_AWAKE
+    local_only = host in ("127.0.0.1", "localhost", "::1")
+    THROUGH_PROXY = bool(trust_proxy)
     if seed_first:
         seed()
     if allow_unauthenticated_lan:
@@ -3520,16 +4075,24 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
         if trust_proxy:
             raise ValueError("--allow-unauthenticated-lan cannot be combined with a proxy.")
         AUTH_PASSWORD = ""
-    if (host not in ("127.0.0.1", "localhost", "::1") and not AUTH_PASSWORD
-            and not allow_unauthenticated_lan):
-        raise RuntimeError("Set CHRISPHICS_AUTH_PASSWORD before listening beyond this computer.")
+        LAN_NO_LOGIN = True
+    # A password chosen inside the book counts just as much as one handed over in the
+    # environment; either way the Wi-Fi is not left looking straight into the accounts.
+    if not local_only and not allow_unauthenticated_lan and not auth_required():
+        raise RuntimeError("Other devices can reach this book, so it needs a password. Open"
+                           " Shop & devices on this Mac and choose one (or set"
+                           " CHRISPHICS_AUTH_PASSWORD).")
     if bool(tls_cert) != bool(tls_key):
         raise ValueError("Both --tls-cert and --tls-key are required to enable HTTPS.")
-    if (host not in ("127.0.0.1", "localhost", "::1") and not tls_cert and not trust_proxy
-            and not allow_unauthenticated_lan):
+    if not local_only and not tls_cert and not trust_proxy and not allow_unauthenticated_lan:
         raise RuntimeError("HTTPS is required when listening beyond this computer.")
     if trust_proxy and tls_cert:
         raise ValueError("Use either direct HTTPS or --trust-proxy, not both.")
+    SERVE.update({"host": host, "port": port, "tls": bool(tls_cert) or bool(trust_proxy)})
+    if keep_awake is None:
+        keep_awake = not local_only
+    if keep_awake:
+        KEEP_AWAKE = keep_mac_awake()
     watch_parent()
     watch_messages()
     watch_notifications()
@@ -3547,6 +4110,12 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
     url = "%s://%s:%d/" % (scheme, display_host, port)
     print("%s is running at %s" % (SHOP["name"], url))
     print("Data file: %s" % DB_PATH)
+    if not local_only:
+        print("Devices on this Wi-Fi install from %ssetup" % url)
+        print("Sign-in: %s" % ("one shop password" if auth_required() and not LAN_NO_LOGIN
+                               else "not required (this run was told to skip it)"))
+        if not KEEP_AWAKE:
+            print("Note: this Mac may still sleep, and the book goes quiet with it.")
     print("Press Ctrl+C (or close this window) to stop.")
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
@@ -3570,14 +4139,22 @@ def main():
     ap.add_argument("--db", default=None, help="alternative SQLite file")
     ap.add_argument("--seed", action="store_true", help="load sample records if the book is empty")
     ap.add_argument("--no-browser", action="store_true")
-    ap.add_argument("--backup", action="store_true", help="write data/backup-<timestamp>.db and exit")
+    ap.add_argument("--keep-awake", action="store_true", default=None,
+                    help="hold this Mac awake while the book is served (automatic beyond loopback)")
+    ap.add_argument("--allow-sleep", dest="keep_awake", action="store_false",
+                    help="let the Mac sleep even when other devices can reach the book")
+    ap.add_argument("--backup", action="store_true",
+                    help="write a checked, tidied copy of the book into the backups folder and exit")
     args = ap.parse_args()
     connect(args.db)
     if args.backup:
-        print("Backup written to %s" % write_backup())
+        path, counts, tidy = run_backup()
+        print("Backup written to %s" % path)
+        print("Checked: %s" % ", ".join("%s %d" % kv for kv in sorted(counts.items())))
+        print("Backups folder: kept %d, cleared %d older copies" % (tidy["kept"], tidy["gone"]))
         return
     serve(args.port, not args.no_browser, args.seed, args.host, args.tls_cert, args.tls_key,
-          args.trust_proxy, args.allow_unauthenticated_lan)
+          args.trust_proxy, args.allow_unauthenticated_lan, args.keep_awake)
 
 
 if __name__ == "__main__":

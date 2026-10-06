@@ -22,7 +22,7 @@ there is never a moment when the shop's records only exist in one place.
 | `server.py`, `schema.sql`, `public/` | the records engine and the screens it serves |
 | `desktop/` | the native shell's Swift source and `build-app.sh` |
 | `render.yaml` | Render web service, HTTPS proxy, password and persistent-disk setup |
-| `tools/` | `make-web-icons.swift` redraws the install icons; the other two are dev checks |
+| `tools/` | `shop-server.sh` runs the shop's always-on server, `nightly-backup.sh` copies the book each night, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
 | `~/Library/Application Support/Chrisphics Hub/` | your actual records — not in this folder |
 
 ## Start it
@@ -30,8 +30,9 @@ there is never a moment when the shop's records only exist in one place.
 **The desktop app (single-computer mode).** Double-click **`Chrisphics Hub.app`**. It opens in
 its own window with its own Dock icon and menus, and starts a private copy of the engine on
 a port only it uses. There is nothing to keep open and nothing to install — quit the app and
-the engine stops with it. For one shared book across the shop Wi-Fi, use the LAN server
-instructions below instead; do not run this private app at the same time as that server.
+the engine stops with it. For one shared book across the shop Wi-Fi, use
+[Run the shop all the time](#run-the-shop-all-the-time) instead; do not run this private app at
+the same time as that server.
 
 **Switching over from the old build.** Until the shop quits the app that is open right now, the
 misspelled `Chriphics Hub.app` and its folder are still the live book, and the Wi-Fi server must
@@ -42,7 +43,7 @@ untouched as the safety copy. From then on only the new name is used.
 
 - `File` — New Job `⌘N`, New Quote `⇧⌘N`, New Enquiry `⌘I`, New Client `⌘K`,
   Receive Payment `⌘R`, Record Money Out `⌘E`.
-- `View` — `⌘1`…`⌘9` jump between the nine screens; Reload `⇧⌘R` after changing `public/`;
+- `View` — `⌘1`…`⌘9` and `⌘0` jump between the ten screens; Reload `⇧⌘R` after changing `public/`;
   **Appearance** picks Light, Dark or "Follow the Mac" (the same three buttons sit at the
   bottom of the sidebar).
 - `Data` — Back Up Book Now `⌘B`, Show Data File in Finder, Open Backup Folder.
@@ -62,54 +63,91 @@ From the command line, the browser route is `./run.sh`. Useful flags:
 | `./run.sh` | start and open the browser |
 | `./run.sh --no-browser` | start without opening a browser tab |
 | `./run.sh --port 8080` | use a different port if 8712 is taken |
-| `./run.sh --host 0.0.0.0 --port 8712 --tls-cert /path/server.crt --tls-key /path/server.key` | serve the installable app over shop Wi-Fi with HTTPS; requires `CHRISPHICS_AUTH_PASSWORD` |
+| `./run.sh --host 0.0.0.0 --port 8834 --tls-cert /path/shop-cert.pem --tls-key /path/shop-key.pem` | serve the installable app over the shop Wi-Fi with HTTPS; the book needs a shop password first |
 | `./run.sh --seed` | add sample clients, jobs, a quote, expenses and enquiries — only into an empty book |
-| `python3 server.py --backup` | write a backup into the Backups folder and exit |
+| `python3 server.py --backup` | write one checked, tidied copy into the Backups folder and exit |
+| `python3 server.py --allow-sleep` | serve the network without asking the Mac to stay awake |
 | `./desktop/build-app.sh` | rebuild `Chrisphics Hub.app` after editing the code |
 
-### Install on Windows, Android and iPhone
+### Run the shop all the time
 
-The same responsive web app can be installed from Microsoft Edge on Windows and from a
-mobile browser. First configure the shop computer as the local server, give it a stable
-Wi-Fi address/name, and use a TLS certificate trusted by the devices. HTTPS is required for
-browser installation and offline app-shell storage on phones; a plain `http://` LAN address
-is not sufficient. Set `CHRISPHICS_AUTH_PASSWORD` on the server before listening on the
-network. Do not forward the server port to the public internet.
+One tool makes this Mac the shop's server: it starts when the Mac starts, comes back by
+itself if it falls over, keeps the Mac awake while devices are connected, and stays on the
+shop's own network.
 
-The certificate must be trusted by the devices and include the stable shop hostname (or IP)
-in its Subject Alternative Name. A self-signed certificate warning is not enough for
-service-worker installation. Keep the certificate's private key on the server; only install
-the CA's public certificate on client devices.
-
-On the shop computer, configure a database path and start the server. For example, in
-PowerShell on Windows:
-
-```powershell
-Set-Location C:\path\to\CRISPprint-Ghana
-$env:CHRISPHICS_AUTH_PASSWORD = Read-Host "Shop password"
-$env:CHRISPHICS_DB = "$env:LOCALAPPDATA\CRISPprint\chrisphics.db"
-New-Item -ItemType Directory -Force (Split-Path $env:CHRISPHICS_DB) | Out-Null
-python server.py --host 0.0.0.0 --port 8712 --tls-cert C:\shop\server.crt --tls-key C:\shop\server.key --no-browser
+```sh
+tools/shop-server.sh check      # how this Mac looks to the shop — reads only, changes nothing
+tools/shop-server.sh certs      # a certificate for this Mac's current Wi-Fi address and name
+tools/shop-server.sh ca         # the public certificate file a phone has to be given once
+tools/shop-server.sh install    # the service, and the nightly copy of the book
+tools/shop-server.sh status     # is it up, what did it last say, when is the next copy
+tools/shop-server.sh remove     # stop both, and take back only the two files this tool made
 ```
 
-On macOS/Linux, set the same environment variables and run the matching `./run.sh` command
-from the project folder. Keep this server computer on while devices are syncing. Open the
-HTTPS shop address on the server computer too; it is the shared book for every device.
+`install` refuses until the book has a shop password — choose one on **Shop & devices** on
+this Mac first — and it will not put a second server over a book something else is holding:
+quit `Chrisphics Hub.app`, or press `Ctrl+C` in the Terminal window running the hand-started
+server, then run it again. `install --take-over` stops that server for you after asking once
+and typing `yes`.
 
-Open the HTTPS shop address once on each device while connected to the shop Wi-Fi:
+What it installs is two ordinary launch agents in `~/Library/LaunchAgents/`: the book served
+by `/usr/bin/python3 server.py --host 0.0.0.0 --port 8834 --tls-cert … --tls-key …`, restarted
+by `launchd` whenever it exits badly, and `tools/nightly-backup.sh` at 22:30 each night.
+Neither file holds a secret: the password lives in the book as a hash, the private key stays
+in `~/Library/Application Support/CRISPprint TLS/shop-key.pem` at mode 600, and the logs land
+beside the book as `shop-server.log` and `shop-server.error.log`.
 
-- Use the app's **Install app** button to open the browser's install prompt where supported,
-  or show device-specific steps.
+**When the Wi-Fi address moves.** Routers hand out new addresses, and the shop's is one of
+them. The server answers on every address the Mac holds, so the shop does not go quiet; the
+*certificate* is the part that names one number, so phones show a padlock warning until it is
+renewed. `tools/shop-server.sh status` says when that has happened, and `certs` followed by
+`install` puts it right in two commands — devices keep trusting the same authority throughout.
+Reserving the Mac's address in the router avoids the question altogether.
+
+### One shop password
+
+A phone left on the counter should not be the whole ledger, so every device other than this
+Mac signs in. **Shop & devices ▸ Choose the shop password** on the shop computer sets it; the
+book stores only a PBKDF2-SHA256 hash (200,000 rounds, salted per password), never the word
+itself, so a copied `.db` gives nothing away.
+
+- The shop's own Mac is the machine the records sit on, so it is never asked to sign in.
+- Each device gets its own session token, stored only as a hash, and stays signed in for
+  thirty days of ordinary use. Signing one out takes effect the moment it next asks for
+  something, and changing the password signs every device out at once.
+- Five wrong tries from one address and it is held out for a while, doubling each time up to
+  fifteen minutes, answered with `429` and a `Retry-After`. This Mac and devices already
+  signed in are never locked out.
+- `CHRISPHICS_AUTH_PASSWORD` sets the password from the environment instead (that is how the
+  Render deployment does it); while it is set, the in-app change is refused so the two cannot
+  disagree.
+- `--allow-unauthenticated-lan` turns sign-in off for a temporary demo on a private address.
+  The screen says so in warning type while it is off. Turn it back on from **Shop & devices**.
+
+### Put the book on a phone
+
+The shop's address ends in `/setup`: one page with the QR to point a camera at, the
+certificate to download, its SHA-256 fingerprint to read out loud, and the trust steps for
+the device you are holding. Print it, mail it, or open it from **Shop & devices ▸ Install
+page**. Nothing leaves the building — the page is served by the same Mac that holds the book,
+and the address only resolves on the shop Wi-Fi.
+
+Trust the certificate once per device (the `/setup` page walks each one through it), then
+install from the browser itself:
+
 - **Windows / Edge:** use the browser's **Install this site as an app** command.
 - **Android / Chrome:** use **Install app** or **Add to Home screen**.
 - **iPhone / iPad:** in Safari, choose **Share → Add to Home Screen**.
+- Any device: the app's own **Install app** button opens the browser's prompt where it
+  supports one, and shows the steps where it does not.
 
 Under 720px the book becomes a phone app rather than a shrunken desktop. The side rail is
 gone; **Desk · Jobs · Money · Clients · More** sit in a tab bar at thumb height, and **More**
 opens a sheet holding the remaining screens (spoiled work, pending sync, enquiries, expenses,
-reports) plus the theme switch and the backup button. A job's record and every form rise from
-the bottom of the screen, the first column of a wide ledger pins itself so a scrolled row is
-still identifiable, and everything you press is at least 44px tall. The status strip and the
+reports, Shop & devices) plus the theme switch, signing out and the backup button. A job's
+record and every form rise from the bottom of the screen, the first column of a wide ledger
+pins itself so a scrolled row is still identifiable, and everything you press is at least 44px
+tall. The status strip and the
 tab bar sit inside the notch and home-indicator areas, so nothing hides under them. Once
 installed, long-press the home-screen icon for **New job** and **Receive payment** shortcuts,
 which open straight to that form.
@@ -130,82 +168,41 @@ The native Mac desktop app is a separate single-computer mode, not a client for 
 LAN server. When using shared mode on a Mac, use the HTTPS shop address in its browser rather
 than opening `Chrisphics Hub.app`.
 
-### Open and install over HTTPS on the same Wi-Fi
+### By hand, or on another machine
 
-The no-login Wi-Fi mode can use HTTPS too. On the shop Mac, install a local certificate
-authority tool and create a certificate for the Mac's current Wi-Fi address:
-
-```sh
-brew install mkcert
-mkcert -install || security add-trusted-cert -r trustRoot -p ssl \
-  -k "$HOME/Library/Keychains/login.keychain-db" "$(mkcert -CAROOT)/rootCA.pem"
-WIFI_IP="$(ipconfig getifaddr en0)"
-mkdir -p "$HOME/Library/Application Support/CRISPprint TLS"
-mkcert -cert-file "$HOME/Library/Application Support/CRISPprint TLS/shop-cert.pem" \
-  -key-file "$HOME/Library/Application Support/CRISPprint TLS/shop-key.pem" \
-  "$WIFI_IP" localhost 127.0.0.1 ::1
-chmod 600 "$HOME/Library/Application Support/CRISPprint TLS/shop-key.pem"
-```
-
-The HTTPS listener requires that certificate and private key. It still has no sign-in; bind it
-only to the private Wi-Fi address, and do not forward its port or run it on a guest/public
-network:
+`tools/shop-server.sh` is only a wrapper around `server.py` flags, so the same thing runs by
+hand wherever Python 3 lives — a shop laptop, a Mac without Homebrew, a start you would
+rather type yourself:
 
 ```sh
-./run.sh --host "$WIFI_IP" --port 8834 \
+python3 server.py --host 0.0.0.0 --port 8834 \
   --tls-cert "$HOME/Library/Application Support/CRISPprint TLS/shop-cert.pem" \
-  --tls-key "$HOME/Library/Application Support/CRISPprint TLS/shop-key.pem" \
-  --allow-unauthenticated-lan --no-browser
+  --tls-key  "$HOME/Library/Application Support/CRISPprint TLS/shop-key.pem" \
+  --no-browser
 ```
 
-Run the certificate-only download server in a second Terminal window so other devices can
-obtain the public CA certificate before trusting the HTTPS site:
+It refuses to serve an address the whole network can reach while the book has no password,
+and it refuses HTTPS without both certificate files. The certificate has to name the address
+devices type, which is why a local authority signs it:
 
 ```sh
-CERT_DIR="$HOME/Library/Application Support/CRISPprint TLS/device-download"
-mkdir -p "$CERT_DIR"
-openssl x509 -in "$(mkcert -CAROOT)/rootCA.pem" -outform DER \
-  -out "$CERT_DIR/shop-root-ca.cer"
-ruby -run -e httpd -- --bind-address="$WIFI_IP" --port=8835 "$CERT_DIR"
+brew install mkcert && mkcert -install
+TLS="$HOME/Library/Application Support/CRISPprint TLS"; mkdir -p "$TLS"
+mkcert -cert-file "$TLS/shop-cert.pem" -key-file "$TLS/shop-key.pem" \
+  "$(ipconfig getifaddr en0)" "$(scutil --get LocalHostName).local" localhost 127.0.0.1 ::1
+chmod 600 "$TLS/shop-key.pem"
 ```
 
-On each other device, download `http://<WIFI_IP>:8835/shop-root-ca.cer` or transfer the public
-CA certificate from `"$(mkcert -CAROOT)/rootCA.pem"`. Verify the certificate's SHA-256
-fingerprint is:
+`tools/shop-server.sh certs` is exactly that, and `ca` writes the public half to
+`"$TLS/device-download/shop-root-ca.cer"` — which the `/setup` page then serves itself at
+`/shop-root-ca.cer` on the HTTPS port. There is no second server on a second port any more.
 
-```text
-ED:4D:60:46:1B:FA:5F:E8:3C:EA:A0:84:03:F3:42:EE:A0:D1:F9:D8:7F:62:C3:B8:02:98:BF:E2:E3:7D:1A:CB
-```
-
-Install that CA certificate as a trusted root on the device: Windows uses Certificate Manager
-under **Trusted Root Certification Authorities**; Android uses Security settings to install a
-CA certificate; on iPhone/iPad, install the downloaded profile in Settings and enable full
-trust under Certificate Trust Settings. Then open `https://<WIFI_IP>:8834/` and use **Install
-app**: supported browsers can install it and the service worker can cache the app shell. The
-CA **private key** (`rootCA-key.pem`) must remain on the shop Mac and must never be shared. The
-shop certificate's private key must also stay on the Mac. Renew the shop certificate and repeat
-the device trust steps if the local CA is replaced.
-
-### Open on the same Wi-Fi without HTTPS
-
-For a quick, no-login connection on the shop Wi-Fi only, bind the server to the Mac's private
-Wi-Fi IPv4 address instead of `0.0.0.0`. For example:
-
-```sh
-WIFI_IP="$(ipconfig getifaddr en0)"
-./run.sh --host "$WIFI_IP" --port 8834 --allow-insecure-lan --no-browser
-```
-
-On another device connected to that same Wi-Fi, open `http://<WIFI_IP>:8834/`, replacing
-`<WIFI_IP>` with the address printed by `ipconfig getifaddr en0` (for this setup, currently
-`192.168.100.29`). Reserve that address in the router if it should stay the same. Keep the Mac
-awake and the server running.
-
-This explicit mode has **no login and no HTTPS**. Anyone who can join or reach that Wi-Fi can
-read and change the whole shop book. Do not use it on public/shared guest Wi-Fi or expose the
-port to the internet; stop the server to close access. Browsers also require trusted HTTPS for
-service-worker installation on other devices, so this HTTP address opens the app but does not
-enable PWA installation/offline caching there.
+**A plain-HTTP address opens the book but installs nothing**: a browser will only let a device
+keep an app offline over HTTPS. `/setup` says so on an HTTP address instead of sending a phone
+down a road that cannot work. `--allow-unauthenticated-lan` drops the password as well, on a
+private address only, which leaves the whole book open to anyone who joins that Wi-Fi; treat it
+as a demo switch. Never forward the port to the internet — nothing in the shop's setup needs a
+public address.
 
 ### Host on Render
 
@@ -235,7 +232,7 @@ if automatic customer messages are wanted. New clients start opted in on both ch
 their record can turn off; without provider settings the messages queue and wait for staff to
 carry them from the job screen instead.
 
-## The nine screens
+## The ten screens
 
 **Dashboard** — money in today / this week / month to date, what customers still owe,
 what is late, what is ready for pickup, a 15-day cash chart, and what you print most.
@@ -300,6 +297,16 @@ synced or need conflict review.
 **Reports** — billed, what it cost, profit, collected, still owed and delivered for any
 date range, grouped by day, week or month; broken down by service, by payment method, by
 client and by expense category. Every table exports to CSV for Excel or the accountant.
+
+**Shop & devices** — the book's own back office, and the only screen about the shop rather
+than its work. Four figures along the top: the address devices use, whether a password is
+required, how many devices hold the book open, and how many copies exist. Below them: **Put
+the book on a device** (the `/setup` install page), **Kept awake for the shop**, **Signed in
+on these devices** — each with its browser, the day it signed in and when it was last heard
+from, and a button that throws it out — **The shop password** (choose, change, or turn
+sign-in off, all from this Mac only), and **Copies of the book**, which says when the last
+copy was made, whether it was checked against the original, and how many are kept. While no
+password is set the screen opens with a warning: the book is open to anything on the Wi-Fi.
 
 ## How the money works
 
@@ -490,8 +497,17 @@ never touches your records.
 - **Back up**: `Data ▸ Back Up Book Now`, or *Download data backup* in the sidebar, or
   `python3 server.py --backup`. Each one lands in
   `~/Library/Application Support/Chrisphics Hub/Backups/backup-<date>.db` as a complete,
-  self-contained copy — one file, nothing else needed to restore it. Do this at the end of
-  each trading day, and keep a copy on a USB stick, Google Drive or Time Machine.
+  self-contained copy — one file, nothing else needed to restore it.
+- **Backed up by itself**: with the always-on server installed, `tools/nightly-backup.sh` runs
+  at 22:30 every night. It does not just write a file and hope: the copy is opened again, put
+  through `PRAGMA integrity_check`, and counted against the book table by table (jobs, clients,
+  payments, expenses, messages), so a silently truncated copy is caught and the run is recorded
+  as failed rather than quiet. Then the folder is tidied — the last 14 nights, one copy for each
+  of the 12 months before that, and the 12 most recent copies you asked for by hand; anything
+  older goes. **Shop & devices** shows the time of the last copy, what the check said, and how
+  many are kept; the sidebar footer turns red when a night has been missed.
+  A copy on this Mac is not a backup of the shop: carry one off to a USB stick, Google Drive or
+  Time Machine now and then.
 - **Restore**: quit the app, move your backup file into that folder renamed to
   `chrisphics.db`, and start again.
 - **Move to another Mac**: copy the `.app` and the `chrisphics.db` file. Only Python 3
@@ -559,26 +575,31 @@ the Poppins on this Mac does not carry that feature. To change the look, change 
 one place; weights used anywhere in the CSS are snapped to the four Poppins ships
 (400 / 500 / 600 / 700), so an in-between weight silently becomes its nearest one.
 
-Two dev checks live in `tools/`, and neither needs anything installed:
+Three dev checks live in `tools/`, and none of them needs anything installed:
 
 | Command | What it answers |
 | --- | --- |
 | `python3 tools/js-check.py` | does `public/app.js` still parse? (one stray bracket empties every screen) |
+| `swift tools/make-qr.swift "<address>" /tmp/shop-qr.png 520` | the counter's QR as a printable PNG — and every code is read back before the file is trusted (`--verify <file.png>` checks one already drawn) |
 | `swiftc -O tools/wk-probe.swift -o /tmp/wk-probe` then `/tmp/wk-probe <url> <dir> "open\|/#/jobs" "shot\|jobs"` | what a screen actually rendered, in the same WebKit the app uses, as text plus a PNG |
 
 ## Notes
 
-- The app listens on `127.0.0.1` only, and picks its own free port each time it starts, so
-  nothing outside this Mac can reach it and two copies never collide. The browser launcher
-  uses 8712; if that is busy, start it with `--port 8080`.
-- Data is never sent anywhere. There is no analytics, no login, no cloud. The one place the
-  app reaches outward is a message you chose to send: pressing **WhatsApp** or **Email** on
+- The desktop app and `Chrisphics Hub.command` listen on `127.0.0.1` only — the app picks its
+  own free port each time it starts, the launcher uses 8712 — so nothing outside this Mac can
+  reach either, and two copies never collide. Only the always-on shop server opens the book to
+  the Wi-Fi, and it does so behind the shop password.
+- Data is never sent anywhere. There is no analytics and no cloud. Devices on the shop Wi-Fi
+  sign in to this Mac with one password; nothing reaches an outside account, and no account
+  reaches in. The one place the app looks outward is a message you chose to send: pressing
+  **WhatsApp** or **Email** on
   the **Tell the client** card asks macOS to open `wa.me` or your mail app with the words
   already typed. Nothing is sent, uploaded or contacted while you work, and the app will not
   load any outside page inside its own window.
 - Job sheets print black on white for a clean photocopy.
-- Run one at a time — the app and `Chrisphics Hub.command` open the same book, so close one
-  before starting the other.
+- Run one at a time — the app, `Chrisphics Hub.command` and the always-on server all open the
+  same book, so close one before starting another. `tools/shop-server.sh` refuses to install
+  over a book the app is holding.
 - The `.app` is built and signed for this Mac. If a copy on another Mac says it is from an
   unidentified developer, right-click it and choose Open once.
 - Rebuilding needs the free Xcode Command Line Tools (already here, for `swiftc`); running it
