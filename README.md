@@ -22,7 +22,7 @@ there is never a moment when the shop's records only exist in one place.
 | `server.py`, `schema.sql`, `public/` | the records engine and the screens it serves |
 | `desktop/` | the native shell's Swift source and `build-app.sh` |
 | `render.yaml` | Render web service, HTTPS proxy, password and persistent-disk setup |
-| `tools/` | `shop-server.sh` runs the shop's always-on server, `nightly-backup.sh` copies the book each night, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
+| `tools/` | `shop-server.sh` runs the shop's always-on server, `nightly-backup.sh` copies the book each night, `carry-book.py` hands a copy to a hosted book, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
 | `~/Library/Application Support/Chrisphics Hub/` | your actual records — not in this folder |
 
 ## Start it
@@ -201,8 +201,9 @@ chmod 600 "$TLS/shop-key.pem"
 keep an app offline over HTTPS. `/setup` says so on an HTTP address instead of sending a phone
 down a road that cannot work. `--allow-unauthenticated-lan` drops the password as well, on a
 private address only, which leaves the whole book open to anyone who joins that Wi-Fi; treat it
-as a demo switch. Never forward the port to the internet — nothing in the shop's setup needs a
-public address.
+as a demo switch. Do not forward the port to the internet either: a bare Mac with a hole punched
+in the router has no HTTPS and no password in front of the accounts. If the book should be
+reachable away from the shop, [host it](#host-on-render) instead.
 
 ### Host on Render
 
@@ -226,11 +227,40 @@ HTTPS. The service exposes `/healthz` for health checks and is intentionally lim
 instance because SQLite is stored on that disk. Keep a current backup outside Render as
 well; the app's backup action writes to the mounted disk, which is not an independent backup.
 
-The hosted book starts empty. It does not import or change the records on the shop computer.
+The hosted book starts empty until you carry yours into it, and it never reaches back into the
+records on the shop computer by itself.
 Configure WhatsApp and email provider secrets separately in the Render service environment
 if automatic customer messages are wanted. New clients start opted in on both channels, which
 their record can turn off; without provider settings the messages queue and wait for staff to
 carry them from the job screen instead.
+
+### Carry the shop's records into the hosted book
+
+```sh
+tools/carry-book.py https://crispprint-ghana.onrender.com            # the newest checked copy
+tools/carry-book.py https://crispprint-ghana.onrender.com my-book.db # a copy you name
+```
+
+It says out loud what the copy holds and how many of each record is in it, asks for the shop
+password at the terminal — never on the command line, so it stays out of the shell's history —
+and hands the file to the hosted server. The far side says no unless its own book holds
+no records at all, so a carry-over can never overwrite work that has already started there; a
+copy that fails its own integrity check, or that is not a Chrisphics book, is refused before
+anything is written. Devices signed in on the shop Wi-Fi do not travel with the book — every
+screen has to be told the password again, which is what you want once the address is public.
+
+Then say which book is the live one, out loud and in writing. Two ledgers that are both being
+written to will disagree within a day, and nothing joins them back together:
+
+1. Carry the records over, and open the hosted address on the counter's phone to see them.
+2. Work in the hosted book from that moment — the address, on every device including this Mac.
+3. Keep the Mac's own copy as the shop's independent backup: stop entering records into it, and
+   let `tools/nightly-backup.sh` go on copying it each night. A copy that is no longer being
+   written to is exactly what a backup should be.
+
+The always-on Wi-Fi server and the hosted book are alternatives, not partners: leave the
+LaunchAgents installed only while the shop's records live on this Mac
+(`tools/shop-server.sh remove` takes them back).
 
 ## The ten screens
 

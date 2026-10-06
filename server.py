@@ -28,6 +28,7 @@ import sqlite3
 import ssl
 import smtplib
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -3426,6 +3427,16 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Request body is not valid JSON")
         return parsed if isinstance(parsed, dict) else {}
 
+    def raw_body(self, limit):
+        """The bytes of an upload, or nothing honest about why they could not be taken."""
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > limit:
+            self.close_connection = True   # the rest of the body is never read
+            raise ValueError("That file is bigger than this book will ever need")
+        if not length:
+            return b""
+        return self.rfile.read(length)
+
     def csv_response(self, csv_text, filename):
         self.send(200, csv_text.encode("utf-8-sig"), "text/csv; charset=utf-8",
                   {"Content-Disposition": 'attachment; filename="%s"' % filename})
@@ -3880,6 +3891,25 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET" and head == "backup":
             tmp = write_backup("manual")
             return 200, ("file", tmp, os.path.basename(tmp), "application/x-sqlite3")
+        if head == "import-book":
+            if method != "POST":
+                return 405, {"error": "Use POST with the book copy itself as the body"}
+            if not book_is_empty():
+                return 409, {"error": "This book already has records of its own — a copy is only"
+                                       " ever carried into an empty one"}
+            raw = self.raw_body(IMPORT_MAX_BYTES)
+            if len(raw) < 4096 or raw[:15] != b"SQLite format 3":
+                return 400, {"error": "What arrived is not a copy of the book"}
+            handle, temp = tempfile.mkstemp(prefix="chrisphics-carry-", suffix=".db")
+            try:
+                with os.fdopen(handle, "wb") as fh:
+                    fh.write(raw)
+                return 200, carry_book_over(temp)
+            finally:
+                try:
+                    os.remove(temp)
+                except OSError:
+                    pass
         raise LookupError("Unknown route " + method + " " + path)
 
 
@@ -4017,6 +4047,58 @@ def backup_report():
             "age_hours": round(age, 1) if age is not None else None,
             "stale": age is None or age > 26, "copies": copies,
             "folder": BACKUP_DIR.replace(os.path.expanduser("~"), "~")}
+
+
+# ------------------------------------------------------------------ carrying the book over
+# A hosted deployment starts as an empty book, which is no use to a shop with years of records.
+# So the shop hands its own copy to the empty server, once, and that copy becomes the book.
+
+RECORD_TABLES = ("clients", "jobs", "job_items", "expenses", "spoiled_work", "leads",
+                 "payments", "job_events", "notifications", "money_signals")
+IMPORT_MAX_BYTES = 64 * 1024 * 1024
+
+
+def book_is_empty():
+    """The gate a carry-over is judged by: a book that already holds records of its own is
+    never written over, so the worst a wrong file can do here is be refused."""
+    tables = {r["name"] for r in _db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    for table in RECORD_TABLES:
+        if table in tables and one("SELECT count(*) c FROM %s" % table)["c"]:
+            return False
+    return True
+
+
+def carry_book_over(source_path):
+    """Make the shop's copy of the book this server's book, whole. Only an empty book takes one;
+    devices signed in on the old server do not travel, and a copy from an older build is brought
+    forward by the same migrations a shop Mac runs."""
+    source = sqlite3.connect("file:%s?mode=ro" % source_path, uri=True)
+    try:
+        verdict = source.execute("PRAGMA integrity_check").fetchone()[0]
+        if verdict != "ok":
+            raise ValueError("That copy does not pass its own check: %s" % verdict)
+        tables = {r[0] for r in source.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if "jobs" not in tables or "clients" not in tables:
+            raise ValueError("That file is not a Chrisphics book — it holds no jobs or clients")
+        counts = {table: source.execute("SELECT count(*) FROM %s" % table).fetchone()[0]
+                  for table in RECORD_TABLES if table in tables}
+        if not sum(counts.values()):
+            raise ValueError("That copy holds no records, so there is nothing to carry over")
+        with _lock:
+            source.backup(_db)
+            migrate()
+            with open(os.path.join(ROOT, "schema.sql"), "r", encoding="utf-8") as fh:
+                _db.executescript(fh.read())
+            # A copy from the shop's Wi-Fi brings its own signed-in devices; none of them are
+            # signed in here.
+            _db.execute("DELETE FROM sessions")
+            _db.execute("DELETE FROM sync_requests")
+            _db.commit()
+        return {"carried": True, "records": counts}
+    finally:
+        source.close()
 
 
 CAFFEINATE = "/usr/bin/caffeinate"
