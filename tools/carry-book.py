@@ -2,8 +2,8 @@
 """Carry the shop's book into an empty hosted one — the step that turns a fresh deployment into
 the shop's own records instead of a blank ledger.
 
-    tools/carry-book.py https://crispprint-ghana.onrender.com              # the newest copy
-    tools/carry-book.py https://crispprint-ghana.onrender.com my-book.db   # a copy you name
+    tools/carry-book.py https://chrisphicshub.onrender.com              # the newest copy
+    tools/carry-book.py https://chrisphicshub.onrender.com my-book.db   # a copy you name
 
 The password is asked for at the terminal, so it never sits in the command line or the shell's
 history. The far side refuses a carry-over unless its own book holds no records, so this can

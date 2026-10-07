@@ -1,6 +1,9 @@
 services:
   - type: web
-    name: crispprint-ghana
+    # The deployed service is called ChrisphicsHub, so the book answers at
+    # https://chrisphicshub.onrender.com. This name has to match it: a blueprint that invents a
+    # second name would stand up a second, empty book beside the shop's.
+    name: ChrisphicsHub
     runtime: python
     plan: starter
     autoDeployTrigger: "off"

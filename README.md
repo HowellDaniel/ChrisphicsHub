@@ -207,6 +207,10 @@ reachable away from the shop, [host it](#host-on-render) instead.
 
 ### Host on Render
 
+The shop's hosted book answers at **`https://chrisphicshub.onrender.com`**, and the service in
+`render.yaml` is named `ChrisphicsHub` so it matches. A blueprint that invents a second name would
+stand up a second, empty ledger beside the shop's.
+
 `render.yaml` defines a single-instance paid web service with a persistent disk for the
 SQLite book and backups. Render terminates public HTTPS; the app's `--trust-proxy` option is
 only for this trusted proxy deployment. A shop password is required at setup. Choose a strong
@@ -237,8 +241,8 @@ carry them from the job screen instead.
 ### Carry the shop's records into the hosted book
 
 ```sh
-tools/carry-book.py https://crispprint-ghana.onrender.com            # the newest checked copy
-tools/carry-book.py https://crispprint-ghana.onrender.com my-book.db # a copy you name
+tools/carry-book.py https://chrisphicshub.onrender.com            # the newest checked copy
+tools/carry-book.py https://chrisphicshub.onrender.com my-book.db # a copy you name
 ```
 
 It says out loud what the copy holds and how many of each record is in it, asks for the shop
@@ -627,9 +631,11 @@ Three dev checks live in `tools/`, and none of them needs anything installed:
   already typed. Nothing is sent, uploaded or contacted while you work, and the app will not
   load any outside page inside its own window.
 - Job sheets print black on white for a clean photocopy.
-- Run one at a time — the app, `Chrisphics Hub.command` and the always-on server all open the
-  same book, so close one before starting another. `tools/shop-server.sh` refuses to install
-  over a book the app is holding.
+- Run one engine at a time. The app looks for the always-on shop server before it starts anything:
+  if something answers on `https://127.0.0.1:8834/healthz`, the app opens *that* server instead of
+  launching its own, so the app and the service can both be left running and every device sees the
+  same book. `Chrisphics Hub.command` still starts its own engine, so close the app before running
+  it beside the service. `tools/shop-server.sh` refuses to install over a book the app is holding.
 - The `.app` is built and signed for this Mac. If a copy on another Mac says it is from an
   unidentified developer, right-click it and choose Open once.
 - Rebuilding needs the free Xcode Command Line Tools (already here, for `swiftc`); running it

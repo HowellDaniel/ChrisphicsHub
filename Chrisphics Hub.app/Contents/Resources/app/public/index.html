@@ -45,6 +45,7 @@
       <a class="navlink" href="#/accounts" data-view="accounts">Accounts</a>
       <a class="navlink" href="#/expenses" data-view="expenses">Expenses</a>
       <a class="navlink" href="#/reports" data-view="reports">Reports</a>
+      <a class="navlink" href="#/shop" data-view="shop">Shop &amp; devices</a>
     </nav>
 
     <div class="side-cta">
@@ -53,6 +54,7 @@
       <button class="btn wide" data-action="new-quote">+ New quote</button>
       <button class="btn wide" data-action="new-client">+ New client</button>
       <button class="btn wide" data-action="receive-payment">Receive payment</button>
+      <button class="btn wide" data-action="sign-out" id="signOut" hidden>Sign out of this device</button>
     </div>
 
     <div class="side-bottom">
@@ -64,6 +66,7 @@
 
       <div class="side-foot">
         <div class="kv"><span>In the book</span><b id="footCounts">–</b></div>
+        <div class="kv"><span>Last copy</span><b id="footBackup">–</b></div>
         <button class="linkbtn" data-action="backup">Download data backup</button>
         <p class="hint">Saves to <code id="footDb">data/chrisphics.db</code> on this Mac. Keep that file.</p>
       </div>

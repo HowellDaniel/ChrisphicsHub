@@ -87,6 +87,66 @@ final class Paths {
     }
 }
 
+// ---------------------------------------------------------------- the shop's own authority
+//
+// tools/shop-server.sh keeps the book on one port, under a certificate this Mac issued itself.
+// Nothing here is trusted unless the chain ends at that authority file, so a stranger's
+// certificate on a port we happen to probe is still refused.
+
+enum ShopTrust {
+    static let rootPEM = URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent("Library/Application Support/mkcert/rootCA.pem")
+
+    static let delegate = SessionTrust()
+
+    static func loopback(_ host: String) -> Bool {
+        host == "localhost" || host == "::1" || host.hasPrefix("127.")
+    }
+
+    static var root: SecCertificate? {
+        guard let text = try? String(contentsOf: rootPEM, encoding: .utf8) else { return nil }
+        let base64 = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("-----") }
+            .joined()
+        guard let der = Data(base64Encoded: base64) else { return nil }
+        return SecCertificateCreateWithData(nil, der as CFData)
+    }
+
+    // The certificates the shop's address was offered with. Nothing on the protection space hands
+    // the chain over directly, so it comes from the trust object itself.
+    static func chain(from space: URLProtectionSpace) -> [SecCertificate] {
+        guard let trust = space.serverTrust else { return [] }
+        return (SecTrustCopyCertificateChain(trust) as? [SecCertificate]) ?? []
+    }
+
+    static func accepts(_ chain: [SecCertificate], host: String) -> Bool {
+        guard loopback(host), let anchor = root, !chain.isEmpty else { return false }
+        var trust: SecTrust?
+        let policy = SecPolicyCreateSSL(true, host as CFString)
+        guard SecTrustCreateWithCertificates(chain as CFArray, policy, &trust) == errSecSuccess,
+              let built = trust else { return false }
+        SecTrustSetAnchorCertificates(built, [anchor] as CFArray)
+        SecTrustSetAnchorCertificatesOnly(built, true)
+        return SecTrustEvaluateWithError(built, nil)
+    }
+
+    final class SessionTrust: NSObject, URLSessionDelegate {
+        func urlSession(_ session: URLSession,
+                        didReceive challenge: URLAuthenticationChallenge,
+                        completionHandler: @escaping (URLSession.AuthChallengeDisposition,
+                                                      URLCredential?) -> Void) {
+            let space = challenge.protectionSpace
+            guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+                  let serverTrust = space.serverTrust,
+                  ShopTrust.accepts(ShopTrust.chain(from: space), host: space.host) else {
+                return completionHandler(.performDefaultHandling, nil)
+            }
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        }
+    }
+}
+
 // ---------------------------------------------------------------- engine
 
 final class Engine {
@@ -96,6 +156,7 @@ final class Engine {
     private var handle: FileHandle?
     private let stdinLease = Pipe()
     private var stopping = false
+    private var attached = false
     private(set) var base: URL?
     var onDeath: ((String) -> Void)?
 
@@ -143,18 +204,29 @@ final class Engine {
         return Int(UInt16(bigEndian: got.sin_port))
     }
 
-    private func answers(_ base: URL) -> Bool {
-        let req = URLRequest(url: base.appendingPathComponent("api/bootstrap"), timeoutInterval: 2)
+    private func answers(_ base: URL, _ probe: String = "api/bootstrap") -> Bool {
+        let req = URLRequest(url: base.appendingPathComponent(probe), timeoutInterval: 2)
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         var ok = false
         let sem = DispatchSemaphore(value: 0)
-        URLSession(configuration: config).dataTask(with: req) { _, res, err in
+        let session = URLSession(configuration: config, delegate: ShopTrust.delegate,
+                                 delegateQueue: nil)
+        session.dataTask(with: req) { _, res, err in
             ok = err == nil && (res as? HTTPURLResponse)?.statusCode == 200
             sem.signal()
         }.resume()
         _ = sem.wait(timeout: .now() + 2.5)
+        session.finishTasksAndInvalidate()
         return ok
+    }
+
+    /// The always-on shop server, if this Mac is running one. Opening a second engine over the
+    /// same book is the one thing that can spoil the records, so the app defers to it.
+    private func shopServer() -> URL? {
+        let port = Int(ProcessInfo.processInfo.environment["CHRISPHICS_SHOP_PORT"] ?? "") ?? 8834
+        let url = URL(string: "https://127.0.0.1:\(port)/")!
+        return answers(url, "healthz") ? url : nil
     }
 
     private func tail() -> String {
@@ -165,6 +237,11 @@ final class Engine {
 
     func start(_ completion: @escaping (Result<URL, EngineError>) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
+            if let live = self.shopServer() {
+                self.attached = true
+                self.base = live
+                return completion(.success(live))
+            }
             guard let py = Engine.python() else {
                 return completion(.failure(EngineError(message: """
                 \(kAppName) needs Python 3 to run its records engine, and none was found in \
@@ -228,6 +305,12 @@ final class Engine {
 
     func stop() {
         stopping = true
+        if attached {
+            // The shop's own server is not ours to shut down; the window simply lets go of it.
+            base = nil
+            attached = false
+            return
+        }
         if let p = proc, p.isRunning { p.terminate() }
         proc = nil
         try? stdinLease.fileHandleForWriting.close()
@@ -355,7 +438,8 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate,
     func webView(_ view: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { return decisionHandler(.allow) }
-        if url.scheme == "http", url.host == "127.0.0.1" {
+        if let host = url.host, (url.scheme == "http" || url.scheme == "https"),
+           ShopTrust.loopback(host) {
             if url.path.hasPrefix("/api/export/") || url.path.hasPrefix("/api/backup") {
                 decisionHandler(.cancel)
                 let name = url.path.hasPrefix("/api/backup") ? "chrisphics-backup.db"
@@ -369,6 +453,18 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate,
         if url.scheme == "tel" || url.scheme == "mailto" || url.scheme == "https" || url.scheme == "http" {
             NSWorkspace.shared.open(url)
         }
+    }
+
+    func webView(_ view: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition,
+                                               URLCredential?) -> Void) {
+        let space = challenge.protectionSpace
+        guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = space.serverTrust,
+              ShopTrust.accepts(ShopTrust.chain(from: space), host: space.host) else {
+            return completionHandler(.performDefaultHandling, nil)
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
     }
 
     func webView(_ view: WKWebView, createWebViewWith config: WKWebViewConfiguration,

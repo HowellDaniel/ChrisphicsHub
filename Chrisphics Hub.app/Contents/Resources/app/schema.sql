@@ -168,7 +168,8 @@ CREATE TABLE IF NOT EXISTS money_signals (
   state        TEXT NOT NULL DEFAULT 'Unreviewed',   -- Unreviewed | Booked | Ignored
   client_id    INTEGER REFERENCES clients(id) ON DELETE SET NULL,
   job_id       INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
-  payment_id   INTEGER REFERENCES payments(id) ON DELETE SET NULL,
+  payment_id   INTEGER REFERENCES payments(id) ON DELETE SET NULL,   -- money in, or a refund out
+  expense_id   INTEGER REFERENCES expenses(id) ON DELETE SET NULL,   -- a send to someone who is not a client
   reason       TEXT,                                 -- why it is unsure, for the human to read
   seen_at      TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   booked_at    TEXT
@@ -189,6 +190,19 @@ CREATE TABLE IF NOT EXISTS sync_requests (
   status       INTEGER NOT NULL,
   response     TEXT NOT NULL,
   created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+-- Who is signed in to the shop book right now. The cookie's SHA-256 is kept rather than the
+-- cookie itself, so a read of the book cannot impersonate a device. Stored in the file rather
+-- than in memory because the always-on server restarts and a phone should not have to sign in
+-- again for that.
+CREATE TABLE IF NOT EXISTS sessions (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash  TEXT NOT NULL UNIQUE,
+  device      TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  last_seen   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  expires_at  REAL NOT NULL
 );
 
 -- A job's money. `total` prefers the item lines and only falls back to the header

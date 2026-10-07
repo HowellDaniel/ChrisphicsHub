@@ -166,6 +166,8 @@ code { font-family: var(--num); font-size: .88em; }
 .side-foot .kv { display: flex; justify-content: space-between; gap: 10px; font-size: .82em; color: var(--side-dim); }
 .side-foot .kv span { white-space: nowrap; }
 .side-foot .kv b { color: var(--side-text); font-family: var(--num); font-weight: 500; }
+/* An overdue copy of the book is the one fact in this corner that changes what the shop should do. */
+.side-foot .kv b.late { color: #e79a94; }
 /* Notes sit on paper most of the time; only the rail's own are pale on ink. */
 .hint { font-size: .74em; color: var(--muted); margin: 0; }
 .side .hint { color: var(--side-mid); }
@@ -243,6 +245,10 @@ input::placeholder { color: var(--placeholder); }
 .card > h3, .card > .card-h { padding: 13px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; font-size: .92em; font-weight: 600; flex-wrap: wrap; }
 .card > .card-h .spacer, .card > h3 .spacer { flex: 1; }
 .card-b { padding: 14px 16px; }
+/* The one card on the shop screen that is an alarm rather than a panel: an open book. */
+.card.warn-card { border-color: var(--bad); background: var(--bad-soft); }
+.card.warn-card b { color: var(--bad); }
+.card.warn-card .hint { color: inherit; }
 .grid { display: grid; gap: var(--gap); }
 .kpis { grid-template-columns: repeat(auto-fit, minmax(min(100%, 215px), 1fr)); }
 .split { grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); }
@@ -575,6 +581,7 @@ label.field.wide { grid-column: 1 / -1; }
   .navlink[data-view="leads"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'><path d='M3 5h18l-7 8v7l-4-2v-5z'/></svg>"); }
   .navlink[data-view="expenses"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M12 4v11M8 11l4 4 4-4M4 20h16'/></svg>"); }
   .navlink[data-view="reports"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><path d='M5 20V11M12 20V5M19 20v-6'/></svg>"); }
+  .navlink[data-view="shop"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4.5 8.5L6 3.5h12l1.5 5zM5.5 8.5V20.5h13V8.5M10 20.5v-5.5h4v5.5'/></svg>"); }
   .navlink.more { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'><path d='M5.5 12h.1M12 12h.1M18.5 12h.1'/></svg>"); }
 
   .tabbar .navlink {

@@ -328,6 +328,14 @@ async function boot() {
   if (S.boot.db) $('#footDb').textContent = S.boot.db;
   paintNav();
 }
+/* Whether *this* device is holding the book open with a session of its own. The shop's own
+   computer never does — it is the machine the records sit on — so it gets no sign-out button. */
+function paintSession() {
+  const btn = $('#signOut');
+  if (!btn) return;
+  const s = S.session || {};
+  btn.hidden = !(s.required && s.authenticated && !s.this_is_the_shop_computer);
+}
 function paintNav() {
   const b = S.boot;
   const badges = {
@@ -340,6 +348,7 @@ function paintNav() {
     dashboard: '',
     reports: '',
     sync: '',
+    shop: '',
   };
   $$('.navlink[data-view]').forEach((a) => {
     const view = a.dataset.view;
@@ -362,6 +371,14 @@ function paintFoot() {
   if (b.open_quotes) bits.push(plural(b.open_quotes, 'quote'));
   if (b.open_leads) bits.push(plural(b.open_leads, 'enquiry'));
   $('#footCounts').textContent = bits.join(' · ');
+  // One book, in one file, on one Mac: how recently it was copied belongs where it can be seen
+  // from any screen, because the screens that need it are the ones that come after a loss.
+  const foot = $('#footBackup');
+  const copy = b.backup || {};
+  if (foot) {
+    foot.textContent = copy.at ? fdate(copy.at.slice(0, 10)) : 'never';
+    foot.classList.toggle('late', !!copy.stale);
+  }
 }
 async function refreshChrome() {
   try { S.boot = await api('/api/bootstrap'); } catch (e) { /* keep going */ }
@@ -474,6 +491,8 @@ function emptyState(title, note, action) {
     (action || '') + '</div>';
 }
 function loginScreen(message) {
+  S.session = { required: true, authenticated: false };
+  paintSession();
   $('#topbar').innerHTML = '';
   $('#view').innerHTML = '<div class="login-card card"><h1>Sign in to the shop book</h1>' +
     '<p class="hint">Enter the shop password to access shared records.</p>' +
@@ -531,11 +550,13 @@ async function render() {
     else if (r.view === 'reports') await viewReports(r);
     else if (r.view === 'leads') await viewLeads(r);
     else if (r.view === 'expenses') await viewExpenses(r);
+    else if (r.view === 'shop') await viewShop(r);
     else await viewDashboard(r);
     if (r.id && r.view === 'jobs') openJobDrawer(Number(r.id));
     if (r.id && r.view === 'clients') openClientDrawer(Number(r.id));
     if (r.id && r.view === 'leads') openLeadDrawer(Number(r.id));
   } catch (err) {
+    if (err.status === 401) { loginScreen('This device has been out of the book for a while. Enter the shop password again.'); return; }
     v.innerHTML = emptyState('Could not load this page', err.message,
       '<button class="btn" onclick="location.reload()">Try again</button>');
   }
@@ -689,7 +710,8 @@ function refreshQuiet() {
 /* --------------------------------------------------------------- dashboard */
 async function viewDashboard() {
   const d = await api('/api/dashboard');
-  let momo = { signals: [], waiting: 0, booked: 0, booked_total: 0, waiting_total: 0, clients: [], number: '' };
+  let momo = { signals: [], waiting: 0, booked: 0, booked_total: 0, waiting_total: 0, sent: 0,
+    sent_total: 0, clients: [], number: '' };
   try { momo = await loadMomo(); } catch (e) { /* the dashboard still draws without the notices */ }
   watchMomoPanel();
   const k = d.kpi;
@@ -853,60 +875,83 @@ function momoGuess(clientId, amount) {
   return jobs.map((j) => ({ id: j.id, gap: Math.abs(j.balance - amount) }))
     .sort((a, b) => a.gap - b.gap)[0].id;
 }
-function momoJobOptions(clientId, picked) {
+function momoJobOptions(clientId, picked, blank) {
   const jobs = momoDebtors.filter((j) => String(j.client_id) === String(clientId) && j.balance > 0.005);
-  return '<option value="">Kept on their account (credit)</option>' + jobs.map((j) =>
+  return '<option value="">' + esc(blank || 'Kept on their account (credit)') + '</option>' + jobs.map((j) =>
     '<option value="' + j.id + '"' + (String(j.id) === String(picked || '') ? ' selected' : '') + '>' +
     esc(j.ref) + ' · owes ' + esc(money(j.balance)) + '</option>').join('');
 }
 function momoSig(s) {
   const clients = (S.momo && S.momo.clients) || [];
+  const cats = (S.boot && S.boot.expense_categories) || [];
   const amt = (s.amount === null || s.amount === undefined) ? '' : n2(s.amount);
   const payer = [s.payer, s.payer_phone ? momoPhone(s.payer_phone) : ''].filter(Boolean).join(' · ');
   const meta = [s.source === 'Messages' ? 'read from Messages' : 'pasted in', fdatetime(s.seen_at)];
-  return '<div class="sig" data-sig="' + s.id + '">' +
+  const out = s.direction === 'Out';
+  const unclear = s.direction !== 'Credit' && s.direction !== 'Out';
+  return '<div class="sig" data-sig="' + s.id + '"' + (out || unclear ? ' data-out="1">' : '>') +
     '<div class="sig-h"><b class="money big">' +
     (amt ? esc(money(Number(amt))) : '<span class="muted">no figure read</span>') + '</b>' + momoWay(s) +
     '<span class="spacer"></span><span class="ref">' + esc(meta.join(' · ')) + '</span></div>' +
-    (payer ? '<p class="sig-by">Sent by <b>' + esc(payer) + '</b></p>' : '') +
+    (payer ? '<p class="sig-by">' + (out ? 'Sent to <b>' : unclear ? 'A name in it: <b>' : 'Sent by <b>') +
+      esc(payer) + '</b></p>' : '') +
     (s.reason ? '<p class="sig-note">' + esc(s.reason) + '</p>' : '') +
     '<div class="sig-f">' +
     '<label><span>Amount</span><input type="number" class="momo-amt" min="0.01" step="0.01" placeholder="0.00" value="' + esc(amt) + '"></label>' +
-    '<label><span>Whose money</span><select class="momo-client"><option value="">Choose a client…</option>' +
+    '<label><span>' + (out || unclear ? 'Who this went to' : 'Whose money') + '</span><select class="momo-client"><option value="">' +
+    (out || unclear ? 'Nobody in the book — money out' : 'Choose a client…') + '</option>' +
     clients.map((c) => '<option value="' + c.id + '"' + (String(c.id) === String(s.client_id || '') ? ' selected' : '') +
       '>' + esc(c.name) + '</option>').join('') + '</select></label>' +
-    '<label><span>Put it against</span><select class="momo-job">' + momoJobOptions(s.client_id || '', s.job_id) + '</select></label>' +
-    '<div class="row-actions"><button class="btn sm primary" data-momo-book>Book it</button>' +
+    (out || unclear ? '<label><span>Money out for</span><select class="momo-cat">' +
+      cats.map((c) => '<option value="' + esc(c) + '"' + (c === 'Other' ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
+      '</select></label>' : '') +
+    '<label><span>' + (out ? 'Refund it against' : 'Put it against') + '</span><select class="momo-job">' +
+      momoJobOptions(s.client_id || '', s.job_id,
+        out ? 'Money back on their account' : (unclear ? 'No job of theirs' : '')) + '</select></label>' +
+    '<div class="row-actions">' +
+    (out ? '<button class="btn sm primary" data-momo-send>Record send</button>'
+      : '<button class="btn sm primary" data-momo-book>Book it</button>') +
+    (unclear ? '<button class="btn sm" data-momo-send>Record as a send</button>' : '') +
     '<button class="btn sm" data-momo-ignore>Put aside</button></div>' +
     '</div><details class="sig-raw"><summary>The alert as it arrived</summary><p>' + esc(s.raw) + '</p></details>' +
     '</div>';
 }
 function momoDone(s) {
-  const booked = !!s.payment_id;
   const figure = s.amount ? money(s.amount) : 'no figure';
-  return '<div class="sig done' + (booked ? '' : ' aside') + '">' +
+  const who = s.client_id ? '<a href="#/clients/' + s.client_id + '">' + esc(s.client || 'a client') + '</a>' : '';
+  let what;
+  if (s.state === 'Ignored') what = 'put aside by the shop';
+  else if (s.expense_id) what = 'money out · ' + esc(s.expense_category || 'Other') +
+    (s.expense_payee ? ' · to ' + esc(s.expense_payee) : '');
+  else if (s.direction === 'Out') what = 'refunded to ' + who +
+    ' · ' + esc(s.job_ref ? s.job_ref : 'their account');
+  else what = 'booked to ' + who + ' · reference ' + esc(s.client || '') + ' · ' +
+    esc(s.job_ref ? s.job_ref : 'account credit');
+  return '<div class="sig done' + (s.state === 'Ignored' ? ' aside' : '') + '">' +
     '<b class="money">' + esc(figure) + '</b>' +
-    (booked
-      ? '<span>booked to <a href="#/clients/' + s.client_id + '">' + esc(s.client || 'a client') + '</a> · ' +
-        'reference ' + esc(s.client || '') + ' · ' + esc(s.job_ref ? s.job_ref : 'account credit') + '</span>'
-      : '<span>put aside by the shop</span>') +
+    '<span>' + what + '</span>' +
     '<span class="spacer"></span><time>' + esc(fdatetime(s.booked_at || s.seen_at)) + '</time></div>';
 }
 function momoInner(m) {
   const waiting = m.signals.filter((s) => s.state === 'Unreviewed');
+  const sends = waiting.filter((s) => s.direction === 'Out');
   const done = m.signals.filter((s) => s.state !== 'Unreviewed').slice(0, 6);
   const toggle = (key, on, label, note) => '<button class="btn sm' + (on ? ' primary' : '') + '" data-momo-' + key +
     ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + esc(note) + '">' + (on ? '✓ ' : '') + esc(label) + '</button>';
-  return '<h3>Money in by MoMo<span class="spacer"></span><span class="momo-ctl">' +
-    toggle('watch', m.watching, 'Watch Messages', 'Read Messages every twenty seconds for payment alerts.') +
-    toggle('auto', m.auto, 'Book without asking', 'Post a matched alert on its own. Off means you see each one first.') +
+  return '<h3>MoMo money in and out<span class="spacer"></span><span class="momo-ctl">' +
+    toggle('watch', m.watching, 'Watch Messages', 'Read Messages every twenty seconds for MoMo alerts, both ways.') +
+    toggle('auto', m.auto, 'Book without asking',
+      'Post a matched payment in on its own, the moment the alert arrives. A send out always waits for you, ' +
+      'because only you can say whether it was money back to a client or the shop paying for something.') +
     '<button class="btn sm" data-momo-check>Check Messages now</button></span></h3><div class="card-b">' +
     '<p class="momo-sum">' + (waiting.length
       ? (m.waiting_total
-        ? '<b>' + esc(money(m.waiting_total)) + '</b> in ' + pluralise(waiting.length, 'notice') + ' to check'
+        ? '<b>' + esc(money(m.waiting_total)) + '</b> in ' + pluralise(waiting.length, 'notice') + ' to check' +
+          (sends.length ? ' · ' + pluralise(sends.length, 'send') + ' going out' : '')
         : waiting.length + (waiting.length === 1 ? ' notice with no figure' : ' notices with no figure') + ' to check')
       : '<b>Nothing is waiting.</b>') +
     (m.booked ? '<span>· ' + m.booked + ' booked, ' + esc(money(m.booked_total)) + ' in</span>' : '') +
+    (m.sent ? '<span>· ' + m.sent + ' out, ' + esc(money(m.sent_total)) + '</span>' : '') +
     '<span>· clients pay into <b>' + esc(m.number) + '</b></span>' +
     (m.checked ? '<span>· last looked ' + esc(fdatetime(m.checked)) + '</span>' : '') + '</p>' +
     (m.status ? '<p class="sig-note">' + esc(m.status) + '</p>' : '') +
@@ -935,7 +980,9 @@ function paintMomo(payload) {
 function syncMomoRow(row) {
   const clientId = row.querySelector('.momo-client').value;
   const amount = Number(row.querySelector('.momo-amt').value || 0);
-  row.querySelector('.momo-job').innerHTML = momoJobOptions(clientId, momoGuess(clientId, amount));
+  const out = row.dataset.out === '1';
+  row.querySelector('.momo-job').innerHTML = momoJobOptions(clientId, momoGuess(clientId, amount),
+    out ? 'Money back on their account' : '');
 }
 /* The Messages watcher runs on the server, so a payment can arrive while this screen is open.
    A repaint while the shop is typing into the panel would wipe the words, so focus stays safe. */
@@ -951,7 +998,8 @@ function watchMomoPanel() {
     const before = S.momo || { signals: [] };
     let res;
     try { res = await loadMomo(); } catch (e) { return; }
-    const moved = res.waiting !== before.waiting || res.booked_total !== before.booked_total;
+    const moved = res.waiting !== before.waiting || res.booked_total !== before.booked_total ||
+      res.sent_total !== before.sent_total;
     if (!moved) return;
     render();   /* a fresh notice or a fresh booking moves the KPI figures too */
   }, 20000);
@@ -1185,6 +1233,167 @@ function weekStart() {
   const d = new Date(Date.now() - 6 * 86400000);
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 }
+
+/* ------------------------------------------------------------- shop & devices
+   The counter's own screen: where the book lives on the Wi-Fi, how a phone gets it,
+   who is signed in, and whether the book has been copied lately. Everything here is
+   about the shop, not about a job. */
+async function viewShop() {
+  const shop = await api('/api/shop');
+  let devices = [];
+  try { devices = (await api('/api/devices')).devices || []; } catch (e) { /* hosted or signed out */ }
+  const login = shop.login, copy = shop.backup;
+  const address = shop.address;
+  topbar('Shop & devices',
+    (shop.secure ? 'HTTPS' : 'plain HTTP') + ' · ' + devices.length + ' signed in · ' +
+    (copy.at ? 'book copied ' + fdate(copy.at.slice(0, 10)) : 'the book has never been copied'),
+    '', [{ label: login.chosen_on_this_mac ? 'Change the password' : 'Choose a password',
+          action: 'shop-password', primary: true },
+         { label: 'Install page', action: 'setup-page' },
+         { label: '+ New job', action: 'new-job' }]);
+  $('#view').innerHTML =
+    '<div class="grid kpis">' +
+      stat('Shop address', '<span class="amt">' + esc(address.replace(/^https?:\/\//, '').replace(/\/$/, '')) + '</span>',
+           shop.reachable_from_wifi ? 'devices on this Wi-Fi reach the book here'
+                                    : 'only this Mac can reach it right now') +
+      stat('Sign-in', login.required ? (login.from_environment ? 'Set by the service' : 'One shop password') : 'Not required',
+           login.required ? 'every other device has to know it'
+                          : 'anyone on this network could read the book',
+           login.required ? '' : 'warn') +
+      stat('Signed-in devices', devices.length, devices.length
+           ? 'phones and laptops holding the book open' : 'nothing but this Mac') +
+      stat('Copies of the book', copy.copies || 0,
+           copy.at ? 'last one ' + copy.note : 'none yet — the book exists in one place only',
+           copy.stale ? 'warn' : '') +
+    '</div>' +
+    (login.required ? '' : '<div class="card warn-card"><div class="card-b">' +
+      '<b>The book is open to anything on this Wi-Fi.</b>' +
+      '<p class="hint">Choose one shop password and a phone left on the counter stops being the ' +
+      'whole ledger. It is kept as a scrambled hash inside the book file, never as the word itself, ' +
+      'and every device is signed out whenever it changes.</p>' +
+      '<button class="btn primary" data-action="shop-password">Choose the shop password</button>' +
+      '</div></div>') +
+    '<div class="grid split">' +
+    '<div class="card"><h3>Put the book on a device</h3><div class="card-b">' +
+      '<p class="hint">A phone or laptop opens one page, trusts the shop certificate once, then ' +
+      'keeps the app on its home screen. The records stay on this Mac — the device only ever ' +
+      'holds a window onto them.</p>' +
+      '<p><a class="btn primary" data-action="setup-page" href="/setup">Open the install page</a></p>' +
+      (shop.secure
+        ? '<p class="hint">This address is HTTPS, so a browser will allow it to be installed.' +
+          (shop.certificate ? ' The shop certificate is on that page, with its fingerprint.' : ' No certificate file has been made yet; run <code>tools/shop-server.sh certs</code> on this Mac.')
+        + '</p>'
+        : '<p class="err">Plain HTTP will open the book but will not let a device install it or keep ' +
+          'it offline. Run <code>tools/shop-server.sh install</code> on this Mac for the HTTPS address.</p>') +
+      '<p class="hint">' + (shop.reachable_from_wifi
+        ? 'Devices on this Wi-Fi can reach the book now.'
+        : 'Only this Mac can reach the book. Start the shop server with <code>tools/shop-server.sh install</code> to let the counter’s phone in.') + '</p>' +
+    '</div></div>' +
+    '<div class="card"><h3>Kept awake for the shop<span class="spacer"></span></h3><div class="card-b">' +
+      '<p class="hint">' + (shop.awake
+        ? 'This Mac is being held awake while the book is served, so a phone on the counter can always reach it.'
+        : 'If this Mac sleeps, every installed device goes quiet with it. The always-on server asks ' +
+          'for it to stay awake; this window was opened without that request.') + '</p>' +
+    '</div></div>' +
+    '</div>' +
+    '<div class="card"><h3>Signed in on these devices<span class="spacer"></span>' +
+      '<button class="btn sm ghost" data-action="shop-devices">Refresh</button></h3>' +
+      '<div class="tablewrap"><table><thead><tr><th>Device</th><th>Since</th><th>Last used</th><th></th></tr></thead><tbody>' +
+      (devices.length ? devices.map((d) => '<tr><td><span class="strong">' + esc(d.device || 'a device') + '</span></td>' +
+        '<td class="ref">' + fdate((d.created_at || '').slice(0, 10)) + '</td>' +
+        '<td class="ref">' + fdate((d.last_seen || '').slice(0, 10)) + '</td>' +
+        '<td class="num"><button class="btn sm ghost" data-device-revoke="' + d.id + '">Sign out</button></td></tr>').join('')
+        : '<tr><td colspan="4" class="hint">No other device is signed in. Once a phone installs the ' +
+          'app and knows the password, it appears here — and can be thrown out from here.</td></tr>') +
+      '</tbody></table></div>' +
+      '<p class="hint">A device stays signed in for thirty days of ordinary use. Signing one out here ' +
+      'takes effect the next time it asks for something.</p></div>' +
+    '<div class="card"><h3>The shop password<span class="spacer"></span></h3><div class="card-b">' +
+      '<p class="hint">' + (login.from_environment
+        ? 'This server takes its password from the environment (<code>CHRISPHICS_AUTH_PASSWORD</code>), ' +
+          'so it cannot be changed from here. Remove it from the service settings to choose one in the app.'
+        : login.required
+          ? 'Chosen on this Mac and kept in the book as a hash. Anyone who knows it can read the ' +
+            'records, so treat it like the till key: hand it to staff, not to a screen.'
+          : 'Nothing is set. Until it is, the book is readable by any device that finds the address.') + '</p>' +
+      '<p>' + (login.from_environment ? ''
+        : '<button class="btn" data-action="shop-password">' +
+          (login.required ? 'Change the shop password' : 'Choose the shop password') + '</button> ' +
+          (login.required && !shop.reachable_from_wifi
+            ? '<button class="btn ghost" data-action="shop-password-off">Switch sign-in off</button>' : '')) + '</p>' +
+    '</div></div>' +
+    '<div class="card"><h3>Copies of the book<span class="spacer"></span>' +
+      '<button class="btn sm ghost" data-action="backup">Copy it now</button></h3><div class="card-b">' +
+      (copy.at
+        ? '<p class="hint">Last copy: <b>' + esc(copy.file) + '</b> on ' + esc(copy.at) + ' — ' + esc(copy.note) + '.</p>'
+        : '<p class="hint">The book has not been copied yet. One file holds every job, client and ' +
+          'payment, so a failed disk takes the whole account book with it.</p>') +
+      (copy.stale && copy.at
+        ? '<p class="err">More than a day without a copy. If the always-on server is running, the ' +
+          'nightly job at 22:30 is missing — check <code>tools/shop-server.sh status</code>.</p>' : '') +
+      '<p class="hint">Folder: <code>' + esc(copy.folder) + '</code>. Fourteen nights, one copy for each ' +
+      'of the last twelve months, and the last twelve copies asked for by hand — each one opened and '
+      + 'counted against the book before the older ones are cleared.</p>' +
+    '</div></div>';
+  restoreFocus();
+}
+
+function passwordForm(login) {
+  const changing = login.required && !login.from_environment;
+  openModal(modalHeader(changing ? 'Change the shop password' : 'Choose the shop password',
+    changing ? 'Every device is signed out, and each one has to be told the new password.'
+             : 'Long beats clever: four ordinary words are easier to remember than a trick') +
+    '<form id="shopPasswordForm">' +
+    (changing ? '<label class="field wide"><span>What it is now</span>' +
+      '<input name="current" type="password" autocomplete="current-password" required></label>' : '') +
+    '<label class="field wide"><span>New shop password</span>' +
+    '<input name="password" type="password" minlength="8" maxlength="200" autocomplete="new-password" required></label>' +
+    '<label class="field wide"><span>Once more</span>' +
+    '<input name="again" type="password" autocomplete="new-password" required></label>' +
+    '<p class="hint">Kept in the book as a salted hash, never as the word. Staff sign in on each ' +
+    'device with it; a wrong password five times makes that device wait.</p>' +
+    '<div class="err" id="shopPasswordErr"></div>' +
+    '<button class="btn primary">Save</button></form>');
+  $('#shopPasswordForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    if (f.password.value !== f.again.value) {
+      $('#shopPasswordErr').textContent = 'The two do not match yet';
+      return;
+    }
+    $('#shopPasswordErr').textContent = '';
+    try {
+      await api('/api/shop-password', { method: 'POST', body: JSON.stringify({
+        password: f.password.value, current: f.current ? f.current.value : '',
+      }) });
+      closeModal();
+      toast('The shop password is set. Every other device has to be told.', 'good');
+      await render();
+    } catch (err) { $('#shopPasswordErr').textContent = err.message; }
+  });
+}
+
+function passwordOffForm(login) {
+  openModal(modalHeader('Switch sign-in off', 'Only do this if every device is inside the shop'),
+    '<form id="shopPasswordOffForm">' +
+    '<label class="field wide"><span>The shop password</span>' +
+    '<input name="current" type="password" autocomplete="current-password" required></label>' +
+    '<p class="hint">Any device that can reach this address will then read the whole book without ' +
+    'asking — including a stranger’s phone on the same Wi-Fi.</p>' +
+    '<div class="err" id="shopOffErr"></div><button class="btn">Switch it off</button></form>');
+  $('#shopPasswordOffForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    $('#shopOffErr').textContent = '';
+    try {
+      await api('/api/shop-password', { method: 'DELETE',
+        body: JSON.stringify({ current: e.target.current.value }) });
+      closeModal();
+      toast('Sign-in is off. The book is open on this network.', 'warn');
+      await render();
+    } catch (err) { $('#shopOffErr').textContent = err.message; }
+  });
+}
+
 async function viewSpoiled() {
   const rows = await api('/api/spoiled');
   const total = rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
@@ -1546,12 +1755,16 @@ function notifyCard(job, n) {
   S.notify.byId = {};
   S.notify.client = n.client;
   n.messages.forEach((m) => { S.notify.byId[m.id] = m; });
+  /* An automatic message with no provider set up would sit queued and give the shop no way to
+     actually tell the client, so on those channels the handoff buttons stay available. */
+  const blocked = {};
+  (n.blocked || []).forEach((b) => { blocked[b.channel] = b.reason; });
   const newest = n.messages.reduce((a, b) => (b.state === 'Queued' && b.id > a ? b.id : a), 0);
   const rows = n.messages.map((m) => {
     const waiting = m.state === 'Queued';
     const automatic = !!m.auto_send;
     const label = automatic
-      ? (m.delivery_state === 'Sent' ? 'Sent automatically'
+      ? (m.delivery_state === 'Sent' ? (m.provider_id ? 'Sent automatically' : 'Sent by the shop')
         : m.delivery_state === 'Sending' ? 'Sending automatically'
           : m.delivery_state === 'Failed' ? 'Delivery failed'
             : m.delivery_state === 'Cancelled' ? 'Cancelled'
@@ -1563,9 +1776,14 @@ function notifyCard(job, n) {
           ? '<p class="hint delivery-error">Retry scheduled after attempt ' + m.delivery_attempts + '.</p>'
           : m.delivery_state === 'Cancelled'
             ? '<p class="hint delivery-error">The client withdrew permission; this message was not sent.</p>'
-            : '<p class="hint">Sent by the shop server when the provider is available.</p>')
+            : m.delivery_state === 'Sent' && !m.provider_id
+              ? '<p class="hint">Carried by the shop and closed here by hand.</p>'
+              : '<p class="hint">Sent by the shop server when the provider is available.</p>')
       : '';
     const verb = m.channel === 'WhatsApp' ? 'Open in WhatsApp' : 'Open in Mail';
+    /* A client who withdrew permission is not to be written to, buttons or otherwise. */
+    const aside = m.delivery_state !== 'Cancelled';
+    const handoff = aside && (!automatic || !!blocked[m.channel]);
     return '<details class="msg' + (waiting ? ' waiting' : '') + '"' + (m.id === newest ? ' open' : '') + '>' +
       '<summary><span class="pill n-' + esc(automatic ? m.delivery_state : m.state) + '">' + esc(label) + '</span>' +
       '<b>' + esc(m.event) + '</b><span class="m-chan">' + esc(m.channel) + ' &middot; ' + esc(m.to_address) + '</span>' +
@@ -1573,14 +1791,16 @@ function notifyCard(job, n) {
       '<p class="m-body">' + esc(m.body) + '</p>' +
       details +
       '<div class="m-act">' +
-      (automatic
-        ? (m.delivery_state === 'Failed'
-          ? '<button class="btn sm primary" data-notify-retry="' + m.id + '">Retry now</button>' : '')
-        : '<button class="btn sm' + (m.channel === 'WhatsApp' ? ' primary' : '') + '" data-notify-open="' + m.id + '">' + verb + '</button>' +
+      (automatic && m.delivery_state === 'Failed'
+        ? '<button class="btn sm primary" data-notify-retry="' + m.id + '">Retry now</button>' : '') +
+      (handoff
+        ? '<button class="btn sm' + (m.channel === 'WhatsApp' && handoff ? ' primary' : '') +
+          '" data-notify-open="' + m.id + '">' + verb + '</button>' +
           '<button class="btn sm ghost" data-notify-copy="' + m.id + '">Copy</button>' +
           (m.state === 'Sent'
             ? '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Queued">Back to queued</button>'
-            : '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Sent">Mark as sent</button>')) +
+            : '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Sent">Mark as sent</button>')
+        : '') +
       '<span class="spacer"></span>' +
       '<button class="btn sm ghost danger" data-notify-del="' + m.id + '">Remove</button>' +
       '</div></details>';
@@ -1591,8 +1811,9 @@ function notifyCard(job, n) {
   const canSend = n.whatsapp_to || n.email_to;
   return '<div class="section-h">Tell the client' +
     (n.to_send ? ' <span class="pill n-Queued">' + pluralise(n.to_send, 'message') + ' to send</span>' : '') +
-    '</div><p class="hint" style="margin:8px 0 0">Pending, Printing and Ready updates are sent automatically ' +
-    'to channels the client agreed to use. Other messages can still be opened as drafts for staff to send.</p>' +
+    '</div><p class="hint" style="margin:8px 0 0">Pending, Printing, Ready and Delivered updates go out ' +
+    'automatically on the channels the client agreed to. Other messages can still be opened as drafts ' +
+    'for staff to send.</p>' +
     (rows ? '<div class="msgs">' + rows + '</div>' : '<p class="hint" style="margin-top:8px">Nothing has been written for this job yet.</p>') +
     (canSend
       ? '<div class="section-h sub">Write it again, or send a stage you skipped</div>' + again
@@ -1603,6 +1824,13 @@ function notifyCard(job, n) {
       ? '<p class="hint" style="margin-top:8px">Automatic updates were skipped on ' +
         n.not_consented.map(esc).join(' and ') +
         ' because permission is not recorded. Edit the client record to record consent.</p>'
+      : '') +
+    (n.blocked && n.blocked.length
+      ? '<p class="sig-note" style="margin-top:8px">' + n.blocked.map((b) =>
+          esc(b.channel) + ' is queued and waiting, but cannot leave this Mac on its own: ' +
+          esc(b.reason)).join(' ') +
+        ' Until that is set up, press ' + (n.blocked[0].channel === 'WhatsApp' ? 'WhatsApp' : 'Email') +
+        ' above — the message opens ready to send, and Mark as sent closes it here.</p>'
       : '') +
     (n.missing.length && canSend
       ? '<p class="hint" style="margin-top:8px">' + n.missing.map((c) =>
@@ -1849,11 +2077,12 @@ function installInstructions() {
   if (!window.isSecureContext) {
     steps = '<p>This address uses plain HTTP. Browsers require HTTPS before they allow this app ' +
       'to be installed or its offline app shell to be cached on another device.</p>' +
-      '<p>On this shop Wi-Fi, first download and trust the ' +
-      '<a href="http://' + location.hostname + ':8835/shop-root-ca.cer" download="CRISPprint-Shop-Root-CA.cer">CRISPprint shop certificate</a> ' +
-      'on this device, then open the HTTPS address supplied by the shop.</p>' +
-      '<p class="hint">Install a certificate only for a shop you trust. The fingerprint and ' +
-      'device setup steps are in the setup guide.</p>';
+      '<p>The shop’s install page carries the address, the certificate to trust and the steps for ' +
+      'this kind of device: <a href="/setup" target="_blank">open /setup</a> — or just the ' +
+      '<a href="/shop-root-ca.cer" download="CRISPprint-Shop-Root-CA.cer">shop certificate</a> ' +
+      'if this device already has the HTTPS address.</p>' +
+      '<p class="hint">Install a certificate only for a shop you trust. The page prints its ' +
+      'fingerprint so you can check the file is the one the shop made.</p>';
   } else if (ios) {
     steps = '<p>In Safari, tap <b>Share</b>, then choose <b>Add to Home Screen</b> and confirm.</p>';
   } else if (/Android/.test(ua)) {
@@ -2007,8 +2236,8 @@ function clientPicker(selectedId) {
     '<label class="field"><span>Email</span><input name="new_email" type="email" maxlength="160" placeholder="name@example.com"></label>' +
     '<label class="field"><span>Type</span><select name="new_kind">' + S.boot.kinds.map((k) => '<option>' + esc(k) + '</option>').join('') + '</select></label>' +
     '<label class="field wide"><span>Area / address</span><input name="new_address" maxlength="400" placeholder="Neighbourhood, city"></label>' +
-    '<label class="consent wide"><input type="checkbox" name="new_whatsapp_updates"><span>Client agreed to receive job updates on WhatsApp</span></label>' +
-    '<label class="consent wide"><input type="checkbox" name="new_email_updates"><span>Client agreed to receive job updates by email</span></label>' +
+    '<label class="consent wide"><input type="checkbox" name="new_whatsapp_updates" checked><span>Client agreed to receive job updates on WhatsApp</span></label>' +
+    '<label class="consent wide"><input type="checkbox" name="new_email_updates" checked><span>Client agreed to receive job updates by email</span></label>' +
     '</div></div></div>';
 }
 function clientOptions(selectedId, filter) {
@@ -2410,6 +2639,27 @@ async function afterMutation(keepDrawer) {
 }
 const ACTIONS = {
   'install-app'() { installApp().catch(fail); },
+  async 'shop-password'(el) {
+    try { passwordForm((await api('/api/shop')).login); } catch (err) { fail(err); }
+  },
+  async 'shop-password-off'() {
+    try { passwordOffForm((await api('/api/shop')).login); } catch (err) { fail(err); }
+  },
+  'setup-page'() { window.open('/setup', '_blank'); },
+  'shop-devices'() { render().catch(fail); },
+  async 'device-revoke'(el) {
+    try {
+      await api('/api/devices/' + el.dataset.deviceRevoke, { method: 'DELETE' });
+      toast('That device is signed out.', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  async 'sign-out'() {
+    try {
+      await api('/api/logout', { method: 'POST', body: '{}' });
+      loginScreen('Signed out of the shop book.');
+    } catch (err) { fail(err); }
+  },
   'toggle-more'() {
     const sheet = $('#moresheet');
     if (!sheet) return;
@@ -2679,7 +2929,7 @@ const ACTIONS = {
       const n = res.notice;
       if (!n) { toast('That notice was already in the list'); box.value = ''; paintMomo(res); return; }
       if (n.state === 'Booked') toast('Booked ' + money(n.amount) + ' for ' + (n.client || 'the client'), 'good');
-      else if (n.direction === 'Out') toast('That reads as money going out, not in — left for a look');
+      else if (n.direction === 'Out') toast('That reads as money going out — press Record send on it');
       else toast('Read ' + (n.amount ? money(n.amount) : 'a notice') + ' from it' +
         (n.client ? ' · ' + n.client : '') + ' — check it below', 'good');
       box.value = '';
@@ -2698,6 +2948,32 @@ const ACTIONS = {
       });
       toast('Booked ' + money(res.payment.amount) + ' for ' + res.payment.client +
         ' · ' + (res.payment.ref ? 'against ' + res.payment.ref : 'kept as account credit'), 'good');
+      await afterMutation(true);
+    } catch (err) { fail(err); }
+  },
+  async 'momo-send'(el) {
+    const row = el.closest('.sig');
+    const clientId = row.querySelector('.momo-client').value;
+    const amount = row.querySelector('.momo-amt').value;
+    const cat = row.querySelector('.momo-cat');
+    if (!(Number(amount) > 0)) { toast('Type the amount that went out', 'bad'); return; }
+    if (!clientId && !confirm('Nobody in the book is chosen, so this goes in as the shop paying out ' +
+      money(Number(amount)) + (cat ? ' for ' + cat.value.toLowerCase() : '') + '.\n\n' +
+      'Press Cancel instead if the money actually went back to one of your clients — then choose them ' +
+      'and it books as a refund on their account.')) return;
+    try {
+      const res = await api('/api/momo/' + row.dataset.sig + '/send', {
+        method: 'POST', body: JSON.stringify({
+          amount: amount, client_id: clientId, job_id: row.querySelector('.momo-job').value,
+          category: cat ? cat.value : '',
+        }),
+      });
+      const r = res.recorded;
+      toast(r.recorded_as === 'refund'
+        ? 'Refunded ' + money(r.amount) + ' to ' + r.client +
+          ' · ' + (r.ref ? 'against ' + r.ref : 'their account')
+        : 'Recorded ' + money(r.amount) + ' as money out · ' + r.category +
+          (r.payee ? ' · ' + r.payee : ''), 'good');
       await afterMutation(true);
     } catch (err) { fail(err); }
   },
@@ -2856,6 +3132,8 @@ window.chrisphics = {
   try {
     await paintNetworkStatus();
     const session = await api('/api/session');
+    S.session = session;
+    paintSession();
     if (session.required && !session.authenticated) { loginScreen(); return; }
     await boot();
     await refreshChrome();
