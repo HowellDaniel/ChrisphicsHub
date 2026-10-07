@@ -50,9 +50,10 @@ BACKUP_DIR = os.environ.get("CHRISPHICS_BACKUP_DIR") or os.path.join(SUPPORT, "B
 LEGACY_DB = os.path.expanduser("~/Library/Application Support/Chriphics Hub/chriphics.db")
 
 SHOP = {
-    # The shop's trading name, as it appears on a job sheet. The phone stays empty until the shop
-    # sets CHRISPHICS_SHOP_PHONE: these details go out to customers, and a number that reaches
-    # nobody is worse than no number at all.
+    # The shop's trading name, as it appears on a job sheet. The phone starts empty: these
+    # details go out to customers, and a number that reaches nobody is worse than no number at
+    # all. The shop sets any of them for good on its own Settings ▸ Profile screen, and what the
+    # book holds then beats whatever this Mac's environment happens to say.
     "name": os.environ.get("CHRISPHICS_SHOP_NAME", "CRISPprint Ghana"),
     "tagline": os.environ.get("CHRISPHICS_SHOP_TAGLINE", "Printing & Design Services"),
     "phone": os.environ.get("CHRISPHICS_SHOP_PHONE", "").strip(),
@@ -60,6 +61,8 @@ SHOP = {
     "currency": "GHS",
     "currency_symbol": "\u20b5",
 }
+# What the environment alone says, kept so a detail the shop clears can fall back to it.
+DEFAULT_SHOP = dict(SHOP)
 
 STATUSES = ["Pending", "Printing", "Ready", "Delivered", "Cancelled"]
 CATEGORIES = [
@@ -165,6 +168,7 @@ def connect(path=None):
         _db.executescript(fh.read())
     _db.commit()
     default_updates_consent()
+    apply_book_profile()
 
 
 # executescript() creates missing tables, but CREATE TABLE IF NOT EXISTS can never add a
@@ -1527,6 +1531,59 @@ def set_state(key, value):
                     " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
                     " updated_at = excluded.updated_at", (key, str(value)))
         _db.commit()
+
+
+# ---------------------------------------------------------------- the shop's own identity
+#
+# The trading name, tagline, phone and address go out on every job sheet and every client
+# message, so they belong to the book rather than to whoever last set an environment variable.
+# A stored value wins over the default; nothing stored yet means the default still speaks.
+
+PROFILE_FIELDS = (("name", "shop_name", 60, True), ("tagline", "shop_tagline", 60, False),
+                  ("phone", "shop_phone", 24, False), ("address", "shop_address", 120, False))
+PROFILE_KEYS = dict((field, key) for field, key, _limit, _required in PROFILE_FIELDS)
+PHONE_CHARS = set("0123456789 +()-")
+
+
+def apply_book_profile():
+    """Lay the book's own shop details over the defaults. Run once at start-up, before any
+    sheet, message or screen reads SHOP."""
+    for field, key, _limit, _required in PROFILE_FIELDS:
+        stored = state_value(key).strip()
+        if stored:
+            SHOP[field] = stored
+
+
+def set_shop_profile(body):
+    """Take the shop's details from the counter's own screen: check each one, keep it in the
+    book, and put it straight into the values every later sheet is written from."""
+    if not isinstance(body, dict):
+        raise ValueError("Send the shop details as a JSON object")
+    cleaned = {}
+    for field, key, limit, required in PROFILE_FIELDS:
+        if field not in body:
+            continue
+        value = body.get(field)
+        value = "" if value is None else str(value).strip()
+        if len(value) > limit:
+            raise ValueError("The shop's %s is too long — %d characters at most" % (field, limit))
+        if required and not value:
+            raise ValueError("The shop needs a name to print on a job sheet")
+        if field == "phone" and value and set(value) - PHONE_CHARS:
+            raise ValueError("A phone number holds digits, spaces and + ( ) - only")
+        cleaned[field] = value
+    if not cleaned:
+        raise ValueError("Nothing to change — send a name, tagline, phone or address")
+    for field, value in cleaned.items():
+        key = PROFILE_KEYS[field]
+        if value:
+            set_state(key, value)
+        else:
+            with _lock:
+                _db.execute("DELETE FROM app_state WHERE key = ?", (key,))
+                _db.commit()
+        SHOP[field] = value or DEFAULT_SHOP[field]
+    return {"shop": dict(SHOP), "saved": sorted(cleaned)}
 
 
 # ----------------------------------------------------------------------- sign-in
@@ -3678,6 +3735,9 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {"shop": SHOP,
                          "address": shop_url(self.headers.get("Host", "")),
                          "setup": "/setup",
+                         "momo_number": MOMO_NUMBER,
+                         "kept_in_book": {field: bool(state_value(key))
+                                          for field, key, _limit, _req in PROFILE_FIELDS},
                          "secure": bool(getattr(self.server, "is_tls", False)),
                          "reachable_from_wifi": SERVE["host"] not in ("127.0.0.1", "localhost", "::1"),
                          "awake": KEEP_AWAKE,
@@ -3687,6 +3747,12 @@ class Handler(BaseHTTPRequestHandler):
                                    "from_environment": bool(AUTH_PASSWORD),
                                    "chosen_on_this_mac": bool(book_password())},
                          "backup": backup_report()}
+        if method == "PUT" and head == "shop":
+            # The shop's own details are the counter's business: the name and number printed on
+            # every sheet go out to customers, so only this Mac may change them.
+            if not self.is_shop_computer():
+                return 403, {"error": "The shop's own details are changed on the shop's computer"}
+            return 200, set_shop_profile(self.body())
         if head == "shop-password":
             if method == "POST":
                 if not self.is_shop_computer() and not book_password():

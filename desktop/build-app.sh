@@ -74,8 +74,20 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# Settings ▸ Updates compares this build against the repository, so the bundle has to carry the
+# commit and the moment it was built. Both come from the tree being built, never from a hand edit.
+COMMIT="$(git -C "$PROJECT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+PLIST="$APP/Contents/Info.plist"
+plutil -replace CFBundleShortVersionString -string 1.1 "$PLIST"
+plutil -replace CFBundleVersion -string 1.1 "$PLIST"
+plutil -replace ChrisphicsBuildCommit -string "$COMMIT" "$PLIST"
+plutil -replace ChrisphicsBuildDate -string "$BUILT" "$PLIST"
+echo "   stamped: version 1.1, commit $COMMIT, built $BUILT"
+
 echo "4/5 compiling the Swift shell"
 swiftc -O -swift-version 5 -framework Cocoa -framework WebKit -framework PDFKit \
+  -framework ServiceManagement -framework IOKit \
   -o "$BIN" "$SRC/src/main.swift"
 chmod +x "$BIN"
 

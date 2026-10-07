@@ -51,6 +51,26 @@ untouched as the safety copy. From then on only the new name is used.
   macOS print dialog (the sheet's own print button is wired to it); **Export Job Sheet as
   PDF** saves it as a file.
 
+### Settings `⌘,`
+
+`Chrisphics Hub ▸ Settings…` (`⌘,`) opens the app's own settings window — four panes in a toolbar,
+and the window resizes to whichever pane you are in.
+
+| Pane | What it holds |
+| --- | --- |
+| **General** | open at login; which screen the app shows first (any of the ten, or "Where I left off"); text size 90–140%; keep this Mac awake while the shop is open; which records engine the window is attached to; where the book and the backups live, with Back up now / Show book in Finder / Open backups |
+| **Appearance** | **Light**, **Dark**, **Follow the Mac** — the same three choices as `View ▸ Appearance` and the sidebar buttons; change one anywhere and the others re-tick |
+| **Profile** | the shop's name, tagline, phone and address, kept *in the book*; the MoMo number, the address devices install from, and the currency are read out but not editable here |
+| **Updates** | this build's version, commit and build date, the repository, **Check for update**, and a button to open the repository |
+
+General and Appearance describe one machine, so they live in that Mac's own preferences
+(`UserDefaults`) and never in the book. Profile is the opposite: **Save** posts through the shop's
+API into the book, so every later job sheet, quote and queued client message is written from those
+words, and a phone signing in to the same server sees them too. That is why the server takes
+profile writes only from the shop computer itself — and why the pane says so when it is refused.
+Clearing a field and saving drops it back to the default `server.py` (or its environment) seeded.
+**Check for update** is the only outward call in the window; see [Notes](#notes).
+
 **In a browser instead.** Double-click **`Chrisphics Hub.command`**. A Terminal window opens and
 your browser goes to <http://127.0.0.1:8712/>. It reads and writes the same data file as the
 desktop app. Use one at a time; keep the Terminal window open while you work, and press
@@ -568,9 +588,14 @@ and `KINDS` lines just below it; add or rename entries as you like.
 
 The phone in that block is empty and the address (`Accra, Ghana`) is still a placeholder. Both
 print at the top of every job sheet, and the client messages sign off with them, so they land in
-front of your customers either way. Rather than edit the program, set them in the environment of
-whatever starts the server — `CHRISPHICS_SHOP_PHONE`, `CHRISPHICS_SHOP_ADDRESS`,
-`CHRISPHICS_SHOP_NAME`, `CHRISPHICS_SHOP_TAGLINE` — and restart. Until a number is set, messages
+front of your customers either way. You do not have to edit the program for any of them: set the
+name, tagline, phone and address in **`Chrisphics Hub ▸ Settings… ▸ Profile`** and **Save**, and
+they are kept in the book — the server lays them over these defaults on every start-up, and every
+later sheet, quote and client message is written from them. Clearing one there and saving falls
+back to the default below. For a server you cannot open Settings on, set them in its environment
+instead — `CHRISPHICS_SHOP_PHONE`, `CHRISPHICS_SHOP_ADDRESS`, `CHRISPHICS_SHOP_NAME`,
+`CHRISPHICS_SHOP_TAGLINE` — and restart; those are what a book with nothing saved in it falls back
+to, and a value already saved in the book wins over them. Until a number is set, messages
 simply leave the "Call or WhatsApp…" line out; a customer is never handed a number that reaches
 nobody.
 
@@ -609,11 +634,12 @@ the Poppins on this Mac does not carry that feature. To change the look, change 
 one place; weights used anywhere in the CSS are snapped to the four Poppins ships
 (400 / 500 / 600 / 700), so an in-between weight silently becomes its nearest one.
 
-Three dev checks live in `tools/`, and none of them needs anything installed:
+Four dev checks live in `tools/`, and none of them needs anything installed:
 
 | Command | What it answers |
 | --- | --- |
 | `python3 tools/js-check.py` | does `public/app.js` still parse? (one stray bracket empties every screen) |
+| `python3 tools/check-profile-settings.py` | can the shop's own details be saved and read back out of the book, do bad ones get refused, and does a cleared one fall back to its default? Runs against a **copy** of the book on a throwaway port. |
 | `swift tools/make-qr.swift "<address>" /tmp/shop-qr.png 520` | the counter's QR as a printable PNG — and every code is read back before the file is trusted (`--verify <file.png>` checks one already drawn) |
 | `swiftc -O tools/wk-probe.swift -o /tmp/wk-probe` then `/tmp/wk-probe <url> <dir> "open\|/#/jobs" "shot\|jobs"` | what a screen actually rendered, in the same WebKit the app uses, as text plus a PNG |
 
@@ -625,10 +651,12 @@ Three dev checks live in `tools/`, and none of them needs anything installed:
   the Wi-Fi, and it does so behind the shop password.
 - Data is never sent anywhere. There is no analytics and no cloud. Devices on the shop Wi-Fi
   sign in to this Mac with one password; nothing reaches an outside account, and no account
-  reaches in. The one place the app looks outward is a message you chose to send: pressing
-  **WhatsApp** or **Email** on
-  the **Tell the client** card asks macOS to open `wa.me` or your mail app with the words
-  already typed. Nothing is sent, uploaded or contacted while you work, and the app will not
+  reaches in. The app looks outward only where you start it: pressing **WhatsApp** or **Email**
+  on the **Tell the client** card asks macOS to open `wa.me` or your mail app with the words
+  already typed, and pressing **Check for update** in `Settings ▸ Updates` asks GitHub for the
+  newest commit in the shop's own repository and compares that hash with the stamp baked into
+  this build — a plain read of a public repository, with no shop name, no records and no sign-in
+  detail in it. Nothing else is sent, uploaded or contacted while you work, and the app will not
   load any outside page inside its own window.
 - Job sheets print black on white for a clean photocopy.
 - Run one engine at a time. The app looks for the always-on shop server before it starts anything:
