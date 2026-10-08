@@ -69,8 +69,20 @@ mac_name() {
   printf '%s' "$name"
 }
 
+every_ip() {   # every address this Mac answers on right now — Wi-Fi, hotspot, Thunderbolt bridge
+  ifconfig -a 2>/dev/null | awk '/[[:space:]]inet /{print $2}' | sort -u || true
+}
+
 shop_names() {   # the one list every device and this Mac agree on
-  printf '%s\n' "$1" "$2.local" localhost 127.0.0.1 ::1
+  local line=""
+  printf '%s\n' "$1" "$2.local" localhost ::1
+  while IFS= read -r line; do
+    if [ -n "$line" ] && [ "$line" != "$1" ]; then
+      printf '%s\n' "$line"
+    fi
+  done <<IPS
+$(every_ip)
+IPS
 }
 
 mkcert_bin() {
