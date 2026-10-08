@@ -369,8 +369,41 @@ final class Saver {
 
 // ---------------------------------------------------------------- windows
 
-final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate,
-                       WKScriptMessageHandler, NSWindowDelegate {
+/// WebKit insists that a pop-up's web view is built from the very configuration it hands over, so
+/// every window in this app answers to one message controller — and a controller raises an
+/// Objective-C exception when the same name is added to it twice. Uncaught, that ended the app the
+/// moment a second job sheet was opened. So a single handler answers for each name and every
+/// message carries the web view that posted it.
+final class Bridge: NSObject, WKScriptMessageHandler {
+    static let shared = Bridge()
+    private static var claimsKey = 0
+
+    /// Which names this controller already answers to. Carried on the controller itself, so it
+    /// disappears with it rather than leaving a reused address to look like a live registration.
+    private static func claims(_ controller: WKUserContentController) -> Set<String> {
+        (objc_getAssociatedObject(controller, &claimsKey) as? Set<String>) ?? []
+    }
+
+    static func bind(_ name: String, script: String?, on controller: WKUserContentController) {
+        var claimed = claims(controller)
+        guard !claimed.contains(name) else { return }
+        if let script = script {
+            controller.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart,
+                                                  forMainFrameOnly: true))
+        }
+        controller.add(shared, name: name)
+        claimed.insert(name)
+        objc_setAssociatedObject(controller, &claimsKey, claimed, .OBJC_ASSOCIATION_RETAIN)
+    }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let from = message.webView,
+              let window = WebWindow.all.first(where: { $0.web === from }) else { return }
+        window.receive(message)
+    }
+}
+
+final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
     static var all = [WebWindow]()
 
     enum Kind { case main, sheet }
@@ -388,18 +421,6 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate,
         let config = configuration ?? WKWebViewConfiguration()
         if configuration == nil { config.websiteDataStore = .nonPersistent() }
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
-        if kind == .sheet {
-            config.userContentController.addUserScript(WKUserScript(
-                source: "window.print = function(){ window.webkit.messageHandlers.sheetPrint.postMessage(1); };",
-                injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        } else {
-            // This web view keeps no storage between launches, so the shell hands the page
-            // the remembered appearance before it paints — without this, a restart would
-            // fall back to following the Mac whatever the shop last chose.
-            config.userContentController.addUserScript(WKUserScript(
-                source: "try{localStorage.setItem('\(Theme.key)','\(Theme.saved.rawValue)')}catch(e){}",
-                injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        }
         let size = kind == .main ? NSSize(width: 1320, height: 860) : NSSize(width: 820, height: 920)
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -412,10 +433,18 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate,
         window.center()
         super.init(window: window)
 
-        if kind == .sheet { config.userContentController.add(self, name: "sheetPrint") }
-        else {
-            config.userContentController.add(self, name: "theme")
-            config.userContentController.add(self, name: "external")
+        if kind == .sheet {
+            Bridge.bind("sheetPrint",
+                        script: "window.print = function(){ window.webkit.messageHandlers.sheetPrint.postMessage(1); };",
+                        on: config.userContentController)
+        } else {
+            // This web view keeps no storage between launches, so the shell hands the page
+            // the remembered appearance before it paints — without this, a restart would
+            // fall back to following the Mac whatever the shop last chose.
+            Bridge.bind("theme",
+                        script: "try{localStorage.setItem('\(Theme.key)','\(Theme.saved.rawValue)')}catch(e){}",
+                        on: config.userContentController)
+            Bridge.bind("external", script: nil, on: config.userContentController)
         }
         web = WKWebView(frame: window.contentView!.bounds, configuration: config)
         web.autoresizingMask = [.width, .height]
@@ -528,7 +557,7 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate,
         a.beginSheetModal(for: view.window!) { completionHandler($0 == .OK) }
     }
 
-    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+    func receive(_ message: WKScriptMessage) {
         switch message.name {
         case "sheetPrint":
             printSheet()
@@ -630,6 +659,8 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate,
     // MARK: NSWindowDelegate
 
     func windowWillClose(_ note: Notification) {
+        // Nothing to let go of on the controller: the handler there is the shared bridge, not this
+        // window, so closing a sheet frees the sheet instead of leaving it behind a strong handler.
         if kind == .sheet {
             WebWindow.all.removeAll { $0 === self }
         } else {
