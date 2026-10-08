@@ -878,7 +878,8 @@ NOTIF_NEWS = {
              "Say the word and we book it for you.",
     "Booked": "Your order {ref} is booked: {what} — {total}. {due}"
               "We will message you when it goes on the press and again when it is ready.",
-    "Pending": "Your order {ref} for {what} is confirmed and waiting its turn in the queue. {due}",
+    "Pending": "Great news — your order {ref} for {what} is confirmed and scheduled for "
+               "production. {due}We appreciate your business and will keep you updated!",
     "Printing": "Your order {ref} for {what} is on the press right now. {due}"
                 "We will tell you as soon as it is off the machine.",
     "Ready": "Good news: your order {ref} for {what} is ready for collection at {address}. {balance}"
@@ -891,7 +892,7 @@ NOTIF_NEWS = {
 
 # The short phrase an email subject is built from.
 NOTIF_HEADLINE = {
-    "Quote": "quote ready", "Booked": "order booked", "Pending": "order in the queue",
+    "Quote": "quote ready", "Booked": "order booked", "Pending": "order confirmed",
     "Printing": "on the press", "Ready": "ready for collection",
     "Delivered": "delivered", "Cancelled": "cancelled",
 }
@@ -958,7 +959,7 @@ def message_fields(job):
         "what": job_what(job),
         "category": job.get("category") or "",
         "total": "%s%.2f" % (sym, float(job.get("total") or 0)),
-        "due": ("We are working to have it ready by %s. " % due) if due else "",
+        "due": ("We are on track to have everything ready for you by %s. " % due) if due else "",
         "hold": ("The price holds until %s. " % hold) if hold else "",
         "balance": money_note,
         "address": SHOP["address"],
@@ -972,7 +973,7 @@ def message_body(job, event, channel):
     if channel == "WhatsApp":
         # Until the shop sets its own number, the message says nothing rather than handing the
         # client a placeholder that reaches nobody.
-        return "Hello %s, %s here.\n\n%s%s" % (
+        return "Hi %s, %s is here.\n\n%s%s" % (
             f["client"], f["shop"], news,
             "\n\nCall or WhatsApp %s if anything needs changing." % f["phone"] if f["phone"] else "")
     sign = "Kind regards,\n%s — %s" % (f["shop"], SHOP["tagline"])
