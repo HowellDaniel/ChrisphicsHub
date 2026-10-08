@@ -482,6 +482,35 @@ ul { margin: 0; padding: 0; }
 .sig.done time { font: 500 .74em/1 var(--num); color: var(--muted); white-space: nowrap; }
 .sig.done.aside { border-style: dashed; color: var(--muted); }
 
+/* ---------- collect at the counter ---------- */
+/* The one question the shop screens a hand-over on, so the number box is the biggest thing on
+   the screen and the verdict reads at arm's length — on the desk and on a phone alike. */
+.collect-ask { display: flex; gap: 9px; align-items: flex-end; }
+.collect-ask .field { flex: 1 1 240px; max-width: 520px; }
+.collect-q { font-size: clamp(18px, .9vw + 13px, 24px); min-height: 52px; padding: 6px 13px;
+  letter-spacing: .05em; text-transform: uppercase; }
+.collect-ask .btn { min-height: 52px; }
+.collect-verdict { display: grid; gap: 13px; }
+.collect-verdict.yes { border-color: var(--ok); }
+.collect-ref { font: 600 clamp(18px, .9vw + 13px, 24px)/1.2 var(--num); letter-spacing: .02em; }
+.collect-what { font-size: 1.16em; }
+.collect-who { margin: -7px 0 0; color: var(--muted); font-size: .92em; }
+.collect-yes { margin: 0; color: var(--ok); font-weight: 600; }
+.collect-stop { margin: 0; color: var(--bad); font-weight: 600; }
+.collect-amb { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin: 0; }
+.collect-amb span { color: var(--muted); font-size: .88em; }
+/* The hand-over is the button the whole screen exists for; it gets a thumb's full height. */
+.collect-verdict .btn.primary { min-height: 48px; padding: 12px 20px; font-size: 1.02em; }
+/* The shelf has to fit a thumb's width. Everything on it is settled by definition, so the billed
+   figure is the one column a counter never reads — it goes first when the screen narrows. */
+@media (max-width: 720px) {
+  .collect-shelf th:nth-child(3), .collect-shelf td:nth-child(3) { display: none; }
+  .collect-shelf .ref { white-space: nowrap; }
+  /* Two boxes fit a phone's width, so the third would sit under them like a leftover. The balance
+     is the figure actually read out to the client, so it takes the row to itself instead. */
+  .collect-verdict .amounts > div:last-child { grid-column: 1 / -1; }
+}
+
 /* ---------- modal ---------- */
 .modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: var(--pad); }
 .modal-scrim { position: absolute; inset: 0; background: var(--scrim); }
@@ -598,6 +627,7 @@ label.field.wide { grid-column: 1 / -1; }
   }
   .navlink[data-view="dashboard"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'><path d='M4.5 4.5h6v6h-6zM13.5 4.5h6v6h-6zM4.5 13.5h6v6h-6zM13.5 13.5h6v6h-6z'/></svg>"); }
   .navlink[data-view="jobs"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M7 8V3h10v5M5 8h14v8h-3v5H8v-5H5zM8 12.5h8'/></svg>"); }
+  .navlink[data-view="collect"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M5.5 8h13l1.2 12.5H4.3zM8.5 8V6.2a3.5 3.5 0 0 1 7 0V8'/></svg>"); }
   .navlink[data-view="accounts"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 8h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3zM3 8V6a1 1 0 0 1 1-1h13M16.5 14h2.5'/></svg>"); }
   .navlink[data-view="clients"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><path d='M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM5 21a7 7 0 0 1 14 0'/></svg>"); }
   .navlink[data-view="spoiled"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M12 4l9 16H3zM12 10v4M12 17.4v.1'/></svg>"); }

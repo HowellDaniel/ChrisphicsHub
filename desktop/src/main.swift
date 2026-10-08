@@ -948,6 +948,7 @@ final class GeneralPane: Pane {
         ("auto", "Where I left off"),
         ("#/dashboard", "Dashboard"),
         ("#/jobs", "Print jobs"),
+        ("#/collect", "Collect"),
         ("#/spoiled", "Spoiled work"),
         ("#/sync", "Pending sync"),
         ("#/clients", "Clients"),
@@ -1456,6 +1457,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             .separator(),
             item("Dashboard", #selector(goDashboard), "1"),
             item("Print Jobs", #selector(goJobs), "2"),
+            /* The counter's screen, so it sits beside the order book. It has no number key: ⌘1…⌘0
+               are already spoken for, and a hand-over is one click from the rail anyway. */
+            item("Collect", #selector(goCollect)),
             item("Clients", #selector(goClients), "3"),
             item("Enquiries", #selector(goLeads), "4"),
             item("Accounts", #selector(goAccounts), "5"),
@@ -1550,6 +1554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func go(_ route: String) { main?.run("window.location.hash='\(route)'") }
     @objc func goDashboard() { go("#/dashboard") }
     @objc func goJobs() { go("#/jobs") }
+    @objc func goCollect() { go("#/collect") }
     @objc func goClients() { go("#/clients") }
     @objc func goLeads() { go("#/leads") }
     @objc func goAccounts() { go("#/accounts") }
@@ -1578,7 +1583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(pickTheme(_:)): return main != nil
         case #selector(newJob), #selector(newQuote), #selector(newEnquiry), #selector(newClient),
              #selector(newExpense), #selector(receivePayment),
-             #selector(goDashboard), #selector(goJobs), #selector(goClients), #selector(goLeads),
+             #selector(goDashboard), #selector(goJobs), #selector(goCollect), #selector(goClients), #selector(goLeads),
              #selector(goAccounts), #selector(goExpenses), #selector(goReports), #selector(goSpoiled), #selector(goSync),
              #selector(goShop),
              #selector(backupNow): return main != nil

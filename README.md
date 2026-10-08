@@ -43,7 +43,8 @@ untouched as the safety copy. From then on only the new name is used.
 
 - `File` — New Job `⌘N`, New Quote `⇧⌘N`, New Enquiry `⌘I`, New Client `⌘K`,
   Receive Payment `⌘R`, Record Money Out `⌘E`.
-- `View` — `⌘1`…`⌘9` and `⌘0` jump between the ten screens; Reload `⇧⌘R` after changing `public/`;
+- `View` — `⌘1`…`⌘9` and `⌘0` jump between the screens (Collect sits under Print Jobs with no key
+  of its own); Reload `⇧⌘R` after changing `public/`;
   **Appearance** picks Light, Dark or "Follow the Mac". Inside the app this is where the look is
   chosen, so the same three buttons on the page footer hide themselves here; they show only in a
   browser tab or on a phone, which have no Settings window.
@@ -327,7 +328,7 @@ The always-on Wi-Fi server and the hosted book are alternatives, not partners: l
 LaunchAgents installed only while the shop's records live on this Mac
 (`tools/shop-server.sh remove` takes them back).
 
-## The ten screens
+## The eleven screens
 
 **Dashboard** — money in today / this week / month to date, what customers still owe,
 what is late, what is ready for pickup, a 15-day cash chart, and what you print most.
@@ -354,6 +355,19 @@ full record: every item line on the order, the costs booked against it, payments
 stepper (Pending → Printing → Ready → Delivered), a **Tell the client** card with the
 message written for that stage ([see below](#telling-the-client)), a notes timeline, and a
 **Job sheet** you can hand over or print.
+
+**Collect** — the counter's screen, with one box big enough to read a job number into from the
+sheet or the WhatsApp message. It is forgiving about how the number is typed: `CH-2026-0001`,
+`ch20260001` and `2026-0001` all land on the same job. One card then answers the only question
+that matters while the client stands there — whose it is, what was billed, what has been paid —
+and either offers **Hand it over**, or says plainly why the box cannot leave yet: *₵180.00 still
+owed*, *Still on the press*, *Already handed over on 08 Oct 2026*, *This order was cancelled*.
+Under a refusal sit the only two things that clear it, **Take ₵180.00 now** and **Move it to
+Ready**, which open the same payment form and stage write the job record uses; nothing at all is
+written until you press something. Handing over is exactly the drawer's Delivered step — the time
+is stamped into the job's history and the Delivered message to the client queues with the rest.
+With the box empty the screen lists what is already both ready and paid, so the shelf of work
+waiting for someone to collect it is one click away on a phone as much as on the counter.
 
 **Clients** — everyone you have printed for, with their phone, WhatsApp, area, job count,
 total billed, total received and balance due. Click a client for their whole history.

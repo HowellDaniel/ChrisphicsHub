@@ -392,7 +392,7 @@ async function refreshChrome() {
    Links and buttons are moved rather than copied, so the router, the active state and
    the "3 waiting" badges keep working wherever they end up living. */
 const PHONE = window.matchMedia('(max-width: 720px)');
-const TABS = { dashboard: 'Desk', jobs: 'Jobs', accounts: 'Money', clients: 'Clients' };
+const TABS = { dashboard: 'Desk', jobs: 'Jobs', collect: 'Collect', accounts: 'Money', clients: 'Clients' };
 let phoneRestore = null;
 
 function stash(node, parent) {
@@ -544,6 +544,7 @@ async function render() {
   try {
     if (r.view === 'jobs') await viewJobs(r);
     else if (r.view === 'spoiled') await viewSpoiled(r);
+    else if (r.view === 'collect') await viewCollect();
     else if (r.view === 'sync') await viewSyncQueue();
     else if (r.view === 'clients') await viewClients(r);
     else if (r.view === 'accounts') await viewAccounts(r);
@@ -1607,6 +1608,99 @@ function spoilageForm(record, jobs, jobId) {
     '<div class="err" id="spoilageErr"></div><div class="modal-foot"><span class="spacer"></span>' +
     '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
     '<button class="btn primary">' + (record ? 'Save changes' : 'Record spoilage') + '</button></div></form>');
+}
+/* ------------------------------------------------------------------ collect
+   The counter's hand-over screen: one box for the job number off the sheet, one card that
+   answers whether the box may leave. Nothing is written until Hand over is pressed. */
+async function viewCollect() {
+  const q = (S.route.params.get('q') || '').trim();
+  const data = await api('/api/handover' + (q ? '?q=' + encodeURIComponent(q) : ''));
+  const waiting = data.waiting || [];
+  topbar('Collect', waiting.length
+    ? pluralise(waiting.length, 'job') + ' ready and paid, waiting to go out'
+    : 'Nothing is both ready and paid right now', '', []);
+  $('#topbar').insertAdjacentHTML('beforeend',
+    '<div class="collect-ask"><label class="field"><span>Job number</span>' +
+    '<input class="collect-q" data-filter="q" value="' + esc(q) + '" placeholder="CH-2026-0001" ' +
+    'autocomplete="off" autocapitalize="characters" spellcheck="false"></label>' +
+    '<button class="btn ghost" data-action="clear-filters">Clear</button></div>');
+  $('#view').innerHTML = '<div class="stack">' + collectBody(data, waiting) + '</div>';
+  restoreFocus();
+}
+
+function collectBody(data, waiting) {
+  if (!data.query) return collectShelf(waiting);
+  if (!data.found) {
+    return '<div class="card">' + emptyState('No job called ' + data.query,
+      'Nothing in the book carries that number. It is on the job sheet and in the messages sent ' +
+      'to the client — try the year and the number, with or without the CH-.',
+      '<a class="btn" href="#/jobs">See every job</a>') + '</div>';
+  }
+  if ((data.ambiguous || []).length) {
+    return '<div class="card card-b"><p class="strong">' + pluralise(data.ambiguous.length, 'job') +
+      ' answer to ' + esc(data.query) + '</p><p class="hint">Type the whole number, or open the one ' +
+      'you mean.</p>' + data.ambiguous.map((row) => '<p class="collect-amb"><a href="#/jobs/' + row.id +
+        '">' + esc(row.ref) + '</a> <span>' + esc(row.client) + ' · ' + esc(row.title) +
+        ' · ' + esc(row.status) + '</span></p>').join('') + '</div>';
+  }
+  return collectCard(data.card);
+}
+
+function collectCard(card) {
+  const j = card.job || {};
+  return '<div class="card card-b collect-verdict' + (card.can_handover ? ' yes' : ' no') + '">' +
+    '<div class="collect-h"><b class="collect-ref">' + esc(j.ref) + '</b>' +
+    '<span class="pill s-' + esc(j.status) + '">' + esc(j.status) + '</span>' +
+    (j.priority === 'Urgent' ? '<span class="pill p-Urgent">Urgent</span>' : '') +
+    '<span class="spacer"></span>' +
+    (card.settled ? '<span class="pill k-paid">Paid in full</span>'
+      : '<span class="pill out">Owes ' + money(j.balance) + '</span>') + '</div>' +
+    '<h2 class="collect-what">' + esc(j.title) + '</h2>' +
+    '<p class="collect-who">' + esc(j.client) +
+    (j.client_phone ? ' · <a href="tel:' + esc(j.client_phone) + '">' + esc(j.client_phone) + '</a>' : '') +
+    (j.category ? ' · ' + esc(j.category) : '') + '</p>' +
+    '<div class="amounts">' +
+    '<div><span>Billed</span><b>' + money(j.total) + '</b></div>' +
+    '<div><span>Paid</span><b>' + money(j.paid) + '</b></div>' +
+    '<div><span>Balance</span><b class="' + (Number(j.balance) > 0.005 ? 'neg' : 'pos') + '">' +
+      money(j.balance) + '</b></div></div>' +
+    (card.can_handover
+      ? '<p class="collect-yes">' + esc(card.money_line) + '</p><div class="row-actions">' +
+        '<button class="btn primary" data-action="collect-handover" data-status-job="' + j.id +
+        '" data-status-name="' + esc(j.ref) + '">Hand it over</button>' +
+        '<a class="btn ghost" href="#/jobs/' + j.id + '">Open the job</a>' +
+        '<a class="btn ghost" href="/print/' + j.id + '" target="_blank" rel="noopener">Job sheet</a></div>'
+      : '<p class="collect-stop">' + esc(card.reason) + '</p>' +
+        ((card.doors || []).length ? '<div class="row-actions">' + card.doors.map((d) =>
+          d.action === 'payment'
+            ? '<button class="btn" data-action="collect-pay" data-pay-job="' + j.id +
+              '" data-pay-name="' + esc(j.client) + '" data-pay-amount="' + esc(n2(card.balance)) + '">' +
+              esc(d.label) + '</button>'
+            : '<button class="btn" data-action="collect-ready" data-status-job="' + j.id +
+              '" data-status="' + esc(d.status) + '">' + esc(d.label) + '</button>').join('') +
+          '</div>' : '') +
+        '<div class="row-actions"><a class="btn ghost" href="#/jobs/' + j.id + '">Open the job</a></div>') +
+    '</div>';
+}
+
+function collectShelf(waiting) {
+  if (!waiting.length) {
+    return '<div class="card">' + emptyState('Nothing to hand over yet',
+      'A job appears here once it has reached Ready and its balance is settled. Type a number ' +
+      'above to check the one a client is standing at the counter for.', '') + '</div>';
+  }
+  return '<p class="section-h">Ready and paid</p><div class="card"><div class="tablewrap">' +
+    '<table class="collect-shelf">' +
+    '<thead><tr><th>Job</th><th>Client</th><th class=num>Billed</th><th></th></tr></thead><tbody>' +
+    waiting.map((j) => '<tr><td><span class="strong">' + esc(j.title) + '</span>' +
+      '<div class="ref"><a href="#/collect?q=' + encodeURIComponent(j.ref) + '">' + esc(j.ref) +
+      '</a></div>' +
+      (j.due_date ? '<div class="due">due ' + fdate(j.due_date) + '</div>' : '') + '</td>' +
+      '<td>' + esc(j.client) + '</td>' +
+      '<td class=num>' + money(j.total) + '</td>' +
+      '<td class=num><a class="btn ghost sm" href="#/collect?q=' + encodeURIComponent(j.ref) +
+      '">Collect</a></td></tr>').join('') +
+    '</tbody></table></div></div>';
 }
 async function viewSyncQueue() {
   const rows = (await offlineAll('outbox')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -2801,6 +2895,14 @@ async function afterMutation(keepDrawer) {
   await render();
   if (!keepDrawer) closeDrawer();
 }
+async function moveStage(id, status) {
+  const before = (S.boot && S.boot.to_send) || 0;
+  await api('/api/jobs/' + id + '/status', { method: 'POST', body: JSON.stringify({ status: status }) });
+  await refreshChrome();
+  const owed = ((S.boot && S.boot.to_send) || 0) - before;
+  toast(owed > 0 ? 'Marked as ' + status + ' — client message ready to send'
+                 : 'Marked as ' + status, 'good');
+}
 const ACTIONS = {
   'install-app'() { installApp().catch(fail); },
   async 'shop-password'(el) {
@@ -2933,13 +3035,29 @@ const ACTIONS = {
   async 'status'(el) {
     const id = Number(el.dataset.statusJob);
     try {
-      const before = (S.boot && S.boot.to_send) || 0;
-      await api('/api/jobs/' + id + '/status', { method: 'POST', body: JSON.stringify({ status: el.dataset.status }) });
-      await refreshChrome();
-      const owed = ((S.boot && S.boot.to_send) || 0) - before;
-      toast(owed > 0 ? 'Marked as ' + el.dataset.status + ' — client message ready to send'
-                     : 'Marked as ' + el.dataset.status, 'good');
+      await moveStage(id, el.dataset.status);
       await afterMutation(true); openJobDrawer(id);
+    } catch (err) { fail(err); }
+  },
+  /* The collect screen moves the same stage from its own card, but stays put afterwards: the
+     client is at the counter and the next number goes in the same box. */
+  async 'collect-ready'(el) {
+    try {
+      await moveStage(Number(el.dataset.statusJob), el.dataset.status);
+      await afterMutation(true);
+    } catch (err) { fail(err); }
+  },
+  'collect-pay'(el) {
+    const owed = Number(el.dataset.payAmount || 0);
+    paymentForm({ jobId: Number(el.dataset.payJob), name: el.dataset.payName,
+                  amount: owed, balance: owed });
+  },
+  async 'collect-handover'(el) {
+    const id = Number(el.dataset.statusJob);
+    if (!confirm('Give ' + el.dataset.statusName + ' to the client and close it in the book?')) return;
+    try {
+      await moveStage(id, 'Delivered');
+      await afterMutation(true);
     } catch (err) { fail(err); }
   },
   async 'notify-queue'(el) {

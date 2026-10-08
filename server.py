@@ -545,6 +545,118 @@ def job_detail(job_id):
     return job
 
 
+# ---------------------------------------------------------------------------- collect
+
+def ref_key(value):
+    """A job number as it is typed at the counter: dashes, spaces and case fall away, so
+    CH-2026-0001, ch20260001 and CH 2026 0001 are all the same question."""
+    return re.sub(r"[^0-9A-Za-z]", "", str(value or "")).upper()
+
+
+# The stored ref put through the same two shapes, so the comparison is between like and like.
+REF_KEY_SQL = "upper(replace(replace(j.ref, '-', ''), ' ', ''))"
+REF_BARE_SQL = "ltrim(%s, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ')" % REF_KEY_SQL
+
+
+def find_ref_job(raw):
+    """Which jobs a loosely typed number could point at. Letters in what was typed mean the whole
+    number was written down, so the ref must match it in full; a number typed without them is the
+    part after the prefix, which is matched against that part of every ref. More than one job
+    answering means the book holds two numbers that collapse together, so the counter is asked
+    for the whole ref rather than the app picking one."""
+    key = ref_key(raw)
+    if not key:
+        return []
+    if key[0].isalpha():
+        clause, args = REF_KEY_SQL + " = ?", (key,)
+    else:
+        clause, args = REF_BARE_SQL + " = ?", (key,)
+    return q("""
+      SELECT j.id, j.ref, j.title, j.status, c.name AS client
+      FROM jobs j JOIN clients c ON c.id = j.client_id
+      WHERE j.kind = 'Job' AND %s
+      ORDER BY j.created_at DESC, j.id DESC LIMIT 5
+    """ % clause, args)
+
+
+def handover_job(job_id):
+    """One job with the few columns the counter needs to check the right person is standing
+    there, plus its money. No children, because nothing here writes them."""
+    return one("""
+      SELECT j.id, j.ref, j.kind, j.title, j.category, j.status, j.priority, j.due_date,
+             j.closed_at, j.quantity, j.unit, j.size, j.created_at,
+             j.client_id, c.name AS client, c.phone AS client_phone,
+             c.whatsapp AS client_whatsapp, c.email AS client_email,
+             ja.total, ja.paid, ja.balance
+      FROM jobs j JOIN clients c ON c.id = j.client_id JOIN job_accounts ja ON ja.id = j.id
+      WHERE j.id = ?
+    """, (job_id,))
+
+
+def handover_money_line(job):
+    """The one line of money the card shows, so the counter reads it out while the client is
+    still standing there."""
+    sym = SHOP["currency_symbol"]
+    balance = round(float(job["balance"] or 0), 2)
+    if balance < -0.005:
+        return "Settled, and %s%.2f in credit with us." % (sym, -balance)
+    if balance <= 0.005:
+        return "Paid in full — %s%.2f collected." % (sym, float(job["paid"] or 0))
+    return "%s%.2f of the %s%.2f billed is still owed." % (sym, balance, sym,
+                                                           float(job["total"] or 0))
+
+
+def handover_card(job):
+    """The verdict on one job: can it leave the counter, and if not, why, in the shop's own
+    words, with the two doors that would clear it."""
+    sym = SHOP["currency_symbol"]
+    balance = round(float(job["balance"] or 0), 2)
+    settled = balance <= 0.005
+    status = job["status"]
+    ready = status == "Ready"
+    reasons = []
+    doors = []
+    # A called-off order is not a debt, so its money is never held up at the counter.
+    if not settled and status != "Cancelled":
+        reasons.append("%s%.2f still owed." % (sym, balance))
+        doors.append({"action": "payment", "label": "Take %s%.2f now" % (sym, balance),
+                      "amount": balance})
+    if not ready:
+        if status in ("Pending", "Printing"):
+            reasons.append("Still on the press — it is not ready for collection yet.")
+            doors.append({"action": "status", "label": "Move it to Ready", "status": "Ready"})
+        elif status == "Delivered":
+            closed = nice_date(job.get("closed_at"))
+            reasons.append("Already handed over" + (" on %s." % closed if closed else "."))
+        elif status == "Cancelled":
+            reasons.append("This order was cancelled.")
+        else:
+            reasons.append("The job is at the %s stage, not Ready." % status)
+    return {"job": job, "can_handover": bool(ready and settled),
+            "reason": " ".join(reasons), "settled": settled, "ready": ready,
+            "doors": doors, "balance": balance, "money_line": handover_money_line(job)}
+
+
+def handover_payload(params):
+    """GET /api/handover — read-only, the counter's lookup. A job number in `q` answers that one
+    job; with no number it lists everything ready and paid that is still on the shelf."""
+    out = {"query": text(params.get("q", [""])[0], 120),
+           "waiting": list_jobs({"kind": ["Job"], "status": ["Ready"], "paid": ["full"],
+                                 "sort": ["due"]}),
+           "found": None, "ambiguous": [], "card": None}
+    if not out["query"]:
+        return out
+    matches = find_ref_job(out["query"])
+    if not matches:
+        return out
+    out["found"] = matches[0]
+    if len(matches) > 1:
+        out["ambiguous"] = matches
+        return out
+    out["card"] = handover_card(handover_job(matches[0]["id"]))
+    return out
+
+
 def clean_job(payload):
     data = {}
     data["client_id"] = int(num(payload.get("client_id"), -1))
@@ -4289,6 +4401,8 @@ class Handler(BaseHTTPRequestHandler):
             if row["job_id"]:
                 refresh_pending_status_notification(row["job_id"])
             return 200, {"ok": True}
+        if method == "GET" and head == "handover":
+            return 200, handover_payload(params)
         if method == "GET" and head == "accounts":
             return 200, accounts_view(params)
         if method == "GET" and head == "report":
