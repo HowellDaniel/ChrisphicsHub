@@ -1242,8 +1242,11 @@ async function viewShop() {
   const shop = await api('/api/shop');
   let devices = [];
   try { devices = (await api('/api/devices')).devices || []; } catch (e) { /* hosted or signed out */ }
+  let guard = null;
+  try { guard = await api('/api/security'); } catch (e) { /* a device that is not signed in */ }
   const login = shop.login, copy = shop.backup;
   const address = shop.address;
+  const shopMac = !!(S.session || {}).this_is_the_shop_computer;
   topbar('Shop & devices',
     (shop.secure ? 'HTTPS' : 'plain HTTP') + ' · ' + devices.length + ' signed in · ' +
     (copy.at ? 'book copied ' + fdate(copy.at.slice(0, 10)) : 'the book has never been copied'),
@@ -1263,8 +1266,9 @@ async function viewShop() {
       stat('Signed-in devices', devices.length, devices.length
            ? 'phones and laptops holding the book open' : 'nothing but this Mac') +
       stat('Copies of the book', copy.copies || 0,
-           copy.at ? 'last one ' + copy.note : 'none yet — the book exists in one place only',
-           copy.stale ? 'warn' : '') +
+           copy.auto ? 'by itself every ' + cadenceWords(copy.every_hours)
+                     : 'only when the shop asks for one',
+           (copy.stale || !copy.auto) ? 'warn' : '') +
     '</div>' +
     (login.required ? '' : '<div class="card warn-card"><div class="card-b">' +
       '<b>The book is open to anything on this Wi-Fi.</b>' +
@@ -1297,7 +1301,9 @@ async function viewShop() {
     '</div></div>' +
     '</div>' +
     '<div class="card"><h3>Signed in on these devices<span class="spacer"></span>' +
-      '<button class="btn sm ghost" data-action="shop-devices">Refresh</button></h3>' +
+      '<button class="btn sm ghost" data-action="shop-devices">Refresh</button>' +
+      (devices.length ? '<button class="btn sm ghost" data-action="sign-out-all-devices">Throw out every other one</button>' : '') +
+      '</h3>' +
       '<div class="tablewrap"><table><thead><tr><th>Device</th><th>Since</th><th>Last used</th><th></th></tr></thead><tbody>' +
       (devices.length ? devices.map((d) => '<tr><td><span class="strong">' + esc(d.device || 'a device') + '</span></td>' +
         '<td class="ref">' + fdate((d.created_at || '').slice(0, 10)) + '</td>' +
@@ -1306,8 +1312,9 @@ async function viewShop() {
         : '<tr><td colspan="4" class="hint">No other device is signed in. Once a phone installs the ' +
           'app and knows the password, it appears here — and can be thrown out from here.</td></tr>') +
       '</tbody></table></div>' +
-      '<p class="hint">A device stays signed in for thirty days of ordinary use. Signing one out here ' +
-      'takes effect the next time it asks for something.</p></div>' +
+      '<p class="hint">A device stays signed in for ' + plural(guard ? guard.session_days : 30, 'day') +
+      ' of ordinary use, then asks again. Signing one out here takes effect the next time it asks ' +
+      'for something.</p></div>' +
     '<div class="card"><h3>The shop password<span class="spacer"></span></h3><div class="card-b">' +
       '<p class="hint">' + (login.from_environment
         ? 'This server takes its password from the environment (<code>CHRISPHICS_AUTH_PASSWORD</code>), ' +
@@ -1322,20 +1329,169 @@ async function viewShop() {
           (login.required && !shop.reachable_from_wifi
             ? '<button class="btn ghost" data-action="shop-password-off">Switch sign-in off</button>' : '')) + '</p>' +
     '</div></div>' +
-    '<div class="card"><h3>Copies of the book<span class="spacer"></span>' +
-      '<button class="btn sm ghost" data-action="backup">Copy it now</button></h3><div class="card-b">' +
-      (copy.at
-        ? '<p class="hint">Last copy: <b>' + esc(copy.file) + '</b> on ' + esc(copy.at) + ' — ' + esc(copy.note) + '.</p>'
-        : '<p class="hint">The book has not been copied yet. One file holds every job, client and ' +
-          'payment, so a failed disk takes the whole account book with it.</p>') +
-      (copy.stale && copy.at
-        ? '<p class="err">More than a day without a copy. If the always-on server is running, the ' +
-          'nightly job at 22:30 is missing — check <code>tools/shop-server.sh status</code>.</p>' : '') +
-      '<p class="hint">Folder: <code>' + esc(copy.folder) + '</code>. Fourteen nights, one copy for each ' +
-      'of the last twelve months, and the last twelve copies asked for by hand — each one opened and '
-      + 'counted against the book before the older ones are cleared.</p>' +
-    '</div></div>';
+    copiesCard(copy, shopMac) +
+    securityCard(guard, shopMac);
+  wireShopForms();
   restoreFocus();
+}
+
+/* Two cards the shop reads once a day and changes rarely: whether the book is being copied by
+   itself, and who is allowed to open it. Both are settled on the shop's own Mac — a phone on the
+   counter can read the answer but cannot quietly change the rules. */
+function plural(n, word) {
+  const count = Number(n || 0);
+  return count + ' ' + word + (count === 1 ? '' : 's');
+}
+
+function cadenceWords(hours) {
+  const every = Number(hours || 24);
+  return every % 24 === 0 ? plural(every / 24, 'day') : plural(every, 'hour');
+}
+
+function copiesCard(copy, shopMac) {
+  const every = copy.every_hours || 24;
+  const cadence = cadenceWords(every);
+  const recent = (copy.recent || []).map((r) =>
+    '<tr><td class="ref">' + esc(r.at) + '</td>' +
+    '<td>' + (r.kind === 'manual' ? 'asked for' : 'by itself') + '</td>' +
+    '<td class="num">' + Math.round((r.bytes || 0) / 1024) + ' kB</td>' +
+    '<td class="ref">' + esc(r.name) + '</td></tr>').join('');
+  return '<div class="card"><h3>Copies of the book<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-action="book-copy">Copy it now</button>' +
+    '<button class="btn sm ghost" data-action="backup">Take a copy out</button></h3><div class="card-b">' +
+    (copy.at
+      ? '<p class="hint">Last copy: ' + (copy.file ? '<b>' + esc(copy.file) + '</b> ' : '') +
+        esc(copy.at) + (copy.note ? ' — ' + esc(copy.note) : '') + '.</p>'
+      : '<p class="hint">The book has not been copied yet. One file holds every job, client and ' +
+        'payment, so a failed disk takes the whole account book with it.</p>') +
+    (copy.error
+      ? '<p class="err">The last automatic copy did not finish (' + esc(copy.error_at || '') + '): ' +
+        esc(copy.error) + '</p>' : '') +
+    (copy.auto
+      ? (copy.due
+        ? '<p class="err">A copy is overdue — the server is running, so it should have made one by'
+          + ' now. It will try again within five minutes.</p>'
+        : '<p class="hint">Copied by itself every ' + cadence + '; the next one is due in ' +
+          (copy.next_in_hours === null ? '—' : plural(Math.max(0, Math.round(copy.next_in_hours * 10) / 10), 'hour')) + '.</p>')
+      : '<p class="err">Automatic copying is switched off. The book exists in one place only until'
+        + ' it is switched back on or a copy is asked for by hand.</p>') +
+    '<p class="hint">Folder: <code>' + esc(copy.folder) + '</code>' +
+    (copy.free_gb !== null && copy.free_gb !== undefined ? ' · ' + copy.free_gb + ' GB free there' : '') + '.</p>' +
+    (copy.mirror_set
+      ? '<p class="hint">Second destination: <code>' + esc(copy.mirror) + '</code>' +
+        (copy.mirror_dir ? ' — each new copy is written there too.'
+                         : ' — that folder is not there right now, so nothing is being mirrored.') + '</p>'
+      : '<p class="hint">No second destination is set, so both the book and its copies live on this'
+        + ' one Mac. An external disk plugged in now and then is the cheapest insurance there is.</p>') +
+    (shopMac
+      ? '<form id="copiesForm" class="stack">' +
+        '<label class="consent wide"><input type="checkbox" name="auto"' + (copy.auto ? ' checked' : '') + '>' +
+        '<span>Copy the book by itself while the server is running</span></label>' +
+        '<div class="grid split">' +
+        '<label class="field"><span>Every (hours)</span><input name="every_hours" type="number" min="1" max="168"' +
+        ' step="1" value="' + every + '"></label>' +
+        '<label class="field"><span>Keep night copies for (days)</span><input name="keep_days" type="number"' +
+        ' min="3" max="120" step="1" value="' + (copy.keep_days || 14) + '"></label>' +
+        '</div>' +
+        '<label class="field wide"><span>A second folder (optional)</span>' +
+        '<input name="mirror" type="text" maxlength="300" placeholder="/Volumes/Backup/Chrisphics"' +
+        ' value="' + esc(copy.mirror || '') + '"></label>' +
+        '<p class="hint">One copy for each month is kept for a year beyond those days, and the last' +
+        ' twelve copies asked for by hand. Each one is opened and counted against the book before any' +
+        ' older copy is cleared.</p>' +
+        '<div class="err" id="copiesErr"></div>' +
+        '<button class="btn primary">Save the copying</button></form>'
+      : '<p class="hint">How often the book is copied, and where the copies go, is settled on the' +
+        ' shop’s own computer.</p>') +
+    (recent ? '<div class="tablewrap"><table><thead><tr><th>When</th><th>Why</th><th class="num">Size</th>' +
+      '<th>File</th></tr></thead><tbody>' + recent + '</tbody></table></div>' : '') +
+    '</div></div>';
+}
+
+function securityCard(guard, shopMac) {
+  if (!guard) {
+    return '<div class="card"><h3>Security of this book</h3><div class="card-b">' +
+      '<p class="hint">The security of the book is read from the shop’s own computer, or after' +
+      ' signing in. Nothing here is missing — this device simply has not been asked to show it.</p>' +
+      '</div></div>';
+  }
+  const trail = (guard.trail || []).slice(0, 12).map((row) =>
+    '<tr><td class="ref">' + esc(row.at) + '</td><td><span class="strong">' + esc(row.kind) + '</span></td>' +
+    '<td class="ref">' + esc(row.address || '') + '</td><td class="ref">' + esc(row.detail || '') + '</td></tr>').join('');
+  return '<div class="card"><h3>Security of this book<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-action="shop-security">Refresh</button></h3><div class="card-b">' +
+    '<p class="hint">Sign-in: <b>' + (guard.required ? (guard.from_environment
+      ? 'set by the hosting service' : 'one shop password') : 'not required') + '</b>' +
+    (guard.required ? ' — the word is kept only as a salted hash, run through ' +
+      (guard.rounds / 1000) + ' thousand rounds.' : ' — choose a shop password above.') + '</p>' +
+    '<p class="hint">' + (guard.https
+      ? 'This address is HTTPS, so a password crossing the Wi-Fi is encrypted on the way.'
+      : '<span class="err">Plain HTTP: a password typed here crosses the Wi-Fi in the clear.'
+        + '</span> Run <code>tools/shop-server.sh install</code> on this Mac.') + '</p>' +
+    '<p class="hint">' + plural(guard.allowed_fails, 'wrong password') + ' in a row and that device' +
+    ' is made to wait, doubling each time up to a quarter of an hour. More than ' +
+    plural(guard.calls_per_minute, 'call') + ' in one minute from one address is answered with a' +
+    ' wait, so a script cannot bury the counter’s own screen.</p>' +
+    '<p class="hint">' + (guard.loopback_open
+      ? 'This Mac is the shop’s own computer and is not asked for the password — the counter’s'
+        + ' keyboard is treated as a key in the till.'
+      : 'Even this Mac is asked for the password, because the shop switched that on below.') + '</p>' +
+    (shopMac
+      ? '<form id="securityForm" class="stack">' +
+        '<label class="field"><span>Days a device stays signed in</span><input name="session_days"' +
+        ' type="number" min="1" max="90" step="1" value="' + guard.session_days + '"></label>' +
+        '<label class="consent wide"><input type="checkbox" name="shop_mac_signin"' +
+        (guard.shop_mac_signin ? ' checked' : '') + '><span>Ask this Mac for the password too' +
+        ' (its own Settings windows then save only after the page has signed in)</span></label>' +
+        '<div class="err" id="securityErr"></div>' +
+        '<button class="btn primary">Save the security</button></form>'
+      : '<p class="hint">How long a device stays signed in, and whether this Mac is asked as well,' +
+        ' are settled on the shop’s own computer.</p>') +
+    '<h4>What the book remembers of being opened</h4>' +
+    (trail ? '<div class="tablewrap"><table><thead><tr><th>When</th><th>What</th><th>From</th>' +
+      '<th>Note</th></tr></thead><tbody>' + trail + '</tbody></table></div>'
+      : '<p class="hint">Nothing has been written yet. Every sign-in, every wrong password, every'
+        + ' copy taken out and every device thrown out goes here from now on.</p>') +
+    '<p class="hint">The last few hundred events only, and never a password, a half-typed one, or a' +
+    ' device’s cookie — only what happened, when, and from which address.</p>' +
+    '</div></div>';
+}
+
+function wireShopForms() {
+  const copies = document.getElementById('copiesForm');
+  if (copies) {
+    copies.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('copiesErr').textContent = '';
+      try {
+        await api('/api/backups', { method: 'PUT', body: JSON.stringify({
+          auto: !!f.auto.checked,
+          every_hours: f.every_hours.value,
+          keep_days: f.keep_days.value,
+          mirror: f.mirror.value.trim(),
+        }) });
+        toast('The book will be copied that way from now on', 'good');
+        await render();
+      } catch (err) { document.getElementById('copiesErr').textContent = err.message; }
+    });
+  }
+  const security = document.getElementById('securityForm');
+  if (security) {
+    security.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('securityErr').textContent = '';
+      try {
+        await api('/api/security', { method: 'PUT', body: JSON.stringify({
+          session_days: f.session_days.value,
+          shop_mac_signin: !!f.shop_mac_signin.checked,
+        }) });
+        toast('Sign-in rules saved', 'good');
+        await render();
+      } catch (err) { document.getElementById('securityErr').textContent = err.message; }
+    });
+  }
 }
 
 function passwordForm(login) {
@@ -2647,6 +2803,22 @@ const ACTIONS = {
   },
   'setup-page'() { window.open('/setup', '_blank'); },
   'shop-devices'() { render().catch(fail); },
+  'shop-security'() { render().catch(fail); },
+  async 'book-copy'() {
+    try {
+      await api('/api/backups', { method: 'POST', body: '{}' });
+      toast('The book was copied and counted against itself', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  async 'sign-out-all-devices'() {
+    try {
+      const answer = await api('/api/devices', { method: 'DELETE' });
+      toast((answer.devices || 0) + ' other device(s) thrown out — they will have to know the' +
+            ' password again', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
   async 'device-revoke'(el) {
     try {
       await api('/api/devices/' + el.dataset.deviceRevoke, { method: 'DELETE' });

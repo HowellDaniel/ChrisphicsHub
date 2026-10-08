@@ -107,15 +107,28 @@ _db = None
 # The shop's own sign-in. Chosen inside the app and kept in the book as a salted hash, so an
 # always-on server needs no secret in a plist and a copied backup gives away nothing.
 AUTH_PASSWORD = os.environ.get("CHRISPHICS_AUTH_PASSWORD", "").strip()
-SESSION_SECONDS = 30 * 24 * 60 * 60
-PBKDF2_ROUNDS = 200_000
+SESSION_SECONDS = 30 * 24 * 60 * 60     # what a device gets until the shop shortens it
+SESSION_DAYS_MIN, SESSION_DAYS_MAX = 1, 90
+# Each stored hash carries the rounds it was made with, so raising this only affects the next
+# password the shop chooses; a book signed in with 200,000 keeps opening at 200,000.
+PBKDF2_ROUNDS = 600_000
 LOGIN_ALLOWED_FAILS = 5
+# Beyond the password screen the book still should not be buryable: one address may lean on it
+# this often in a minute before it is told to wait. A busy counter never gets near it. A dev check
+# lowers it so the waiting path can be proved without three hundred requests.
+API_CALLS_PER_MINUTE = 300
+try:
+    API_CALLS_PER_MINUTE = max(1, int(os.environ.get("CHRISPHICS_CALLS_PER_MINUTE", "300")))
+except ValueError:
+    pass
 _login_tries = {}       # address -> [wrong answers, quiet until]
+_api_minute = {}        # address -> [window opened, calls since]
 LAN_NO_LOGIN = False    # --allow-unauthenticated-lan
 THROUGH_PROXY = False   # --trust-proxy: every visitor arrives as loopback, so loopback proves nothing
 SERVE = {"host": "127.0.0.1", "port": 8712, "tls": False}
 KEEP_AWAKE = False      # true while caffeinate is holding this Mac open for the shop Wi-Fi
 _notification_wakeup = threading.Event()
+_backup_wakeup = threading.Event()
 # Reentrant: route() holds this while the handlers below take it again.
 _lock = threading.RLock()
 
@@ -1606,6 +1619,61 @@ def auth_required():
     return bool(AUTH_PASSWORD or book_password())
 
 
+def shop_mac_locks_itself():
+    """Off unless the shop turns it on: loopback normally means the counter's own Mac and is
+    never asked for the password. Switched on, this Mac signs in like every other device — which
+    is worth doing only while the password is written down somewhere safe nearby."""
+    return bool(auth_required() and state_value("shop_mac_login") == "1")
+
+
+def session_days():
+    """How many days a device may go before it is asked for the password again. Kept in the book
+    so a shop that hands a phone to casual staff can shorten it without touching a plist."""
+    try:
+        days = int(state_value("session_days", "") or SESSION_SECONDS // 86400)
+    except ValueError:
+        return SESSION_SECONDS // 86400
+    return max(SESSION_DAYS_MIN, min(SESSION_DAYS_MAX, days))
+
+
+def session_seconds():
+    return session_days() * 24 * 60 * 60
+
+
+# The words people pick when they are asked for a password and want it over with. Not a
+# security promise — a shop password guards the whole ledger, so these are refused outright.
+WORN_OUT_PASSWORDS = frozenset("""
+password password1 password123 passw0rd p@ssword 123456 1234567 12345678 123456789 1234567890
+qwerty qwerty123 asdfgh zxcvb letmein welcome welcome1 welcome123 admin administrator root
+iloveyou abc123 abcd1234 a1b2c3d1 111111 000000 007007 123123 654321 sunshine princess warrior
+trustno1 dragon monkey football baseball business company shop shop123 chrisphics chrisphicshub
+crispprint crispprint1 accra ghana gabz0000 money money123 cash cash123 print printing
+""".split())
+
+
+def weak_password_reason(password):
+    """Why this word would let a stranger in. The shop's own name and trading name are refused
+    too: they are printed on the job sheet that goes out of the door with every order."""
+    if len(password) < 8:
+        return "A shop password wants at least 8 characters — long beats clever here"
+    low = password.lower()
+    if low in WORN_OUT_PASSWORDS:
+        return "That word is on every list a guesser starts from — choose one the shop owns alone"
+    for filler in (SHOP.get("name", ""), SHOP.get("tagline", "")):
+        if len(filler) > 4 and filler.lower() in low:
+            return "The shop's own name is printed on the job sheets, so it cannot be the password"
+    if len(set(password)) < 5:
+        return "That repeats the same few characters; anyone who watches the counter can type it"
+    if password.isdigit():
+        return "Digits alone get guessed by the thousand — mix in letters"
+    classes = sum(1 for group in (lambda c: c.islower(), lambda c: c.isupper(),
+                                  lambda c: c.isdigit(), lambda c: not c.isalnum())
+                  if any(group(c) for c in password))
+    if len(password) < 12 and classes < 3:
+        return "Under 12 characters has to mix upper, lower and digits or a symbol — or be longer"
+    return ""
+
+
 def password_matches(candidate):
     if not isinstance(candidate, str):
         return False
@@ -1637,6 +1705,99 @@ def note_bad_login(address):
         until = time.time() + min(900, 30 * 2 ** (wrong - LOGIN_ALLOWED_FAILS))
     _login_tries[address] = (wrong, until)
     return max(0, int(round(until - time.time()))) if until > time.time() else 0
+
+
+def throttle_calls(address):
+    """Which numbered call this is from that address inside its current minute. A quiet window is
+    opened again every minute, and addresses that have gone quiet are dropped, so a busy day on the
+    Wi-Fi cannot grow this memory forever."""
+    now = time.time()
+    opened, calls = _api_minute.get(address, (now, 0))
+    if now - opened >= 60:
+        opened, calls = now, 0
+    calls += 1
+    _api_minute[address] = (opened, calls)
+    if len(_api_minute) > 400:
+        for stale in [a for a, (start, _c) in _api_minute.items() if now - start > 300]:
+            _api_minute.pop(stale, None)
+    return calls
+
+
+SECURITY_TRAIL_KEEP = 400
+_last_denied = {}       # address -> when its "turned away" line was last written
+
+
+def note_security(kind, address="", device="", detail=""):
+    """Write one line of the book's own security memory. Nothing that was typed goes in here:
+    no password, no partial password, no cookie — only what happened and from where.
+    A signed-out phone that polls the book every second is one story, not one line a second, so
+    the same address is only written again about being turned away after five minutes."""
+    if kind == "turned_away":
+        now = time.time()
+        if now - _last_denied.get(address or "?", 0.0) < 300:
+            return
+        _last_denied[address or "?"] = now
+    try:
+        with _lock:
+            _db.execute("INSERT INTO security_log (kind, address, device, detail) VALUES (?,?,?,?)",
+                        (text(kind, 32), text(address, 60), text(device, 60), text(detail, 200)))
+            _db.execute("DELETE FROM security_log WHERE id NOT IN"
+                        " (SELECT id FROM security_log ORDER BY id DESC LIMIT ?)",
+                        (SECURITY_TRAIL_KEEP,))
+            _db.commit()
+    except sqlite3.Error:
+        # A shop still being able to open its ledger matters more than the note about it.
+        pass
+
+
+def security_trail(limit=40):
+    rows = q("SELECT id, at, kind, address, device, detail FROM security_log"
+             " ORDER BY id DESC LIMIT ?", (max(1, min(int(limit), SECURITY_TRAIL_KEEP)),))
+    return [dict(r) for r in rows]
+
+
+def security_view(trail_limit=40):
+    """What the counter's Security card answers without any of it being typed anywhere."""
+    return {"required": auth_required(),
+            "from_environment": bool(AUTH_PASSWORD),
+            "chosen": bool(book_password()),
+            "session_days": session_days(),
+            "rounds": PBKDF2_ROUNDS,
+            "shop_mac_signin": shop_mac_locks_itself(),
+            "loopback_open": not shop_mac_locks_itself(),
+            "https": bool(SERVE.get("tls")),
+            "reachable_from_wifi": SERVE["host"] not in ("127.0.0.1", "localhost", "::1"),
+            "allowed_fails": LOGIN_ALLOWED_FAILS,
+            "calls_per_minute": API_CALLS_PER_MINUTE,
+            "devices": len(signed_in_devices()),
+            "trail": security_trail(trail_limit)}
+
+
+def set_security_settings(patch, where=""):
+    """Only the shop's own Mac moves these, and only inside the bounds the book will honour."""
+    if not isinstance(patch, dict):
+        raise ValueError("Nothing to change was sent")
+    changed = []
+    if patch.get("session_days") not in (None, ""):
+        try:
+            days = int(patch["session_days"])
+        except (TypeError, ValueError):
+            raise ValueError("Days signed in has to be a whole number")
+        if not SESSION_DAYS_MIN <= days <= SESSION_DAYS_MAX:
+            raise ValueError("A device can stay signed in for %d to %d days"
+                             % (SESSION_DAYS_MIN, SESSION_DAYS_MAX))
+        set_state("session_days", days)
+        changed.append("session_days")
+    if patch.get("shop_mac_signin") is not None:
+        want = bool(patch["shop_mac_signin"])
+        if want and not book_password():
+            raise ValueError("This Mac only gets asked for a password once the shop has chosen"
+                             " one — choose it first, then switch this on")
+        set_state("shop_mac_login", "1" if want else "0")
+        changed.append("shop_mac_signin")
+        note_security("shop_mac_signin", where, detail="the shop's own Mac must now sign in" if want
+                      else "the shop's own Mac is let through on its own")
+    return security_view()
 
 
 def token_digest(token):
@@ -1675,27 +1836,35 @@ def open_session(user_agent):
         _db.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
         _db.execute("INSERT INTO sessions (token_hash, device, expires_at) VALUES (?, ?, ?)",
                     (token_digest(token), device_name(user_agent)[:60],
-                     time.time() + SESSION_SECONDS))
+                     time.time() + session_seconds()))
         _db.commit()
     return token
 
 
 def touch_session(token):
-    """A device that keeps being used never has to sign in again; one idle for a month does."""
+    """A device that keeps being used never has to sign in again; one idle past the shop's chosen
+    number of days does."""
     if not token:
         return False
+    seconds = session_seconds()
     with _lock:
         row = one("SELECT id, expires_at FROM sessions WHERE token_hash = ?", (token_digest(token),))
         if not row:
             return False
         now = time.time()
-        if row["expires_at"] <= now:
+        remaining = row["expires_at"] - now
+        if remaining <= 0:
             _db.execute("DELETE FROM sessions WHERE id = ?", (row["id"],))
             _db.commit()
             return False
-        if row["expires_at"] - now < SESSION_SECONDS - 24 * 3600:
+        if remaining > seconds:
+            # The shop asked for a shorter life than this session was originally given, so the
+            # next time it is picked up it is pulled inside the new limit.
             _db.execute("UPDATE sessions SET expires_at = ?, last_seen = datetime('now','localtime')"
-                        " WHERE id = ?", (now + SESSION_SECONDS, row["id"]))
+                        " WHERE id = ?", (now + seconds, row["id"]))
+        elif remaining < seconds - 24 * 3600:
+            _db.execute("UPDATE sessions SET expires_at = ?, last_seen = datetime('now','localtime')"
+                        " WHERE id = ?", (now + seconds, row["id"]))
         else:
             _db.execute("UPDATE sessions SET last_seen = datetime('now','localtime') WHERE id = ?",
                         (row["id"],))
@@ -1714,6 +1883,18 @@ def signed_in_devices():
                                " WHERE expires_at > ? ORDER BY last_seen DESC", (time.time(),))]
 
 
+def sign_out_every_device(keep_token=""):
+    """The one button for a phone that is missing: nobody stays inside the book, and the Mac the
+    password was just changed from can keep its own window open."""
+    with _lock:
+        if keep_token:
+            _db.execute("DELETE FROM sessions WHERE token_hash <> ?", (token_digest(keep_token),))
+        else:
+            _db.execute("DELETE FROM sessions")
+        _db.commit()
+    return {"devices": len(signed_in_devices()), "signed_out": True}
+
+
 def revoke_device(device_id):
     """Throw one device out of the book. Its cookie stays on the phone but no longer opens
     anything, so the next time it is picked up it is asked for the password."""
@@ -1729,10 +1910,11 @@ def set_shop_password(password, current):
     """Replacing a password means knowing the one before it, and every device signs out when it
     changes — a password lost with a stolen phone has to stay lost."""
     password = "" if not isinstance(password, str) else password
-    if len(password) < 8:
-        raise ValueError("A shop password wants at least 8 characters — long beats clever here")
     if len(password) > 200:
         raise ValueError("That password is too long to keep")
+    reason = weak_password_reason(password)
+    if reason:
+        raise ValueError(reason)
     if AUTH_PASSWORD:
         raise ValueError("Sign-in is being set by CHRISPHICS_AUTH_PASSWORD in this server's"
                          " environment. Take it out of the service settings to choose a"
@@ -1755,6 +1937,9 @@ def clear_shop_password(current):
     if not password_matches(current):
         raise ValueError("That is not the password the shop uses now")
     set_state("shop_password", "")
+    # Without a word there is nothing for this Mac to be asked for, so the demand is dropped
+    # rather than left switched on to bite the next password the shop chooses.
+    set_state("shop_mac_login", "0")
     return {"password_set": False}
 
 
@@ -1769,10 +1954,32 @@ QR_HELPER = os.path.join(SUPPORT, "qr-encode")
 
 def private_address(host):
     try:
-        address = ipaddress.ip_address(host)
+        address = ip_address_of(host)
     except ValueError:
         return False
     return address.is_private or address.is_loopback
+
+
+def ip_address_of(host):
+    """An IP address out of a Host header, port taken off when there is one. A bare IPv6 address
+    keeps its colons, so it is only split when exactly one colon separates it from a port."""
+    value = (host or "").strip()
+    if value.startswith("["):                      # [::1]:8834 — the address is inside the brackets
+        value = value[1:].partition("]")[0]
+    elif value.count(":") == 1:                    # 192.168.100.29:8834
+        value = value.split(":")[0]
+    return ipaddress.ip_address(value)
+
+
+def host_is_address(host):
+    """True when a visitor typed an IP rather than a name. A browser honours Strict-Transport-
+    Security only for a name, so the shop's Wi-Fi address is told in words instead of being given
+    a header that would do nothing at all."""
+    try:
+        ip_address_of(host)
+    except ValueError:
+        return False
+    return True
 
 
 def ca_fingerprint():
@@ -3433,13 +3640,36 @@ def seed():
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "ChrisphicsHub/1.0"
+    # The Python version this Mac happens to run is not information the shop needs to hand out on
+    # every response; a stranger can only use it to look for a known fault in that version.
+    sys_version = ""
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s  %s\n" % (dt.datetime.now().strftime("%H:%M:%S"), fmt % args))
 
     # helpers
+    def drain_body(self):
+        """A browser keeps one connection and sends the next request down it, so a body nobody
+        read would be taken for the next request line — which is how a refused POST used to come
+        back as 501 Unsupported method ('{}GET')."""
+        if getattr(self, "_body_taken", False):
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if not length:
+            return
+        if length > 8 * 1024 * 1024:
+            self.close_connection = True   # too much to throw away on a reused connection
+            return
+        try:
+            self.rfile.read(length)
+        except OSError:
+            self.close_connection = True
+
     def send(self, code, body, ctype="application/json; charset=utf-8", extra=None):
+        if self.command not in ("GET", "HEAD"):
+            self.drain_body()
+            self._body_taken = True
         if isinstance(body, (dict, list)):
             body = json.dumps(body, default=str)
         data = body.encode("utf-8") if isinstance(body, str) else body
@@ -3455,6 +3685,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy",
                          "base-uri 'none'; object-src 'none'; frame-ancestors 'self';"
                          " form-action 'self'")
+        if getattr(self.server, "is_tls", False) and not host_is_address(self.headers.get("Host", "")):
+            # A browser that came here over HTTPS should not be able to be pushed back to plain
+            # HTTP afterwards. Browsers ignore this for a bare IP address, so the Wi-Fi Mac where
+            # the shop's own number is an address is left out rather than given a header that
+            # silently does nothing; a hosted name gets it for six months.
+            self.send_header("Strict-Transport-Security", "max-age=15552000")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -3476,8 +3712,10 @@ class Handler(BaseHTTPRequestHandler):
     def body(self):
         length = int(self.headers.get("Content-Length") or 0)
         if not length:
+            self._body_taken = True
             return {}
         raw = self.rfile.read(length)
+        self._body_taken = True
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except ValueError:
@@ -3491,14 +3729,20 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True   # the rest of the body is never read
             raise ValueError("That file is bigger than this book will ever need")
         if not length:
+            self._body_taken = True
             return b""
-        return self.rfile.read(length)
+        raw = self.rfile.read(length)
+        self._body_taken = True
+        return raw
 
     def csv_response(self, csv_text, filename):
         self.send(200, csv_text.encode("utf-8-sig"), "text/csv; charset=utf-8",
                   {"Content-Disposition": 'attachment; filename="%s"' % filename})
 
     def handle_one_request(self):
+        # One handler serves every request that arrives down a kept-open connection, so the note
+        # about whose body has been read starts again with each one.
+        self._body_taken = False
         try:
             BaseHTTPRequestHandler.handle_one_request(self)
         except (BrokenPipeError, ConnectionResetError):
@@ -3525,6 +3769,25 @@ class Handler(BaseHTTPRequestHandler):
         path = unquote(url.path)
         params = parse_qs(url.query)
         self.response_headers = {}
+        # A page on somebody else's website must not be able to make this book do things with the
+        # shop's saved sign-in. Browsers send Origin on every request that changes data, so a
+        # missing header is ordinary (curl, the app's own window) and only a wrong one is refused.
+        origin = self.headers.get("Origin", "")
+        if (origin and method not in ("GET", "HEAD") and path.startswith("/api/")
+                and urlparse(origin).netloc.lower() != (self.headers.get("Host") or "").lower()):
+            note_security("cross_origin", self.client_ip(),
+                          self.headers.get("User-Agent", ""), "%s %s from %s" % (method, path, origin))
+            return self.send(403, {"error": "That request did not come from the shop's own page"})
+        # Beyond the password screen the book is still one file on one Mac, and a script that hammers
+        # it would stop the counter's own screen from opening a job.
+        calls = throttle_calls(self.client_ip())
+        if calls > API_CALLS_PER_MINUTE:
+            if calls == API_CALLS_PER_MINUTE + 1:
+                note_security("throttled", self.client_ip(), self.headers.get("User-Agent", ""),
+                              "more than %d calls in a minute" % API_CALLS_PER_MINUTE)
+            return self.send(429, {"error": "Too many requests from here in one minute."
+                                            " Wait a few seconds."},
+                             extra={"Retry-After": "5"})
         try:
             with _lock:
                 operation_id = text(self.headers.get("X-Operation-Id"), 120)
@@ -3532,6 +3795,8 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/session", "/api/login", "/api/logout",
                 }
                 if protected and not self.authenticated():
+                    note_security("turned_away", self.client_ip(), self.headers.get("User-Agent", ""),
+                                  "asked for %s with no sign-in" % path[:120])
                     return self.send(401, {"error": "Sign in is required to access the shop book"})
                 if method != "GET" and path.startswith("/api/") and path not in {
                         "/api/login", "/api/logout"} and operation_id:
@@ -3611,7 +3876,9 @@ class Handler(BaseHTTPRequestHandler):
         return ip.startswith("127.") or ip == "::1"
 
     def authenticated(self):
-        if not auth_required() or LAN_NO_LOGIN or self.is_shop_computer():
+        if not auth_required() or LAN_NO_LOGIN:
+            return True
+        if self.is_shop_computer() and not shop_mac_locks_itself():
             return True
         return touch_session(self.session_token())
 
@@ -3646,25 +3913,33 @@ class Handler(BaseHTTPRequestHandler):
             wait = quiet_seconds(self.client_ip())
             if wait:
                 self.response_headers["Retry-After"] = str(wait)
+                note_security("locked_out", self.client_ip(), self.headers.get("User-Agent", ""),
+                              "%d seconds still to wait" % wait)
                 return 429, {"error": "Too many wrong passwords from here. Wait %d seconds." % wait}
             if not password_matches(self.body().get("password", "")):
                 wait = note_bad_login(self.client_ip())
+                wrong = _login_tries.get(self.client_ip(), (0, 0))[0]
+                note_security("wrong_password" if not wait else "locked_out", self.client_ip(),
+                              self.headers.get("User-Agent", ""),
+                              "%d wrong from here" % wrong)
                 if wait:
                     self.response_headers["Retry-After"] = str(wait)
                     return 429, {"error": "Password is incorrect. Wait %d seconds before"
                                           " trying again." % wait}
                 return 401, {"error": "Password is incorrect"}
             _login_tries.pop(self.client_ip(), None)
-            self.cookie(open_session(self.headers.get("User-Agent", "")), SESSION_SECONDS)
+            seconds = session_seconds()
+            self.cookie(open_session(self.headers.get("User-Agent", "")), seconds)
+            note_security("signed_in", self.client_ip(), self.headers.get("User-Agent", ""),
+                          "signed in for %d day%s" % (session_days(), "" if session_days() == 1 else "s"))
             return 200, {"authenticated": True}
         if path == "/api/logout" and method == "POST":
             token = self.session_token()
             if token:
                 close_session(token)
+                note_security("signed_out", self.client_ip(), self.headers.get("User-Agent", ""))
             self.cookie("", 0)
             return 200, {"authenticated": False}
-        if seg and seg[0] == "api" and not self.authenticated():
-            return 401, {"error": "Sign in is required to access the shop book"}
 
         return self.dispatch_api(method, path, params, seg)
 
@@ -3759,19 +4034,80 @@ class Handler(BaseHTTPRequestHandler):
                     return 403, {"error": "The first shop password has to be chosen on the shop's"
                                           " own computer, not over the Wi-Fi"}
                 body = self.body()
-                return 200, set_shop_password(body.get("password"), body.get("current"))
+                try:
+                    answer = set_shop_password(body.get("password"), body.get("current"))
+                except ValueError as err:
+                    if "not the password the shop uses now" in str(err):
+                        note_security("wrong_current", self.client_ip(),
+                                      self.headers.get("User-Agent", ""),
+                                      "tried to change the password without the one before it")
+                    raise
+                note_security("password_set", self.client_ip(), self.headers.get("User-Agent", ""),
+                              "every device was signed out")
+                return 200, answer
             if method == "DELETE":
                 if not self.is_shop_computer():
                     return 403, {"error": "Sign-in is switched off on the shop's own computer,"
                                           " so that this device cannot leave the book open"}
-                return 200, clear_shop_password(self.body().get("current"))
+                try:
+                    answer = clear_shop_password(self.body().get("current"))
+                except ValueError as err:
+                    if "not the password the shop uses now" in str(err):
+                        note_security("wrong_current", self.client_ip(),
+                                      self.headers.get("User-Agent", ""),
+                                      "tried to switch sign-in off without the password")
+                    raise
+                note_security("sign_in_off", self.client_ip(), self.headers.get("User-Agent", ""),
+                              "the book is open to anything that can reach this address")
+                return 200, answer
             return 405, {"error": "Use POST to set the shop password, DELETE to switch it off"}
         if head == "devices":
             if method == "GET":
-                return 200, {"devices": signed_in_devices()}
+                return 200, {"devices": signed_in_devices(), "session_days": session_days()}
             if method == "DELETE" and len(rest) == 2:
-                return 200, revoke_device(path_id(rest[1]))
-            return 405, {"error": "Use DELETE /api/devices/<number> to sign one device out"}
+                answer = revoke_device(path_id(rest[1]))
+                note_security("device_revoked", self.client_ip(),
+                              self.headers.get("User-Agent", ""),
+                              "device %s signed out, %d left" % (answer["revoked"], answer["devices"]))
+                return 200, answer
+            if method == "DELETE" and len(rest) == 1:
+                # The one button for a phone that is missing: nobody stays inside the book. This
+                # device keeps its own window, otherwise the shop would lock itself out mid-call.
+                answer = sign_out_every_device(self.session_token())
+                note_security("signed_out_all", self.client_ip(),
+                              self.headers.get("User-Agent", ""),
+                              "%d other device(s) thrown out" % answer["devices"])
+                return 200, answer
+            return 405, {"error": "Use DELETE /api/devices/<number> to sign one device out,"
+                                  " or /api/devices to sign every other one out"}
+        if head == "backups":
+            if method == "GET":
+                return 200, backup_report()
+            if method == "PUT":
+                if not self.is_shop_computer():
+                    return 403, {"error": "How often the book is copied, and to where, is settled"
+                                          " on the shop's own computer"}
+                return 200, set_backup_settings(self.body(), self.client_ip())
+            if method == "POST":
+                # A copy asked for right now, checked and tidied the same way the automatic ones
+                # are. Nothing is handed back to download here — that is /api/backup.
+                path, counts, tidy = run_backup("manual")
+                note_security("book_copied", self.client_ip(), self.headers.get("User-Agent", ""),
+                              "%s asked for a copy, checked against %d jobs"
+                              % ("the shop's Mac" if self.is_shop_computer() else "a device",
+                                 counts["jobs"]))
+                return 200, backup_report()
+            return 405, {"error": "Use GET for the copies, PUT to settle how often they happen,"
+                                  " POST to make one now"}
+        if head == "security":
+            if method == "GET":
+                return 200, security_view()
+            if method == "PUT":
+                if not self.is_shop_computer():
+                    return 403, {"error": "How long a device stays signed in, and whether this Mac"
+                                          " is asked too, is settled on the shop's own computer"}
+                return 200, set_security_settings(self.body(), self.client_ip())
+            return 405, {"error": "Use GET to read the security, PUT to change it"}
         if head == "clients":
             if len(rest) >= 2:
                 cid = path_id(rest[1])
@@ -3956,6 +4292,10 @@ class Handler(BaseHTTPRequestHandler):
             return 200, ("csv", rows, filename)
         if method == "GET" and head == "backup":
             tmp = write_backup("manual")
+            # Whole ledgers leave through this door, on purpose. Which device took one, and from
+            # where, is the kind of thing the shop is entitled to look up afterwards.
+            note_security("book_taken", self.client_ip(), self.headers.get("User-Agent", ""),
+                          "a copy of every record was downloaded")
             return 200, ("file", tmp, os.path.basename(tmp), "application/x-sqlite3")
         if head == "import-book":
             if method != "POST":
@@ -4009,10 +4349,16 @@ def write_backup(kind="backup"):
 
 
 # A copy that was never opened again is only a copy of a guess, and a folder of copies nobody
-# prunes ends full. So the nightly run checks its own work, then tidies behind itself.
+# prunes ends full. So every run checks its own work and tidies behind itself, and the server that
+# is running makes the copies itself instead of trusting one calendar moment: a Mac that was asleep
+# at 22:30 still has two copies of its ledger by the next morning.
 BACKUP_KEEP_DAYS = 14
 BACKUP_KEEP_MONTHS = 12
 BACKUP_KEEP_MANUAL = 12
+BACKUP_KEEP_PER_DAY = 12
+BACKUP_HOURS_DEFAULT = 24
+BACKUP_HOURS_MIN, BACKUP_HOURS_MAX = 1, 168
+BACKUP_DAYS_MIN, BACKUP_DAYS_MAX = 3, 120
 STAMPED_BACKUP = re.compile(r"^(backup|manual)-(\d{8})-(\d{6})\.db$")
 
 
@@ -4024,6 +4370,35 @@ def backup_time(name):
         return dt.datetime.strptime(match.group(2) + match.group(3), "%Y%m%d%H%M%S")
     except ValueError:
         return None
+
+
+def _state_number(key, default):
+    try:
+        return int(state_value(key, "") or default)
+    except ValueError:
+        return int(default)
+
+
+def backup_auto():
+    """Off only when the shop switches it off; a book with no copies is one failed disk away
+    from being nothing."""
+    return state_value("backup_auto", "1") != "0"
+
+
+def backup_hours():
+    return max(BACKUP_HOURS_MIN, min(BACKUP_HOURS_MAX, _state_number("backup_every_hours",
+                                                                      BACKUP_HOURS_DEFAULT)))
+
+
+def backup_kept_days():
+    return max(BACKUP_DAYS_MIN, min(BACKUP_DAYS_MAX, _state_number("backup_keep_days",
+                                                                   BACKUP_KEEP_DAYS)))
+
+
+def backup_mirror():
+    """The shop's chosen second destination — an external disk or a folder its own sync tool
+    watches. Empty means the book is kept in one place only, and says so."""
+    return state_value("backup_mirror")
 
 
 def check_backup(path):
@@ -4047,24 +4422,30 @@ def check_backup(path):
         check.close()
 
 
-def tend_backup_folder(now=None):
-    """Keep one night's copies for two weeks, one copy for each month before that for a year, and
-    the last dozen copies the shop asked for by hand. Anything else goes."""
+def tend_backup_folder(now=None, folder=None, keep_days=None):
+    """Keep one night's copies for as long as the shop asked, one copy for each month before that
+    for a year, the last dozen copies asked for by hand, and no more than a dozen from the same
+    day — otherwise a short cadence fills the disk with near-identical files."""
     now = now or dt.datetime.now()
+    folder = folder or BACKUP_DIR
+    keep_days = backup_kept_days() if keep_days is None else keep_days
     try:
-        names = [n for n in os.listdir(BACKUP_DIR) if STAMPED_BACKUP.match(n)]
+        names = [n for n in os.listdir(folder) if STAMPED_BACKUP.match(n)]
     except OSError:
         return {"kept": 0, "gone": 0}
     stamped = sorted(((n, backup_time(n)) for n in names), key=lambda pair: pair[1], reverse=True)
-    keep, months, manual = set(), {}, 0
+    keep, months, manual, per_day = set(), {}, 0, {}
     for name, when in stamped:
-        age = (now - when).days
         if name.startswith("manual"):
             manual += 1
             if manual <= BACKUP_KEEP_MANUAL:
                 keep.add(name)
             continue
-        if age <= BACKUP_KEEP_DAYS:
+        day = when.strftime("%Y-%m-%d")
+        per_day[day] = per_day.get(day, 0) + 1
+        if per_day[day] > BACKUP_KEEP_PER_DAY:
+            continue
+        if (now - when).days <= keep_days:
             keep.add(name)
             continue
         key = when.strftime("%Y-%m")
@@ -4076,28 +4457,130 @@ def tend_backup_folder(now=None):
         if name in keep:
             continue
         try:
-            os.remove(os.path.join(BACKUP_DIR, name))
+            os.remove(os.path.join(folder, name))
             gone += 1
         except OSError:
             pass
     return {"kept": len(keep), "gone": gone}
 
 
-def run_backup():
-    """One nightly run, end to end, with the result written into the book so the screens can say
-    when the records were last copied."""
-    path = write_backup()
+def mirror_copy(source):
+    """Best-effort second home for the newest copy. Returns None when the shop has chosen no
+    second folder, (False, why) when it could not be written, (True, where) when it was. A mirror
+    that is unplugged must never look like a night the book was not copied."""
+    target = backup_mirror()
+    if not target:
+        return None
+    if not os.path.isdir(target):
+        return False, "the second folder is not there — is that disk plugged in?"
+    dest = os.path.join(target, os.path.basename(source))
+    try:
+        with open(source, "rb") as fh:
+            data = fh.read()
+        with open(dest, "wb") as fh:
+            fh.write(data)
+    except OSError as err:
+        return False, "could not be written there (%s)" % type(err).__name__
+    tend_backup_folder(folder=target)
+    return True, dest
+
+
+def short_path(path):
+    return (path or "").replace(os.path.expanduser("~"), "~")
+
+
+def run_backup(kind="backup"):
+    """One run, end to end, with the result written into the book so any screen can say when the
+    records were last copied, what the copy was checked against, and where it went."""
+    path = write_backup(kind)
     counts = check_backup(path)
     tidy = tend_backup_folder()
+    mirrored = mirror_copy(path)
+    note = "checked, %d jobs · kept %d, cleared %d" % (counts["jobs"], tidy["kept"], tidy["gone"])
+    if mirrored is not None:
+        note += " · mirror " + ("done" if mirrored[0] else "missing: %s" % mirrored[1])
     set_state("last_backup_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     set_state("last_backup_file", os.path.basename(path))
-    set_state("last_backup_note", "checked, %d jobs · kept %d, cleared %d"
-              % (counts["jobs"], tidy["kept"], tidy["gone"]))
+    set_state("last_backup_note", note)
+    set_state("last_backup_error", "")
+    set_state("last_backup_kind", kind)
     return path, counts, tidy
 
 
+def backup_due():
+    """(is a copy overdue, hours until the next one). A book that has never been copied is overdue
+    the moment the server starts."""
+    hours = backup_hours()
+    at = state_value("last_backup_at")
+    if not at:
+        return True, 0.0
+    try:
+        age = (dt.datetime.now() - dt.datetime.strptime(at, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+    except ValueError:
+        return True, 0.0
+    return age >= hours, max(0.0, hours - age)
+
+
+def watch_backups(check=None):
+    """The server keeps the book copied on its own clock while it runs, so the nightly calendar
+    moment is a second way a copy happens rather than the only one. The clock is looked at every
+    five minutes; a test or a small hosted box may want it looked at more often."""
+    if check is None:
+        try:
+            check = max(5, int(os.environ.get("CHRISPHICS_BACKUP_CHECK", "300")))
+        except ValueError:
+            check = 300
+
+    def loop():
+        while True:
+            _backup_wakeup.wait(check)
+            _backup_wakeup.clear()      # a new schedule is looked at the moment it is settled
+            if not backup_auto():
+                continue
+            try:
+                if backup_due()[0]:
+                    run_backup()
+            except Exception as error:  # The shop must keep trading even if copying cannot.
+                sys.stderr.write("Automatic copy of the book failed: %s: %s\n"
+                                 % (type(error).__name__, error))
+                set_state("last_backup_error", "%s: %s" % (type(error).__name__, str(error)[:180]))
+                set_state("last_backup_error_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                note_security("backup_failed", detail=str(error)[:200])
+    threading.Thread(target=loop, daemon=True, name="book-backup").start()
+
+
+def recent_backups(limit=6, folder=None):
+    folder = folder or BACKUP_DIR
+    try:
+        names = [n for n in os.listdir(folder) if STAMPED_BACKUP.match(n)]
+    except OSError:
+        return []
+    rows = []
+    # The name only carries whole seconds. A copy the shop asked for and one the clock made can land
+    # inside the same second, so the moment the file was actually written settles which is newest.
+    stamped = []
+    for name in names:
+        when = backup_time(name)
+        if when is None:
+            continue
+        try:
+            touched = os.path.getmtime(os.path.join(folder, name))
+        except OSError:
+            touched = 0.0
+        stamped.append((when, touched, name))
+    for when, _touched, name in sorted(stamped, key=lambda row: (row[0], row[1]),
+                                       reverse=True)[:limit]:
+        try:
+            size = os.path.getsize(os.path.join(folder, name))
+        except OSError:
+            size = 0
+        rows.append({"name": name, "kind": name.split("-")[0],
+                     "at": when.strftime("%Y-%m-%d %H:%M:%S"), "bytes": size})
+    return rows
+
+
 def backup_report():
-    """What the shop screen says about the book's copies."""
+    """What the shop screen and the Settings window say about the book's copies."""
     at = state_value("last_backup_at")
     age = None
     if at:
@@ -4109,10 +4592,89 @@ def backup_report():
         copies = len([n for n in os.listdir(BACKUP_DIR) if n.endswith(".db")])
     except OSError:
         copies = 0
+    auto = backup_auto()
+    overdue, next_in = backup_due()
+    mirror = backup_mirror()
+    try:
+        free = os.statvfs(BACKUP_DIR)
+    except OSError:
+        # Before the first copy the folder does not exist yet; the drive it will be made on is
+        # the same drive, so the shop still gets a real number rather than a blank.
+        free = os.statvfs(os.path.dirname(BACKUP_DIR) or ".")
+    free_gb = round(free.f_bavail * free.f_frsize / 1024 ** 3, 1)
     return {"at": at, "file": state_value("last_backup_file"), "note": state_value("last_backup_note"),
             "age_hours": round(age, 1) if age is not None else None,
-            "stale": age is None or age > 26, "copies": copies,
-            "folder": BACKUP_DIR.replace(os.path.expanduser("~"), "~")}
+            "stale": age is None or age > max(26, backup_hours() + 2), "copies": copies,
+            "folder": short_path(BACKUP_DIR),
+            "auto": auto, "every_hours": backup_hours(), "keep_days": backup_kept_days(),
+            "due": bool(overdue and auto), "next_in_hours": round(next_in, 1) if auto else None,
+            "mirror": short_path(mirror), "mirror_set": bool(mirror),
+            "mirror_dir": bool(mirror) and os.path.isdir(mirror),
+            "error": state_value("last_backup_error"),
+            "error_at": state_value("last_backup_error_at"),
+            "free_gb": free_gb, "recent": recent_backups()}
+
+
+def set_backup_settings(patch, where=""):
+    """The shop's own Mac decides how often the book is copied, how long the copies are kept and
+    whether a second one goes somewhere else. Only the schedule and the folders are reachable."""
+    if not isinstance(patch, dict):
+        raise ValueError("Nothing to change was sent")
+    changed = []
+    if patch.get("auto") is not None:
+        want = bool(patch["auto"])
+        set_state("backup_auto", "1" if want else "0")
+        changed.append("auto")
+    if patch.get("every_hours") not in (None, ""):
+        try:
+            hours = int(patch["every_hours"])
+        except (TypeError, ValueError):
+            raise ValueError("How often has to be a whole number of hours")
+        if not BACKUP_HOURS_MIN <= hours <= BACKUP_HOURS_MAX:
+            raise ValueError("The book can be copied every %d to %d hours"
+                             % (BACKUP_HOURS_MIN, BACKUP_HOURS_MAX))
+        set_state("backup_every_hours", hours)
+        changed.append("every_hours")
+    if patch.get("keep_days") not in (None, ""):
+        try:
+            days = int(patch["keep_days"])
+        except (TypeError, ValueError):
+            raise ValueError("How many nights has to be a whole number")
+        if not BACKUP_DAYS_MIN <= days <= BACKUP_DAYS_MAX:
+            raise ValueError("Copies can be kept for %d to %d nights"
+                             % (BACKUP_DAYS_MIN, BACKUP_DAYS_MAX))
+        set_state("backup_keep_days", days)
+        changed.append("keep_days")
+    if "mirror" in patch:
+        raw = text(patch.get("mirror"), 300).strip()
+        if raw:
+            target = os.path.abspath(os.path.expanduser(raw))
+            if target == os.path.abspath(BACKUP_DIR) or \
+                    os.path.realpath(target) == os.path.realpath(BACKUP_DIR):
+                raise ValueError("That is the folder the copies already go to; choose a second,"
+                                 " different place")
+            if not os.path.isdir(target):
+                raise ValueError("That second folder is not there yet — make it, or plug in the"
+                                 " disk, then save again")
+            set_state("backup_mirror", target)
+        else:
+            set_state("backup_mirror", "")
+        changed.append("mirror")
+    note_security("backup_settings", where,
+                  detail="changed: " + ", ".join(changed) if changed else "nothing changed")
+    if changed:
+        # The watcher is asleep until the cadence it last read comes round. A shop that just said
+        # "every hour" should not wait out an old night-long gap before the first copy lands.
+        _backup_wakeup.set()
+    answer = backup_report()
+    answer["saved"] = changed
+    if changed:
+        # The watcher is asleep until the cadence it last read comes round. A shop that just said
+        # "every hour" should not wait out an old night-long gap before the first copy lands. The
+        # answer above is built first, so the shop is told the schedule it settled, not a copy that
+        # landed a moment later.
+        _backup_wakeup.set()
+    return answer
 
 
 # ------------------------------------------------------------------ carrying the book over
@@ -4244,6 +4806,7 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
     watch_parent()
     watch_messages()
     watch_notifications()
+    watch_backups()
     httpd = ShopHTTPServer((host, port), Handler)
     if tls_cert:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

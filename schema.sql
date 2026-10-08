@@ -205,6 +205,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at  REAL NOT NULL
 );
 
+-- The book's own memory of being opened: who got in, who was turned away, when the password
+-- changed, when a copy of the records left this Mac. Only the kind of event, the address it
+-- came from and a short note — never a password, never a partial one, never a cookie.
+CREATE TABLE IF NOT EXISTS security_log (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  at        TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  kind      TEXT NOT NULL,
+  address   TEXT NOT NULL DEFAULT '',
+  device    TEXT NOT NULL DEFAULT '',
+  detail    TEXT NOT NULL DEFAULT ''
+);
+
 -- A job's money. `total` prefers the item lines and only falls back to the header
 -- quantity x price when the job has no lines, so old jobs are untouched.
 -- cost = what the lines cost the shop + any expense booked against the job.
@@ -302,3 +314,4 @@ CREATE INDEX IF NOT EXISTS idx_signals_row   ON money_signals(source, source_row
 CREATE UNIQUE INDEX IF NOT EXISTS ux_notify_slot ON notifications(job_id, event, channel);
 CREATE INDEX IF NOT EXISTS idx_notify_job    ON notifications(job_id);
 CREATE INDEX IF NOT EXISTS idx_notify_state  ON notifications(state);
+CREATE INDEX IF NOT EXISTS idx_security_recent ON security_log(id DESC);

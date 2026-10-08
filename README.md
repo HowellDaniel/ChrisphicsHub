@@ -113,6 +113,8 @@ and typing `yes`.
 What it installs is two ordinary launch agents in `~/Library/LaunchAgents/`: the book served
 by `/usr/bin/python3 server.py --host 0.0.0.0 --port 8834 --tls-cert … --tls-key …`, restarted
 by `launchd` whenever it exits badly, and `tools/nightly-backup.sh` at 22:30 each night.
+The server itself keeps a copying clock too, so a book that is overdue gets copied while the
+shop is trading rather than waiting for 22:30 — see [Your data](#your-data).
 Neither file holds a secret: the password lives in the book as a hash, the private key stays
 in `~/Library/Application Support/CRISPprint TLS/shop-key.pem` at mode 600, and the logs land
 beside the book as `shop-server.log` and `shop-server.error.log`.
@@ -127,22 +129,59 @@ Reserving the Mac's address in the router avoids the question altogether.
 ### One shop password
 
 A phone left on the counter should not be the whole ledger, so every device other than this
-Mac signs in. **Shop & devices ▸ Choose the shop password** on the shop computer sets it; the
-book stores only a PBKDF2-SHA256 hash (200,000 rounds, salted per password), never the word
-itself, so a copied `.db` gives nothing away.
+Mac signs in. **Shop & devices ▸ The shop password** on the shop computer sets it; the
+book stores only a PBKDF2-SHA256 hash (600,000 rounds, salted per password), never the word
+itself, so a copied `.db` gives nothing away. A password chosen while the number was 200,000
+keeps opening at 200,000 — the rounds travel in the record — and new ones are made at 600,000.
 
-- The shop's own Mac is the machine the records sit on, so it is never asked to sign in.
+- The shop's own Mac is the machine the records sit on, so it is never asked to sign in —
+  unless you tick **Ask this Mac for the password too** on **Security of this book**, which is
+  what you want on a Mac the counter staff also use. It can only be ticked once a password
+  exists, and switching it off again needs the password itself.
+- Choosing the word is checked before it is kept: at least 8 characters, not one of the words a
+  guesser starts from, not digits alone, and under 12 characters it has to mix upper case, lower
+  case and a digit or symbol. It also refuses the shop's own trading name and a word that just
+  repeats the same few characters, because the people at the counter can read both off a job
+  sheet. Longer still beats clever: a whole phrase passes easily.
 - Each device gets its own session token, stored only as a hash, and stays signed in for
-  thirty days of ordinary use. Signing one out takes effect the moment it next asks for
-  something, and changing the password signs every device out at once.
-- Five wrong tries from one address and it is held out for a while, doubling each time up to
-  fifteen minutes, answered with `429` and a `Retry-After`. This Mac and devices already
+  thirty days by default — **Days a device stays signed in** sets 1 to 90 days. Signing one
+  out takes effect the moment it next asks for something, and changing the password signs every
+  device out at once, including the one that asked.
+- **Signed in on these devices** lists what is holding the book open — a device, a browser, and
+  when it last asked for something — with **Sign out** on each row and **Throw out every other
+  one** for the lot. Names are kinds, not people; nothing typed is kept.
+- Five wrong tries from one address and it is held out for a while, doubling each time (30
+  seconds, then 60, 120 …) up to fifteen minutes, answered with `429` and a `Retry-After`. The
+  right password is not even looked at while a wait is running. This Mac and devices already
   signed in are never locked out.
+- On top of that, one address may make at most 300 API calls in a minute (`429` and
+  `Retry-After: 5` past it), so a script cannot lean on the book. `CHRISPHICS_CALLS_PER_MINUTE`
+  sets a different ceiling — the Render box uses a lower one, and `tools/check-backups-security.py`
+  runs at 20 so the wait can be proved without three hundred requests.
+- Every request that asks for the book without a sign-in, every wrong password, every lockout,
+  a sign-in, a device thrown out, a password changed, a schedule settled, a cross-origin request,
+  a throttled burst and each copy taken — with the address it came from — is written into the
+  book's own `security_log`, which keeps the last 400 lines; **Security of this book** shows the
+  twelve most recent of them. No password,
+  no partial password and no cookie ever goes into that trail. Repeated turn-aways from one
+  address are noted once every five minutes rather than every second.
+- The settings that change how the book is guarded and copied — the sign-in length, whether this
+  Mac is asked, the copy cadence and the second folder, and the password itself — are settled on
+  the shop's own Mac or by a signed-in device changing only the password; a phone is told so in
+  words rather than being silently ignored. `GET /api/security` and `GET /api/backups` are readable
+  from a signed-in device, so it can show the rules it is signing in under.
+- A page on another website cannot make the book do things: a request that arrives with an
+  `Origin` that is not the shop's own address is refused with `403` and written into the trail.
 - `CHRISPHICS_AUTH_PASSWORD` sets the password from the environment instead (that is how the
   Render deployment does it); while it is set, the in-app change is refused so the two cannot
   disagree.
 - `--allow-unauthenticated-lan` turns sign-in off for a temporary demo on a private address.
-  The screen says so in warning type while it is off. Turn it back on from **Shop & devices**.
+  The screen says so in warning type while it is off. A phone cannot turn it on — only the
+  shop's own Mac can, and the attempt is written down. Turn it back on from **Shop & devices**.
+- Over `--trust-proxy` (Render terminates HTTPS there) a named address is told to stay on HTTPS
+  for six months, cookies carry `Secure`, and the `Server` header says `ChrisphicsHub/1.0`
+  instead of this Mac's Python version. A bare IP host gets no HSTS line, because a browser
+  ignores it there anyway.
 
 ### Put the book on a phone
 
@@ -358,9 +397,19 @@ required, how many devices hold the book open, and how many copies exist. Below 
 the book on a device** (the `/setup` install page), **Kept awake for the shop**, **Signed in
 on these devices** — each with its browser, the day it signed in and when it was last heard
 from, and a button that throws it out — **The shop password** (choose, change, or turn
-sign-in off, all from this Mac only), and **Copies of the book**, which says when the last
-copy was made, whether it was checked against the original, and how many are kept. While no
-password is set the screen opens with a warning: the book is open to anything on the Wi-Fi.
+sign-in off, all from this Mac only), **Copies of the book**, which says when the last copy
+was made, whether it was checked against the original, where the second folder got to, how
+many are kept, how much room is left and when the next one is due — and lets the shop set the
+cadence, the nights kept and the second folder, or copy it now; and **Security of this book**,
+which states the rules a device is signing in under (rounds, days signed in, this Mac asked or
+not, HTTPS, the wrong-password wait and the per-minute ceiling) and lists the last forty
+things that happened to the book's guard, twelve shown at a time: sign-ins, turn-aways,
+lockouts, devices thrown out, password changes, cross-origin refusals and every copy — the
+book keeps four hundred of those lines, and no password, no partial password and no cookie
+ever goes into one. The last two cards can be *read* by a
+signed-in phone but only changed on the shop's own Mac, which says so plainly rather than
+greying itself out. While no password is set the screen opens with a warning: the book is open
+to anything on the Wi-Fi.
 
 ## How the money works
 
@@ -548,20 +597,40 @@ The sidebar footer shows the full path, and `Data ▸ Show Data File in Finder` 
 Both the app and the browser launcher use this same file, so rebuilding or moving the `.app`
 never touches your records.
 
-- **Back up**: `Data ▸ Back Up Book Now`, or *Download data backup* in the sidebar, or
-  `python3 server.py --backup`. Each one lands in
-  `~/Library/Application Support/Chrisphics Hub/Backups/backup-<date>.db` as a complete,
-  self-contained copy — one file, nothing else needed to restore it.
-- **Backed up by itself**: with the always-on server installed, `tools/nightly-backup.sh` runs
-  at 22:30 every night. It does not just write a file and hope: the copy is opened again, put
-  through `PRAGMA integrity_check`, and counted against the book table by table (jobs, clients,
-  payments, expenses, messages), so a silently truncated copy is caught and the run is recorded
-  as failed rather than quiet. Then the folder is tidied — the last 14 nights, one copy for each
-  of the 12 months before that, and the 12 most recent copies you asked for by hand; anything
-  older goes. **Shop & devices** shows the time of the last copy, what the check said, and how
-  many are kept; the sidebar footer turns red when a night has been missed.
+- **Back up**: `Data ▸ Back Up Book Now` (⌘B), or *Download data backup* in the sidebar, or
+  **Shop & devices ▸ Copies of the book ▸ Copy it now**. Each one writes a complete,
+  self-contained copy — one file, nothing else needed to restore it — into
+  `~/Library/Application Support/Chrisphics Hub/Backups/` and is named `manual-<day>-<time>.db`
+  because you asked for it. The ⌘B and sidebar routes also hand the file to you as a download
+  (so you can put one on a USB stick or in Drive), and that is written into the book's security
+  trail as a copy that left the Mac. `python3 server.py --backup` from a terminal is the same act
+  named `backup-<day>-<time>.db`.
+- **Copied by itself, while the server runs**: the always-on server keeps its own clock. Every
+  five minutes it looks at the schedule and, when a copy is due, makes one, opens it again, puts it
+  through `PRAGMA integrity_check`, counts it against the book table by table (jobs, clients,
+  payments, expenses, messages) and only then writes the time down — so a silently truncated copy
+  is recorded as a failure rather than a quiet night. **Copies of the book** is where the shop
+  rules that: **Copy the book by itself while the server is running** switches it on and off,
+  **Every (hours)** sets 1–168 hours (24 by default), **Keep night copies for (days)** sets 3–120
+  nights (14 by default), and **A second folder (optional)** mirrors every copy somewhere else —
+  an external disk, a network folder. Save the form and the clock is looked at again straight away;
+  a book that was overdue a day gets its copy the moment you say so, not when the old gap ends.
+  Retention is capped before a short cadence could fill the disk: inside the nights you keep, every
+  copy except more than twelve from one day; past them, one copy for each of the last twelve
+  months; and the twelve most recent copies asked for by hand, always. The card lists the newest
+  copies with their size and says which were made by itself and
+  which were asked for, the folder's free space, when the next one is due, and whether the second
+  folder actually took it. `CHRISPHICS_BACKUP_CHECK` (seconds) sets how often the clock is looked
+  at; `CHRISPHICS_BACKUP_DIR` moves the folder, which is how the Render box puts copies on its
+  persistent disk.
+- **Backed up by the calendar too**: with the always-on server installed, `tools/nightly-backup.sh`
+  still runs at 22:30 every night and does the same thing through the same checks. It is the second
+  way a copy happens, so a server that was never running in the daytime still gets its night copy —
+  and if either path misses, the sidebar footer turns red and **Copies of the book** says when the
+  last one really was. The server's own clock needs the server running; the calendar job does not
+  ask permission of anything.
   A copy on this Mac is not a backup of the shop: carry one off to a USB stick, Google Drive or
-  Time Machine now and then.
+  Time Machine now and then — or set the second folder and let the copying do it.
 - **Restore**: quit the app, move your backup file into that folder renamed to
   `chrisphics.db`, and start again.
 - **Move to another Mac**: copy the `.app` and the `chrisphics.db` file. Only Python 3
@@ -634,12 +703,13 @@ the Poppins on this Mac does not carry that feature. To change the look, change 
 one place; weights used anywhere in the CSS are snapped to the four Poppins ships
 (400 / 500 / 600 / 700), so an in-between weight silently becomes its nearest one.
 
-Four dev checks live in `tools/`, and none of them needs anything installed:
+Five dev checks live in `tools/`, and none of them needs anything installed:
 
 | Command | What it answers |
 | --- | --- |
 | `python3 tools/js-check.py` | does `public/app.js` still parse? (one stray bracket empties every screen) |
 | `python3 tools/check-profile-settings.py` | can the shop's own details be saved and read back out of the book, do bad ones get refused, and does a cleared one fall back to its default? Runs against a **copy** of the book on a throwaway port. |
+| `python3 tools/check-backups-security.py` | does the book get copied by itself, checked, mirrored, retained and reported; and is it guarded — password rules, salted 600,000-round hash, session length, devices thrown out, wrong-password waits, the per-minute ceiling, cross-origin refusals, the security trail, HTTPS headers? Runs four throwaway servers on ports 8897–8899 against a **copy** of the book, in its own backup folders, and closes by proving no job, client, payment, expense or message moved and that the shop's own file was not written to. |
 | `swift tools/make-qr.swift "<address>" /tmp/shop-qr.png 520` | the counter's QR as a printable PNG — and every code is read back before the file is trusted (`--verify <file.png>` checks one already drawn) |
 | `swiftc -O tools/wk-probe.swift -o /tmp/wk-probe` then `/tmp/wk-probe <url> <dir> "open\|/#/jobs" "shot\|jobs"` | what a screen actually rendered, in the same WebKit the app uses, as text plus a PNG |
 
