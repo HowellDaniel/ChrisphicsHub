@@ -452,7 +452,7 @@ function shellChrome() {
   side.appendChild(bar);
   $$('#nav .navlink').forEach((link) => stash(link, sheet));
   stash($('.side-cta'), sheet);
-  stash($('.side-bottom'), sheet);
+  stash($('#pagefoot'), sheet);
 }
 
 function closeMore() {

@@ -160,24 +160,35 @@ code { font-family: var(--num); font-size: .88em; }
 .nav a span { font: 500 .78em/1 var(--num); color: var(--side-dim); }
 .nav a.on span { color: var(--side-text); }
 .side-cta { display: flex; flex-direction: column; gap: 7px; padding: 0 var(--pad); }
-/* The appearance control and the book's footer share the bottom of the rail. */
-.side-bottom { margin-top: auto; padding: 0 var(--pad); display: grid; gap: 14px; }
-.side-foot { border-top: 1px solid var(--side-line); padding-top: 14px; display: grid; gap: 6px; }
-.side-foot .kv { display: flex; justify-content: space-between; gap: 10px; font-size: .82em; color: var(--side-dim); }
-.side-foot .kv span { white-space: nowrap; }
-.side-foot .kv b { color: var(--side-text); font-family: var(--num); font-weight: 500; }
-/* An overdue copy of the book is the one fact in this corner that changes what the shop should do. */
-.side-foot .kv b.late { color: #e79a94; }
-/* Notes sit on paper most of the time; only the rail's own are pale on ink. */
+/* What the book holds, where it lives, and the quiet ways out of it. These belong under the
+   screens rather than in the rail: the rail is the shop's commands, this strip is the book's
+   own state, read the same way from any screen. The appearance choice is not repeated here on a
+   wide screen — Settings ▸ Appearance owns it in the app, and a phone gets it in its More sheet. */
+.pagefoot {
+  border-top: 1px solid var(--line); color: var(--muted); font-size: .82em;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px 18px;
+  padding: 11px var(--pad) calc(11px + env(safe-area-inset-bottom));
+}
+.pagefoot .kv { display: flex; gap: 8px; }
+.pagefoot .kv span { white-space: nowrap; }
+.pagefoot .kv b { color: var(--text); font-family: var(--num); font-weight: 500; white-space: nowrap; }
+.pagefoot .hint { font-size: 1em; flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.pagefoot .spacer { flex: 1; }
+/* An overdue copy of the book is the one fact on this strip that changes what to do next. */
+.pagefoot .kv b.late { color: var(--bad); }
+/* Notes sit on paper most of the time; only the rail's and the sheet's are pale on ink. */
 .hint { font-size: .74em; color: var(--muted); margin: 0; }
 .side .hint { color: var(--side-mid); }
-.linkbtn { background: none; border: 0; padding: 0; text-align: left; color: #d9d1d2; cursor: pointer; font-size: .85em; text-decoration: underline; text-underline-offset: 3px; }
-.linkbtn:hover { color: var(--side-hi); }
-/* Light / dark / system, on the rail so it is reachable from any screen. */
-.themeseg { display: flex; gap: 3px; padding: 3px; border-radius: 9px; background: var(--side-active); }
-.themeseg button { flex: 1; border: 0; background: none; color: var(--side-mid); font-size: .78em; font-weight: 500;
-  padding: 5px 4px; border-radius: 6px; cursor: pointer; transition: background .16s ease, color .16s ease; }
-.themeseg button:hover { color: var(--side-hi); }
+.linkbtn { background: none; border: 0; padding: 0; text-align: left; color: var(--link);
+  cursor: pointer; font-size: .92em; text-decoration: underline; text-underline-offset: 3px; }
+.linkbtn:hover { color: var(--text); }
+/* Light / dark / system. Out of the Mac app's screen entirely, because `Settings ▸ Appearance`
+   already owns it there; a browser tab on any other machine keeps it on this strip. */
+.themeseg { display: flex; gap: 3px; padding: 3px; border-radius: 9px; background: var(--surface-2); }
+[data-native="1"] .themeseg { display: none; }
+.themeseg button { flex: 1; border: 0; background: none; color: var(--muted); font-size: .78em; font-weight: 500;
+  padding: 5px 8px; border-radius: 6px; cursor: pointer; transition: background .16s ease, color .16s ease; }
+.themeseg button:hover { color: var(--text); }
 .themeseg button[aria-pressed="true"] { background: var(--surface); color: var(--text); font-weight: 600; }
 .themeseg button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .main { display: flex; flex-direction: column; min-width: 0; }
@@ -186,7 +197,7 @@ code { font-family: var(--num); font-size: .88em; }
   border-bottom: 1px solid var(--line); padding: calc(var(--pad) * .72) var(--pad);
   display: flex; flex-direction: column; gap: 10px;
 }
-.view { padding: var(--pad); display: grid; gap: var(--gap); align-content: start; min-height: 0; }
+.view { padding: var(--pad); display: grid; gap: var(--gap); align-content: start; min-height: 0; flex: 1 0 auto; }
 /* A .view child is a grid item, and a grid item's automatic minimum size is its min-content:
    one wide table used to push the whole column past the window and give the page a horizontal
    scrollbar. Zero the minimum and .tablewrap scrolls the table where it sits. */
@@ -526,8 +537,6 @@ label.field.wide { grid-column: 1 / -1; }
   .nav a { white-space: nowrap; }
   .side-cta { flex-direction: row; overflow-x: auto; }
   .side-cta .btn { width: auto; }
-  .themeseg { max-width: 260px; }
-  .side-foot { display: none; }
 }
 
 /* ---------- phone ----------
@@ -561,9 +570,24 @@ label.field.wide { grid-column: 1 / -1; }
     box-shadow: 0 -18px 40px rgba(0, 0, 0, .38);
   }
   .moresheet[hidden] { display: none; }
-  .moresheet .side-cta, .moresheet .side-bottom { padding: 0; max-width: none; margin-top: 0; }
-  .moresheet .side-cta { display: grid; gap: 6px; margin: 10px 0 4px; }
-  .moresheet .side-foot { display: grid; gap: 8px; margin-top: 12px; }
+  .moresheet .side-cta { padding: 0; max-width: none; margin: 10px 0 4px; display: grid; gap: 6px; }
+  /* The book's strip rides in the sheet too, and takes the sheet's ink colours with it. Everything
+     you press in there gets a thumb's height, not a text link's. */
+  .moresheet .pagefoot {
+    display: grid; gap: 8px; margin-top: 12px; padding: 12px 0 0;
+    border-top: 1px solid var(--side-line); color: var(--side-dim);
+  }
+  .moresheet .pagefoot .kv b { color: var(--side-text); }
+  .moresheet .pagefoot .spacer { display: none; }
+  .moresheet .pagefoot .linkbtn {
+    color: #d9d1d2; display: inline-flex; align-items: center; min-height: 44px; font-size: .95em;
+  }
+  .moresheet .pagefoot .linkbtn:hover { color: var(--side-hi); }
+  .moresheet .pagefoot .hint { color: var(--side-mid); }
+  .moresheet .themeseg { background: var(--side-active); max-width: 260px; }
+  .moresheet .themeseg button { color: var(--side-mid); padding: 11px 4px; }
+  .moresheet .themeseg button:hover { color: var(--side-hi); }
+  .moresheet .themeseg button[aria-pressed="true"] { background: var(--surface); color: var(--text); }
   .moresheet .hint { color: var(--side-mid); }
 
   /* Each destination carries the mark it uses on the desktop rail, drawn as a mask so it

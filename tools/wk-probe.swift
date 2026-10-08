@@ -9,10 +9,17 @@
 //
 // Commands, in order:
 //   open|<path>   load base+path (absolute http(s) URL also accepted)
+//   size|<w>x<h>  resize the window and the web view, so media queries answer for that width
 //   poll|<js>     wait until the expression is truthy (8s deadline)
 //   eval|<js>     run a statement, ignore the result
 //   say|<js>      evaluate and print the returned string
 //   shot|<name>   save a PNG of the page
+//
+// WKPROBE_SCRIPT=<file> injects that JavaScript into every page before it runs, which is how a
+// probe of the shop's own DOM is written once as functions instead of pasted into a shell argument.
+// WKPROBE_HANDLERS=<names> binds those native script handlers, the way the .app binds "theme",
+// before the web view exists — a page decides whether it is inside the Mac app on the first frame,
+// so a handler added later would never be seen.
 import AppKit
 import WebKit
 
@@ -80,6 +87,14 @@ window.addEventListener('unhandledrejection', function (e) {
 let userScript = WKUserScript(source: collector, injectionTime: .atDocumentStart, forMainFrameOnly: true)
 config.userContentController.addUserScript(userScript)
 config.userContentController.add(hook, name: "probe")
+for name in (ProcessInfo.processInfo.environment["WKPROBE_HANDLERS"] ?? "").split(separator: ",") {
+    config.userContentController.add(hook, name: String(name).trimmingCharacters(in: .whitespaces))
+}
+if let script = ProcessInfo.processInfo.environment["WKPROBE_SCRIPT"],
+   let source = try? String(contentsOfFile: script, encoding: .utf8) {
+    config.userContentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart,
+                                                            forMainFrameOnly: true))
+}
 
 let frame = NSRect(x: 0, y: 0, width: 1440, height: 950)
 let web = WKWebView(frame: frame, configuration: config)
@@ -139,7 +154,7 @@ func runNext() {
         print("OPEN " + url)
         let same = web.url != nil
             && web.url!.scheme == target.scheme && web.url!.host == target.host
-            && web.url!.path == target.path
+            && web.url!.path == target.path && web.url!.query == target.query
         if same {
             // Hash-only move: the router renders, WebKit never fires didFinish.
             web.evaluateJavaScript("location.hash = '\(target.fragment ?? "")'") { _, _ in
@@ -172,6 +187,25 @@ func runNext() {
             spin { checkLoaded() }
         }
         checkLoaded()
+    case "size":
+        let dims = operand.components(separatedBy: "x")
+        guard dims.count == 2, let wide = Int(dims[0]), let tall = Int(dims[1]) else {
+            print("  bad size: " + operand)
+            failures.append("size " + operand)
+            runNext()
+            return
+        }
+        // A window that is merely moved is not a different screen: the web view has to be the whole
+        // content, or a phone-shaped layout is judged on a desktop-sized viewport.
+        let content = NSRect(x: 0, y: 0, width: wide, height: tall)
+        window.setContentSize(content.size)
+        web.frame = content
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            js("window.innerWidth + 'x' + window.innerHeight") { value in
+                print("  viewport now " + value)
+                runNext()
+            }
+        }
     case "poll":
         var waited = 0.0
         func tick() {

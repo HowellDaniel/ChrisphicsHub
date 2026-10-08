@@ -44,8 +44,9 @@ untouched as the safety copy. From then on only the new name is used.
 - `File` — New Job `⌘N`, New Quote `⇧⌘N`, New Enquiry `⌘I`, New Client `⌘K`,
   Receive Payment `⌘R`, Record Money Out `⌘E`.
 - `View` — `⌘1`…`⌘9` and `⌘0` jump between the ten screens; Reload `⇧⌘R` after changing `public/`;
-  **Appearance** picks Light, Dark or "Follow the Mac" (the same three buttons sit at the
-  bottom of the sidebar).
+  **Appearance** picks Light, Dark or "Follow the Mac". Inside the app this is where the look is
+  chosen, so the same three buttons on the page footer hide themselves here; they show only in a
+  browser tab or on a phone, which have no Settings window.
 - `Data` — Back Up Book Now `⌘B`, Show Data File in Finder, Open Backup Folder.
 - A job's **Job sheet** opens in its own window. Print Job Sheet `⌘P` goes through the normal
   macOS print dialog (the sheet's own print button is wired to it); **Export Job Sheet as
@@ -59,7 +60,7 @@ and the window resizes to whichever pane you are in.
 | Pane | What it holds |
 | --- | --- |
 | **General** | open at login; which screen the app shows first (any of the ten, or "Where I left off"); text size 90–140%; keep this Mac awake while the shop is open; which records engine the window is attached to; where the book and the backups live, with Back up now / Show book in Finder / Open backups |
-| **Appearance** | **Light**, **Dark**, **Follow the Mac** — the same three choices as `View ▸ Appearance` and the sidebar buttons; change one anywhere and the others re-tick |
+| **Appearance** | **Light**, **Dark**, **Follow the Mac** — the same three choices as `View ▸ Appearance` and as the buttons on the page footer in a browser or on a phone; change one anywhere and the others re-tick |
 | **Profile** | the shop's name, tagline, phone and address, kept *in the book*; the MoMo number, the address devices install from, and the currency are read out but not editable here |
 | **Updates** | this build's version, commit and build date, the repository, **Check for update**, and a button to open the repository |
 
@@ -203,7 +204,8 @@ install from the browser itself:
 Under 720px the book becomes a phone app rather than a shrunken desktop. The side rail is
 gone; **Desk · Jobs · Money · Clients · More** sit in a tab bar at thumb height, and **More**
 opens a sheet holding the remaining screens (spoiled work, pending sync, enquiries, expenses,
-reports, Shop & devices) plus the theme switch, signing out and the backup button. A job's
+reports, Shop & devices) and, at its end, the page footer itself — the book's counts, its last
+copy and where it is kept, with the theme switch, signing out and the backup button. A job's
 record and every form rise from the bottom of the screen, the first column of a wide ledger
 pins itself so a scrolled row is still identifiable, and everything you press is at least 44px
 tall. The status strip and the
@@ -593,15 +595,17 @@ and returned to the queue. A message already accepted by a provider keeps its se
 ## Your data
 
 Everything lives in one file: **`~/Library/Application Support/Chrisphics Hub/chrisphics.db`**.
-The sidebar footer shows the full path, and `Data ▸ Show Data File in Finder` reveals it.
+The page footer — the slim strip under every screen, below the work rather than pinned over it —
+says how much is in the book, when it was last copied and where it lives; `Data ▸ Show Data File in
+Finder` reveals the file itself.
 Both the app and the browser launcher use this same file, so rebuilding or moving the `.app`
 never touches your records.
 
-- **Back up**: `Data ▸ Back Up Book Now` (⌘B), or *Download data backup* in the sidebar, or
+- **Back up**: `Data ▸ Back Up Book Now` (⌘B), or *Download data backup* on the page footer, or
   **Shop & devices ▸ Copies of the book ▸ Copy it now**. Each one writes a complete,
   self-contained copy — one file, nothing else needed to restore it — into
   `~/Library/Application Support/Chrisphics Hub/Backups/` and is named `manual-<day>-<time>.db`
-  because you asked for it. The ⌘B and sidebar routes also hand the file to you as a download
+  because you asked for it. The ⌘B and footer routes also hand the file to you as a download
   (so you can put one on a USB stick or in Drive), and that is written into the book's security
   trail as a copy that left the Mac. `python3 server.py --backup` from a terminal is the same act
   named `backup-<day>-<time>.db`.
@@ -626,7 +630,7 @@ never touches your records.
 - **Backed up by the calendar too**: with the always-on server installed, `tools/nightly-backup.sh`
   still runs at 22:30 every night and does the same thing through the same checks. It is the second
   way a copy happens, so a server that was never running in the daytime still gets its night copy —
-  and if either path misses, the sidebar footer turns red and **Copies of the book** says when the
+  and if either path misses, the page footer turns red and **Copies of the book** says when the
   last one really was. The server's own clock needs the server running; the calendar job does not
   ask permission of anything.
   A copy on this Mac is not a backup of the shop: carry one off to a USB stick, Google Drive or
@@ -678,8 +682,10 @@ grey `#808085` it pairs with, measured from the artwork rather than eyeballed. B
 darkened for text (`--brand-ink`, `--link`) so they hold up as type on paper, and the mark's
 own inks (`#C93A3F` / `#9A9AA0`) are what the Dock icon and the tab icon are drawn with.
 
-There are three appearances — **Light**, **Dark** and **System**. Pick one in the sidebar or
-under `View ▸ Appearance`; the choice is remembered on this Mac, and System follows the
+There are three appearances — **Light**, **Dark** and **System**. In the Mac app pick one under
+`View ▸ Appearance` or in **Settings ▸ Appearance**, and the footer's own three buttons stay out of
+the way; in a browser tab or on a phone, where there is no Settings window, they sit at the end of
+the page footer. The choice is remembered on this Mac, and System follows the
 Mac's own Light/Dark setting the moment you change it. The dark palette is a real second
 palette, not a filter: surfaces lift off black, the crimson brightens so it survives on a
 dark counter, and the status pills go from pale washes to deep ones with lightened type.

@@ -22,6 +22,11 @@
   var dark = mode === "dark" || (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
   document.documentElement.dataset.theme = dark ? "dark" : "light";
   document.documentElement.dataset.themeMode = mode;
+  /* Inside the Mac app the look is chosen in Settings ▸ Appearance, so the page does not ask a
+     second time. A handler named "theme" is only ever bound by that shell. */
+  try {
+    if (window.webkit.messageHandlers.theme) document.documentElement.dataset.native = "1";
+  } catch (e) { /* a browser tab, or a phone: nothing seeds the look for it */ }
 })();
 </script>
 </head>
@@ -54,28 +59,26 @@
       <button class="btn wide" data-action="new-quote">+ New quote</button>
       <button class="btn wide" data-action="new-client">+ New client</button>
       <button class="btn wide" data-action="receive-payment">Receive payment</button>
-      <button class="btn wide" data-action="sign-out" id="signOut" hidden>Sign out of this device</button>
-    </div>
-
-    <div class="side-bottom">
-      <div class="themeseg" role="group" aria-label="Appearance">
-        <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
-        <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
-        <button type="button" data-theme-set="system" aria-pressed="true">System</button>
-      </div>
-
-      <div class="side-foot">
-        <div class="kv"><span>In the book</span><b id="footCounts">–</b></div>
-        <div class="kv"><span>Last copy</span><b id="footBackup">–</b></div>
-        <button class="linkbtn" data-action="backup">Download data backup</button>
-        <p class="hint">Saves to <code id="footDb">data/chrisphics.db</code> on this Mac. Keep that file.</p>
-      </div>
     </div>
   </aside>
 
   <main class="main">
     <header class="topbar" id="topbar"></header>
     <div class="view" id="view"><p class="loading">Loading the book…</p></div>
+
+    <footer class="pagefoot" id="pagefoot">
+      <div class="kv"><span>In the book</span><b id="footCounts">–</b></div>
+      <div class="kv"><span>Last copy</span><b id="footBackup">–</b></div>
+      <p class="hint">Saves to <code id="footDb">data/chrisphics.db</code> on this Mac. Keep that file.</p>
+      <span class="spacer"></span>
+      <button class="linkbtn" data-action="backup">Download data backup</button>
+      <button class="linkbtn" data-action="sign-out" id="signOut" hidden>Sign out of this device</button>
+      <div class="themeseg" role="group" aria-label="Appearance">
+        <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
+        <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+        <button type="button" data-theme-set="system" aria-pressed="true">System</button>
+      </div>
+    </footer>
   </main>
 </div>
 
