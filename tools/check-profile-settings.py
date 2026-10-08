@@ -79,7 +79,7 @@ try:
 
     code, raw = call("PUT", "/api/shop", {"name": "CRISPprint Ghana Ltd",
                                           "tagline": "Printing & Design Services",
-                                          "phone": "+233 50 295 4541",
+                                          "phone": "+233 555 0100",
                                           "address": "28 Airport Road, Accra"})
     out = json.loads(raw.decode())
     check("PUT /api/shop saves all four", code == 200 and out["shop"]["name"] == "CRISPprint Ghana Ltd",
@@ -88,7 +88,7 @@ try:
     again = json.loads(raw.decode())
     check("the live values changed at once",
           again["shop"]["tagline"] == "Printing & Design Services"
-          and again["shop"]["phone"].startswith("+233 50"),
+          and again["shop"]["phone"].startswith("+233 555"),
           again["shop"]["phone"])
     check("all four are now kept in the book",
           all(again["kept_in_book"].values()), str(again["kept_in_book"]))
@@ -117,7 +117,7 @@ try:
     after = json.loads(raw.decode())
     check("the book still says so after a restart",
           after["shop"]["name"] == "CRISPprint Ghana Ltd"
-          and after["shop"]["phone"] == "+233 50 295 4541", after["shop"]["name"])
+          and after["shop"]["phone"] == "+233 555 0100", after["shop"]["name"])
 
     code, raw = call("PUT", "/api/shop", {"phone": "", "address": ""})
     cleared = json.loads(raw.decode())["shop"]
