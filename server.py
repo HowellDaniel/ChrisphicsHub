@@ -532,7 +532,10 @@ def job_detail(job_id):
         return None
     job["items"] = items_of(job_id)
     job["payments"] = q("SELECT * FROM payments WHERE job_id = ? ORDER BY paid_at DESC, id DESC", (job_id,))
-    job["expenses"] = q("SELECT * FROM expenses WHERE job_id = ? ORDER BY spent_on DESC, id DESC", (job_id,))
+    job["expenses"] = q("""
+      SELECT e.*, EXISTS(SELECT 1 FROM spoiled_work s WHERE s.expense_id = e.id) AS is_spoilage
+      FROM expenses e WHERE e.job_id = ? ORDER BY e.spent_on DESC, e.id DESC
+    """, (job_id,))
     job["spoilage"] = q("""
       SELECT s.id, s.quantity, s.reason, s.spoiled_on, e.amount, e.category
       FROM spoiled_work s JOIN expenses e ON e.id = s.expense_id

@@ -220,6 +220,9 @@ CREATE TABLE IF NOT EXISTS security_log (
 -- A job's money. `total` prefers the item lines and only falls back to the header
 -- quantity x price when the job has no lines, so old jobs are untouched.
 -- cost = what the lines cost the shop + any expense booked against the job.
+-- Spoilage is booked against a job so the shop knows which batch went wrong, but it is left out
+-- of `cost` and so out of `profit`: a ruined sheet of paper is the shop's loss, not a cost of the
+-- client's job. It still counts as money out in the month-by-month table.
 DROP VIEW IF EXISTS job_accounts;
 CREATE VIEW job_accounts AS
 WITH lines AS (
@@ -236,7 +239,10 @@ priced AS (
                         THEN l.line_gross + j.extras - j.discount
                         ELSE j.quantity * j.unit_price + j.extras - j.discount END, 0), 2) AS total,
          round(coalesce(l.line_cost, 0)
-               + coalesce((SELECT sum(e.amount) FROM expenses e WHERE e.job_id = j.id), 0), 2) AS cost
+               + coalesce((SELECT sum(e.amount) FROM expenses e
+                           WHERE e.job_id = j.id
+                             AND NOT EXISTS (SELECT 1 FROM spoiled_work s
+                                             WHERE s.expense_id = e.id)), 0), 2) AS cost
   FROM jobs j
   LEFT JOIN lines l ON l.job_id = j.id
 )

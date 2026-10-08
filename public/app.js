@@ -1226,7 +1226,9 @@ async function viewExpenses(r) {
         'Paper, ink, transport, rent — writing these down is what turns takings into profit.',
         '<button class="btn primary" data-action="new-expense">+ Record the first one</button>') + '</td></tr>') +
     '</tbody></table></div></div>' +
-    '<p class="hint">Money charged to a job comes off that job’s profit. Everything else is shop overhead and only shows in the month-by-month table.</p>';
+    '<p class="hint">Money charged to a job comes off that job’s profit. Everything else is shop '
+    + 'overhead and only shows in the month-by-month table. Spoiled work is the exception: it names '
+    + 'the job it happened on, but the cost stays with the shop.</p>';
   restoreFocus();
 }
 function weekStart() {
@@ -1572,10 +1574,12 @@ async function viewSpoiled() {
         '<button class="btn sm ghost" data-del-spoilage="' + row.id + '" data-del-quantity="' + row.quantity +
         '" data-del-job="' + esc(row.ref) + '">Remove</button></td></tr>').join('')
       : '<tr><td colspan="7">' + emptyState('No spoiled work recorded',
-        'Log spoiled items against a job. Any cost you enter is added to that job’s costs and reduces its profit.',
+        'Log spoiled items against a job. The record stays with the job; the cost is the shop’s ' +
+        'and does not reduce that job’s profit.',
         '<button class="btn primary" data-action="new-spoilage">+ Log spoiled work</button>') + '</td></tr>') +
     '</tbody></table></div></div>' +
-    '<p class="hint">Spoilage costs are recorded as job expenses and included in each job’s profit. Review the reason and quantity here.</p>';
+    '<p class="hint">Spoilage is recorded against the job that wasted it, but the cost is the shop’s:'
+    + ' it counts as money out in the month-by-month table and never reduces that job’s profit.</p>';
   restoreFocus();
 }
 function spoilageForm(record, jobs, jobId) {
@@ -1597,7 +1601,9 @@ function spoilageForm(record, jobs, jobId) {
       esc(day10(row.spoiled_on || todayISO())) + '"></label>' +
     '<label class="field wide"><span>Reason *</span><textarea name="reason" maxlength="500" rows="3" required placeholder="Describe what went wrong">' +
       esc(row.reason || '') + '</textarea></label>' +
-    '</div><p class="hint">The cost is included in the selected job’s expenses and profit calculation. Enter 0 if no extra cost was incurred.</p>' +
+    '</div><p class="hint">The cost is recorded against the selected job so the shop knows what '
+    + 'went wrong on it, but it stays out of that job’s cost and profit. Enter 0 if no extra cost '
+    + 'was incurred.</p>' +
     '<div class="err" id="spoilageErr"></div><div class="modal-foot"><span class="spacer"></span>' +
     '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
     '<button class="btn primary">' + (record ? 'Save changes' : 'Record spoilage') + '</button></div></form>');
@@ -2050,7 +2056,9 @@ async function openJobDrawer(id) {
   const paid = job.balance <= 0.005;
   const settled = isSettled(job);
   const items = job.items || [];
-  const expenses = job.expenses || [];
+  // Spoilage rides on the job's expense rows for the record, but it is not a cost of the job,
+  // so it never appears in this list and never touches `spent`.
+  const expenses = (job.expenses || []).filter((e) => !e.is_spoilage);
   const spent = expenses.reduce((a, e) => a + e.amount, 0);
   const spoiled = job.spoilage || [];
   const spoilCost = spoiled.reduce((a, s) => a + Number(s.amount || 0), 0);
@@ -2136,8 +2144,8 @@ async function openJobDrawer(id) {
           '<td class=num><button class="btn sm ghost" data-edit-spoilage="' + s.id + '">Edit</button></td></tr>').join('') +
         '</tbody></table></div>' +
         '<p class="hint" style="margin-top:6px">' + money(spoilCost) + ' of waste on ' + pluralise(spoiled.length, 'record') +
-        ', already counted against this job’s profit.</p>'
-        : '<p class="hint" style="margin-top:8px">Nothing spoiled on this job yet. Log it here when a batch goes wrong — the cost lands on this job, not on the client.</p>') + '</div>') +
+        ', kept out of this job’s cost — the shop carries it.</p>'
+        : '<p class="hint" style="margin-top:8px">Nothing spoiled on this job yet. Log it here when a batch goes wrong — the record stays with the job, the cost stays with the shop.</p>') + '</div>') +
     '<div><div class="section-h">Payments on this job</div>' +
     (job.payments.length ? '<div class="tablewrap"><table><thead><tr><th>Date</th><th>Type</th><th>Method</th><th class=num>Amount</th><th></th></tr></thead><tbody>' +
       job.payments.map((p) => '<tr><td class="ref">' + fdate(p.paid_at) + '</td><td>' + esc(p.kind) + '</td><td>' + esc(p.method) +

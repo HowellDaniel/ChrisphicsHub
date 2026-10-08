@@ -380,8 +380,11 @@ outsourced. Each entry can hang off a job, which is what makes that job's profit
 the rest is shop overhead. Totals by category and month, and a CSV for the accountant.
 
 **Spoiled work** — record spoiled quantity, reason, date and extra cost against an existing
-job. The cost is added to that job's expenses and reduces its profit; entries can be edited
-or removed from this screen. The same record sits inside the job it belongs to: open a job and
+job. The record belongs to the job; the loss belongs to the shop. Spoilage never enters that
+job's cost and never reduces its profit, and it never touches what the client pays — but it does
+still count as money out in the month-by-month table, because the paper was really bought and
+really was ruined. Entries can be edited or removed from this screen. The same record sits inside
+the job it belongs to: open a job and
 **Spoiled on this job** lists every incident on that order with its cost, and **+ Log spoiled
 work** there opens the form with the job already chosen — so a batch that goes wrong is
 recorded against the job, never against the client's price.
