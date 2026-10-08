@@ -3549,10 +3549,13 @@ def receipt_html(job_id):
         "<tr><td>%s</td><td>%s</td><td class=r>%s %.2f</td><td>%s</td></tr>" % (
             esc(p["paid_at"]), esc(p["kind"]), sym, p["amount"], esc(p["method"]))
         for p in job["payments"])
+    # A sheet a client signs must not carry the shop's waste. Spoilage is booked against the job
+    # so the shop knows which batch went wrong, but it is the shop's loss: it never appears here,
+    # in a job's cost or profit, or in anything sent to the client.
     spend = "".join(
         "<tr><td>%s</td><td>%s</td><td>%s</td><td class=r>%s %.2f</td></tr>" % (
             esc(e["spent_on"]), esc(e["category"]), esc(e["payee"] or "-"), sym, e["amount"])
-        for e in job["expenses"])
+        for e in job["expenses"] if not e["is_spoilage"])
 
     if is_quote:
         money_block = """<table class=totals><tbody>

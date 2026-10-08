@@ -397,7 +397,9 @@ the rest is shop overhead. Totals by category and month, and a CSV for the accou
 job. The record belongs to the job; the loss belongs to the shop. Spoilage never enters that
 job's cost and never reduces its profit, and it never touches what the client pays — but it does
 still count as money out in the month-by-month table, because the paper was really bought and
-really was ruined. Entries can be edited or removed from this screen. The same record sits inside
+really was ruined. The client is never told about it either: a spoiled row is left off the
+printed job sheet's **Costs booked against this job** table, and out of every queued message.
+Entries can be edited or removed from this screen. The same record sits inside
 the job it belongs to: open a job and
 **Spoiled on this job** lists every incident on that order with its cost, and **+ Log spoiled
 work** there opens the form with the job already chosen — so a batch that goes wrong is
