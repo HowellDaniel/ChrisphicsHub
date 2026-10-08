@@ -880,8 +880,9 @@ NOTIF_NEWS = {
               "We will message you when it goes on the press and again when it is ready.",
     "Pending": "Great news — your order {ref} for {what} is confirmed and scheduled for "
                "production. {due}We appreciate your business and will keep you updated!",
-    "Printing": "Your order {ref} for {what} is on the press right now. {due}"
-                "We will tell you as soon as it is off the machine.",
+    "Printing": "Great news! Your order {ref} for {what} is officially on the press and "
+                "printing now.\n\n{schedule}We will send you another update as soon as it is "
+                "finished and ready for pickup!",
     "Ready": "Good news: your order {ref} for {what} is ready for collection at {address}. {balance}"
              "Let us know when you are coming.",
     "Delivered": "Your order {ref} has been delivered. {balance}"
@@ -960,6 +961,8 @@ def message_fields(job):
         "category": job.get("category") or "",
         "total": "%s%.2f" % (sym, float(job.get("total") or 0)),
         "due": ("We are on track to have everything ready for you by %s. " % due) if due else "",
+        # The press-side phrasing, kept separate because the shop dictates each stage's words.
+        "schedule": ("We are right on schedule to have it ready by %s. " % due) if due else "",
         "hold": ("The price holds until %s. " % hold) if hold else "",
         "balance": money_note,
         "address": SHOP["address"],
