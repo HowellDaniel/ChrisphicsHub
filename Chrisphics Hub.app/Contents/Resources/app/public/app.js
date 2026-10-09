@@ -392,7 +392,7 @@ async function refreshChrome() {
    Links and buttons are moved rather than copied, so the router, the active state and
    the "3 waiting" badges keep working wherever they end up living. */
 const PHONE = window.matchMedia('(max-width: 720px)');
-const TABS = { dashboard: 'Desk', jobs: 'Jobs', accounts: 'Money', clients: 'Clients' };
+const TABS = { dashboard: 'Desk', jobs: 'Jobs', collect: 'Collect', accounts: 'Money', clients: 'Clients' };
 let phoneRestore = null;
 
 function stash(node, parent) {
@@ -452,7 +452,7 @@ function shellChrome() {
   side.appendChild(bar);
   $$('#nav .navlink').forEach((link) => stash(link, sheet));
   stash($('.side-cta'), sheet);
-  stash($('.side-bottom'), sheet);
+  stash($('#pagefoot'), sheet);
 }
 
 function closeMore() {
@@ -544,6 +544,7 @@ async function render() {
   try {
     if (r.view === 'jobs') await viewJobs(r);
     else if (r.view === 'spoiled') await viewSpoiled(r);
+    else if (r.view === 'collect') await viewCollect();
     else if (r.view === 'sync') await viewSyncQueue();
     else if (r.view === 'clients') await viewClients(r);
     else if (r.view === 'accounts') await viewAccounts(r);
@@ -1226,7 +1227,9 @@ async function viewExpenses(r) {
         'Paper, ink, transport, rent — writing these down is what turns takings into profit.',
         '<button class="btn primary" data-action="new-expense">+ Record the first one</button>') + '</td></tr>') +
     '</tbody></table></div></div>' +
-    '<p class="hint">Money charged to a job comes off that job’s profit. Everything else is shop overhead and only shows in the month-by-month table.</p>';
+    '<p class="hint">Money charged to a job comes off that job’s profit. Everything else is shop '
+    + 'overhead and only shows in the month-by-month table. Spoiled work is the exception: it names '
+    + 'the job it happened on, but the cost stays with the shop.</p>';
   restoreFocus();
 }
 function weekStart() {
@@ -1242,8 +1245,11 @@ async function viewShop() {
   const shop = await api('/api/shop');
   let devices = [];
   try { devices = (await api('/api/devices')).devices || []; } catch (e) { /* hosted or signed out */ }
+  let guard = null;
+  try { guard = await api('/api/security'); } catch (e) { /* a device that is not signed in */ }
   const login = shop.login, copy = shop.backup;
   const address = shop.address;
+  const shopMac = !!(S.session || {}).this_is_the_shop_computer;
   topbar('Shop & devices',
     (shop.secure ? 'HTTPS' : 'plain HTTP') + ' · ' + devices.length + ' signed in · ' +
     (copy.at ? 'book copied ' + fdate(copy.at.slice(0, 10)) : 'the book has never been copied'),
@@ -1263,8 +1269,9 @@ async function viewShop() {
       stat('Signed-in devices', devices.length, devices.length
            ? 'phones and laptops holding the book open' : 'nothing but this Mac') +
       stat('Copies of the book', copy.copies || 0,
-           copy.at ? 'last one ' + copy.note : 'none yet — the book exists in one place only',
-           copy.stale ? 'warn' : '') +
+           copy.auto ? 'by itself every ' + cadenceWords(copy.every_hours)
+                     : 'only when the shop asks for one',
+           (copy.stale || !copy.auto) ? 'warn' : '') +
     '</div>' +
     (login.required ? '' : '<div class="card warn-card"><div class="card-b">' +
       '<b>The book is open to anything on this Wi-Fi.</b>' +
@@ -1297,7 +1304,9 @@ async function viewShop() {
     '</div></div>' +
     '</div>' +
     '<div class="card"><h3>Signed in on these devices<span class="spacer"></span>' +
-      '<button class="btn sm ghost" data-action="shop-devices">Refresh</button></h3>' +
+      '<button class="btn sm ghost" data-action="shop-devices">Refresh</button>' +
+      (devices.length ? '<button class="btn sm ghost" data-action="sign-out-all-devices">Throw out every other one</button>' : '') +
+      '</h3>' +
       '<div class="tablewrap"><table><thead><tr><th>Device</th><th>Since</th><th>Last used</th><th></th></tr></thead><tbody>' +
       (devices.length ? devices.map((d) => '<tr><td><span class="strong">' + esc(d.device || 'a device') + '</span></td>' +
         '<td class="ref">' + fdate((d.created_at || '').slice(0, 10)) + '</td>' +
@@ -1306,8 +1315,9 @@ async function viewShop() {
         : '<tr><td colspan="4" class="hint">No other device is signed in. Once a phone installs the ' +
           'app and knows the password, it appears here — and can be thrown out from here.</td></tr>') +
       '</tbody></table></div>' +
-      '<p class="hint">A device stays signed in for thirty days of ordinary use. Signing one out here ' +
-      'takes effect the next time it asks for something.</p></div>' +
+      '<p class="hint">A device stays signed in for ' + plural(guard ? guard.session_days : 30, 'day') +
+      ' of ordinary use, then asks again. Signing one out here takes effect the next time it asks ' +
+      'for something.</p></div>' +
     '<div class="card"><h3>The shop password<span class="spacer"></span></h3><div class="card-b">' +
       '<p class="hint">' + (login.from_environment
         ? 'This server takes its password from the environment (<code>CHRISPHICS_AUTH_PASSWORD</code>), ' +
@@ -1322,20 +1332,169 @@ async function viewShop() {
           (login.required && !shop.reachable_from_wifi
             ? '<button class="btn ghost" data-action="shop-password-off">Switch sign-in off</button>' : '')) + '</p>' +
     '</div></div>' +
-    '<div class="card"><h3>Copies of the book<span class="spacer"></span>' +
-      '<button class="btn sm ghost" data-action="backup">Copy it now</button></h3><div class="card-b">' +
-      (copy.at
-        ? '<p class="hint">Last copy: <b>' + esc(copy.file) + '</b> on ' + esc(copy.at) + ' — ' + esc(copy.note) + '.</p>'
-        : '<p class="hint">The book has not been copied yet. One file holds every job, client and ' +
-          'payment, so a failed disk takes the whole account book with it.</p>') +
-      (copy.stale && copy.at
-        ? '<p class="err">More than a day without a copy. If the always-on server is running, the ' +
-          'nightly job at 22:30 is missing — check <code>tools/shop-server.sh status</code>.</p>' : '') +
-      '<p class="hint">Folder: <code>' + esc(copy.folder) + '</code>. Fourteen nights, one copy for each ' +
-      'of the last twelve months, and the last twelve copies asked for by hand — each one opened and '
-      + 'counted against the book before the older ones are cleared.</p>' +
-    '</div></div>';
+    copiesCard(copy, shopMac) +
+    securityCard(guard, shopMac);
+  wireShopForms();
   restoreFocus();
+}
+
+/* Two cards the shop reads once a day and changes rarely: whether the book is being copied by
+   itself, and who is allowed to open it. Both are settled on the shop's own Mac — a phone on the
+   counter can read the answer but cannot quietly change the rules. */
+function plural(n, word) {
+  const count = Number(n || 0);
+  return count + ' ' + word + (count === 1 ? '' : 's');
+}
+
+function cadenceWords(hours) {
+  const every = Number(hours || 24);
+  return every % 24 === 0 ? plural(every / 24, 'day') : plural(every, 'hour');
+}
+
+function copiesCard(copy, shopMac) {
+  const every = copy.every_hours || 24;
+  const cadence = cadenceWords(every);
+  const recent = (copy.recent || []).map((r) =>
+    '<tr><td class="ref">' + esc(r.at) + '</td>' +
+    '<td>' + (r.kind === 'manual' ? 'asked for' : 'by itself') + '</td>' +
+    '<td class="num">' + Math.round((r.bytes || 0) / 1024) + ' kB</td>' +
+    '<td class="ref">' + esc(r.name) + '</td></tr>').join('');
+  return '<div class="card"><h3>Copies of the book<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-action="book-copy">Copy it now</button>' +
+    '<button class="btn sm ghost" data-action="backup">Take a copy out</button></h3><div class="card-b">' +
+    (copy.at
+      ? '<p class="hint">Last copy: ' + (copy.file ? '<b>' + esc(copy.file) + '</b> ' : '') +
+        esc(copy.at) + (copy.note ? ' — ' + esc(copy.note) : '') + '.</p>'
+      : '<p class="hint">The book has not been copied yet. One file holds every job, client and ' +
+        'payment, so a failed disk takes the whole account book with it.</p>') +
+    (copy.error
+      ? '<p class="err">The last automatic copy did not finish (' + esc(copy.error_at || '') + '): ' +
+        esc(copy.error) + '</p>' : '') +
+    (copy.auto
+      ? (copy.due
+        ? '<p class="err">A copy is overdue — the server is running, so it should have made one by'
+          + ' now. It will try again within five minutes.</p>'
+        : '<p class="hint">Copied by itself every ' + cadence + '; the next one is due in ' +
+          (copy.next_in_hours === null ? '—' : plural(Math.max(0, Math.round(copy.next_in_hours * 10) / 10), 'hour')) + '.</p>')
+      : '<p class="err">Automatic copying is switched off. The book exists in one place only until'
+        + ' it is switched back on or a copy is asked for by hand.</p>') +
+    '<p class="hint">Folder: <code>' + esc(copy.folder) + '</code>' +
+    (copy.free_gb !== null && copy.free_gb !== undefined ? ' · ' + copy.free_gb + ' GB free there' : '') + '.</p>' +
+    (copy.mirror_set
+      ? '<p class="hint">Second destination: <code>' + esc(copy.mirror) + '</code>' +
+        (copy.mirror_dir ? ' — each new copy is written there too.'
+                         : ' — that folder is not there right now, so nothing is being mirrored.') + '</p>'
+      : '<p class="hint">No second destination is set, so both the book and its copies live on this'
+        + ' one Mac. An external disk plugged in now and then is the cheapest insurance there is.</p>') +
+    (shopMac
+      ? '<form id="copiesForm" class="stack">' +
+        '<label class="consent wide"><input type="checkbox" name="auto"' + (copy.auto ? ' checked' : '') + '>' +
+        '<span>Copy the book by itself while the server is running</span></label>' +
+        '<div class="grid split">' +
+        '<label class="field"><span>Every (hours)</span><input name="every_hours" type="number" min="1" max="168"' +
+        ' step="1" value="' + every + '"></label>' +
+        '<label class="field"><span>Keep night copies for (days)</span><input name="keep_days" type="number"' +
+        ' min="3" max="120" step="1" value="' + (copy.keep_days || 14) + '"></label>' +
+        '</div>' +
+        '<label class="field wide"><span>A second folder (optional)</span>' +
+        '<input name="mirror" type="text" maxlength="300" placeholder="/Volumes/Backup/Chrisphics"' +
+        ' value="' + esc(copy.mirror || '') + '"></label>' +
+        '<p class="hint">One copy for each month is kept for a year beyond those days, and the last' +
+        ' twelve copies asked for by hand. Each one is opened and counted against the book before any' +
+        ' older copy is cleared.</p>' +
+        '<div class="err" id="copiesErr"></div>' +
+        '<button class="btn primary">Save the copying</button></form>'
+      : '<p class="hint">How often the book is copied, and where the copies go, is settled on the' +
+        ' shop’s own computer.</p>') +
+    (recent ? '<div class="tablewrap"><table><thead><tr><th>When</th><th>Why</th><th class="num">Size</th>' +
+      '<th>File</th></tr></thead><tbody>' + recent + '</tbody></table></div>' : '') +
+    '</div></div>';
+}
+
+function securityCard(guard, shopMac) {
+  if (!guard) {
+    return '<div class="card"><h3>Security of this book</h3><div class="card-b">' +
+      '<p class="hint">The security of the book is read from the shop’s own computer, or after' +
+      ' signing in. Nothing here is missing — this device simply has not been asked to show it.</p>' +
+      '</div></div>';
+  }
+  const trail = (guard.trail || []).slice(0, 12).map((row) =>
+    '<tr><td class="ref">' + esc(row.at) + '</td><td><span class="strong">' + esc(row.kind) + '</span></td>' +
+    '<td class="ref">' + esc(row.address || '') + '</td><td class="ref">' + esc(row.detail || '') + '</td></tr>').join('');
+  return '<div class="card"><h3>Security of this book<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-action="shop-security">Refresh</button></h3><div class="card-b">' +
+    '<p class="hint">Sign-in: <b>' + (guard.required ? (guard.from_environment
+      ? 'set by the hosting service' : 'one shop password') : 'not required') + '</b>' +
+    (guard.required ? ' — the word is kept only as a salted hash, run through ' +
+      (guard.rounds / 1000) + ' thousand rounds.' : ' — choose a shop password above.') + '</p>' +
+    '<p class="hint">' + (guard.https
+      ? 'This address is HTTPS, so a password crossing the Wi-Fi is encrypted on the way.'
+      : '<span class="err">Plain HTTP: a password typed here crosses the Wi-Fi in the clear.'
+        + '</span> Run <code>tools/shop-server.sh install</code> on this Mac.') + '</p>' +
+    '<p class="hint">' + plural(guard.allowed_fails, 'wrong password') + ' in a row and that device' +
+    ' is made to wait, doubling each time up to a quarter of an hour. More than ' +
+    plural(guard.calls_per_minute, 'call') + ' in one minute from one address is answered with a' +
+    ' wait, so a script cannot bury the counter’s own screen.</p>' +
+    '<p class="hint">' + (guard.loopback_open
+      ? 'This Mac is the shop’s own computer and is not asked for the password — the counter’s'
+        + ' keyboard is treated as a key in the till.'
+      : 'Even this Mac is asked for the password, because the shop switched that on below.') + '</p>' +
+    (shopMac
+      ? '<form id="securityForm" class="stack">' +
+        '<label class="field"><span>Days a device stays signed in</span><input name="session_days"' +
+        ' type="number" min="1" max="90" step="1" value="' + guard.session_days + '"></label>' +
+        '<label class="consent wide"><input type="checkbox" name="shop_mac_signin"' +
+        (guard.shop_mac_signin ? ' checked' : '') + '><span>Ask this Mac for the password too' +
+        ' (its own Settings windows then save only after the page has signed in)</span></label>' +
+        '<div class="err" id="securityErr"></div>' +
+        '<button class="btn primary">Save the security</button></form>'
+      : '<p class="hint">How long a device stays signed in, and whether this Mac is asked as well,' +
+        ' are settled on the shop’s own computer.</p>') +
+    '<h4>What the book remembers of being opened</h4>' +
+    (trail ? '<div class="tablewrap"><table><thead><tr><th>When</th><th>What</th><th>From</th>' +
+      '<th>Note</th></tr></thead><tbody>' + trail + '</tbody></table></div>'
+      : '<p class="hint">Nothing has been written yet. Every sign-in, every wrong password, every'
+        + ' copy taken out and every device thrown out goes here from now on.</p>') +
+    '<p class="hint">The last few hundred events only, and never a password, a half-typed one, or a' +
+    ' device’s cookie — only what happened, when, and from which address.</p>' +
+    '</div></div>';
+}
+
+function wireShopForms() {
+  const copies = document.getElementById('copiesForm');
+  if (copies) {
+    copies.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('copiesErr').textContent = '';
+      try {
+        await api('/api/backups', { method: 'PUT', body: JSON.stringify({
+          auto: !!f.auto.checked,
+          every_hours: f.every_hours.value,
+          keep_days: f.keep_days.value,
+          mirror: f.mirror.value.trim(),
+        }) });
+        toast('The book will be copied that way from now on', 'good');
+        await render();
+      } catch (err) { document.getElementById('copiesErr').textContent = err.message; }
+    });
+  }
+  const security = document.getElementById('securityForm');
+  if (security) {
+    security.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('securityErr').textContent = '';
+      try {
+        await api('/api/security', { method: 'PUT', body: JSON.stringify({
+          session_days: f.session_days.value,
+          shop_mac_signin: !!f.shop_mac_signin.checked,
+        }) });
+        toast('Sign-in rules saved', 'good');
+        await render();
+      } catch (err) { document.getElementById('securityErr').textContent = err.message; }
+    });
+  }
 }
 
 function passwordForm(login) {
@@ -1416,10 +1575,12 @@ async function viewSpoiled() {
         '<button class="btn sm ghost" data-del-spoilage="' + row.id + '" data-del-quantity="' + row.quantity +
         '" data-del-job="' + esc(row.ref) + '">Remove</button></td></tr>').join('')
       : '<tr><td colspan="7">' + emptyState('No spoiled work recorded',
-        'Log spoiled items against a job. Any cost you enter is added to that job’s costs and reduces its profit.',
+        'Log spoiled items against a job. The record stays with the job; the cost is the shop’s ' +
+        'and does not reduce that job’s profit.',
         '<button class="btn primary" data-action="new-spoilage">+ Log spoiled work</button>') + '</td></tr>') +
     '</tbody></table></div></div>' +
-    '<p class="hint">Spoilage costs are recorded as job expenses and included in each job’s profit. Review the reason and quantity here.</p>';
+    '<p class="hint">Spoilage is recorded against the job that wasted it, but the cost is the shop’s:'
+    + ' it counts as money out in the month-by-month table and never reduces that job’s profit.</p>';
   restoreFocus();
 }
 function spoilageForm(record, jobs, jobId) {
@@ -1441,10 +1602,105 @@ function spoilageForm(record, jobs, jobId) {
       esc(day10(row.spoiled_on || todayISO())) + '"></label>' +
     '<label class="field wide"><span>Reason *</span><textarea name="reason" maxlength="500" rows="3" required placeholder="Describe what went wrong">' +
       esc(row.reason || '') + '</textarea></label>' +
-    '</div><p class="hint">The cost is included in the selected job’s expenses and profit calculation. Enter 0 if no extra cost was incurred.</p>' +
+    '</div><p class="hint">The cost is recorded against the selected job so the shop knows what '
+    + 'went wrong on it, but it stays out of that job’s cost and profit. Enter 0 if no extra cost '
+    + 'was incurred.</p>' +
     '<div class="err" id="spoilageErr"></div><div class="modal-foot"><span class="spacer"></span>' +
     '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
     '<button class="btn primary">' + (record ? 'Save changes' : 'Record spoilage') + '</button></div></form>');
+}
+/* ------------------------------------------------------------------ collect
+   The counter's hand-over screen: one box for the job number off the sheet, one card that
+   answers whether the box may leave. Nothing is written until Hand over is pressed. */
+async function viewCollect() {
+  const q = (S.route.params.get('q') || '').trim();
+  const data = await api('/api/handover' + (q ? '?q=' + encodeURIComponent(q) : ''));
+  const waiting = data.waiting || [];
+  topbar('Collect', waiting.length
+    ? pluralise(waiting.length, 'job') + ' ready and paid, waiting to go out'
+    : 'Nothing is both ready and paid right now', '', []);
+  $('#topbar').insertAdjacentHTML('beforeend',
+    '<div class="collect-ask"><label class="field"><span>Job number</span>' +
+    '<input class="collect-q" data-filter="q" value="' + esc(q) + '" placeholder="CH-2026-0001" ' +
+    'autocomplete="off" autocapitalize="characters" spellcheck="false"></label>' +
+    '<button class="btn ghost" data-action="clear-filters">Clear</button></div>');
+  $('#view').innerHTML = '<div class="stack">' + collectBody(data, waiting) + '</div>';
+  restoreFocus();
+}
+
+function collectBody(data, waiting) {
+  if (!data.query) return collectShelf(waiting);
+  if (!data.found) {
+    return '<div class="card">' + emptyState('No job called ' + data.query,
+      'Nothing in the book carries that number. It is on the job sheet and in the messages sent ' +
+      'to the client — try the year and the number, with or without the CH-.',
+      '<a class="btn" href="#/jobs">See every job</a>') + '</div>';
+  }
+  if ((data.ambiguous || []).length) {
+    return '<div class="card card-b"><p class="strong">' + pluralise(data.ambiguous.length, 'job') +
+      ' answer to ' + esc(data.query) + '</p><p class="hint">Type the whole number, or open the one ' +
+      'you mean.</p>' + data.ambiguous.map((row) => '<p class="collect-amb"><a href="#/jobs/' + row.id +
+        '">' + esc(row.ref) + '</a> <span>' + esc(row.client) + ' · ' + esc(row.title) +
+        ' · ' + esc(row.status) + '</span></p>').join('') + '</div>';
+  }
+  return collectCard(data.card);
+}
+
+function collectCard(card) {
+  const j = card.job || {};
+  return '<div class="card card-b collect-verdict' + (card.can_handover ? ' yes' : ' no') + '">' +
+    '<div class="collect-h"><b class="collect-ref">' + esc(j.ref) + '</b>' +
+    '<span class="pill s-' + esc(j.status) + '">' + esc(j.status) + '</span>' +
+    (j.priority === 'Urgent' ? '<span class="pill p-Urgent">Urgent</span>' : '') +
+    '<span class="spacer"></span>' +
+    (card.settled ? '<span class="pill k-paid">Paid in full</span>'
+      : '<span class="pill out">Owes ' + money(j.balance) + '</span>') + '</div>' +
+    '<h2 class="collect-what">' + esc(j.title) + '</h2>' +
+    '<p class="collect-who">' + esc(j.client) +
+    (j.client_phone ? ' · <a href="tel:' + esc(j.client_phone) + '">' + esc(j.client_phone) + '</a>' : '') +
+    (j.category ? ' · ' + esc(j.category) : '') + '</p>' +
+    '<div class="amounts">' +
+    '<div><span>Billed</span><b>' + money(j.total) + '</b></div>' +
+    '<div><span>Paid</span><b>' + money(j.paid) + '</b></div>' +
+    '<div><span>Balance</span><b class="' + (Number(j.balance) > 0.005 ? 'neg' : 'pos') + '">' +
+      money(j.balance) + '</b></div></div>' +
+    (card.can_handover
+      ? '<p class="collect-yes">' + esc(card.money_line) + '</p><div class="row-actions">' +
+        '<button class="btn primary" data-action="collect-handover" data-status-job="' + j.id +
+        '" data-status-name="' + esc(j.ref) + '">Hand it over</button>' +
+        '<a class="btn ghost" href="#/jobs/' + j.id + '">Open the job</a>' +
+        '<a class="btn ghost" href="/print/' + j.id + '" target="_blank" rel="noopener">Job sheet</a></div>'
+      : '<p class="collect-stop">' + esc(card.reason) + '</p>' +
+        ((card.doors || []).length ? '<div class="row-actions">' + card.doors.map((d) =>
+          d.action === 'payment'
+            ? '<button class="btn" data-action="collect-pay" data-pay-job="' + j.id +
+              '" data-pay-name="' + esc(j.client) + '" data-pay-amount="' + esc(n2(card.balance)) + '">' +
+              esc(d.label) + '</button>'
+            : '<button class="btn" data-action="collect-ready" data-status-job="' + j.id +
+              '" data-status="' + esc(d.status) + '">' + esc(d.label) + '</button>').join('') +
+          '</div>' : '') +
+        '<div class="row-actions"><a class="btn ghost" href="#/jobs/' + j.id + '">Open the job</a></div>') +
+    '</div>';
+}
+
+function collectShelf(waiting) {
+  if (!waiting.length) {
+    return '<div class="card">' + emptyState('Nothing to hand over yet',
+      'A job appears here once it has reached Ready and its balance is settled. Type a number ' +
+      'above to check the one a client is standing at the counter for.', '') + '</div>';
+  }
+  return '<p class="section-h">Ready and paid</p><div class="card"><div class="tablewrap">' +
+    '<table class="collect-shelf">' +
+    '<thead><tr><th>Job</th><th>Client</th><th class=num>Billed</th><th></th></tr></thead><tbody>' +
+    waiting.map((j) => '<tr><td><span class="strong">' + esc(j.title) + '</span>' +
+      '<div class="ref"><a href="#/collect?q=' + encodeURIComponent(j.ref) + '">' + esc(j.ref) +
+      '</a></div>' +
+      (j.due_date ? '<div class="due">due ' + fdate(j.due_date) + '</div>' : '') + '</td>' +
+      '<td>' + esc(j.client) + '</td>' +
+      '<td class=num>' + money(j.total) + '</td>' +
+      '<td class=num><a class="btn ghost sm" href="#/collect?q=' + encodeURIComponent(j.ref) +
+      '">Collect</a></td></tr>').join('') +
+    '</tbody></table></div></div>';
 }
 async function viewSyncQueue() {
   const rows = (await offlineAll('outbox')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -1894,7 +2150,9 @@ async function openJobDrawer(id) {
   const paid = job.balance <= 0.005;
   const settled = isSettled(job);
   const items = job.items || [];
-  const expenses = job.expenses || [];
+  // Spoilage rides on the job's expense rows for the record, but it is not a cost of the job,
+  // so it never appears in this list and never touches `spent`.
+  const expenses = (job.expenses || []).filter((e) => !e.is_spoilage);
   const spent = expenses.reduce((a, e) => a + e.amount, 0);
   const spoiled = job.spoilage || [];
   const spoilCost = spoiled.reduce((a, s) => a + Number(s.amount || 0), 0);
@@ -1980,8 +2238,8 @@ async function openJobDrawer(id) {
           '<td class=num><button class="btn sm ghost" data-edit-spoilage="' + s.id + '">Edit</button></td></tr>').join('') +
         '</tbody></table></div>' +
         '<p class="hint" style="margin-top:6px">' + money(spoilCost) + ' of waste on ' + pluralise(spoiled.length, 'record') +
-        ', already counted against this job’s profit.</p>'
-        : '<p class="hint" style="margin-top:8px">Nothing spoiled on this job yet. Log it here when a batch goes wrong — the cost lands on this job, not on the client.</p>') + '</div>') +
+        ', kept out of this job’s cost — the shop carries it.</p>'
+        : '<p class="hint" style="margin-top:8px">Nothing spoiled on this job yet. Log it here when a batch goes wrong — the record stays with the job, the cost stays with the shop.</p>') + '</div>') +
     '<div><div class="section-h">Payments on this job</div>' +
     (job.payments.length ? '<div class="tablewrap"><table><thead><tr><th>Date</th><th>Type</th><th>Method</th><th class=num>Amount</th><th></th></tr></thead><tbody>' +
       job.payments.map((p) => '<tr><td class="ref">' + fdate(p.paid_at) + '</td><td>' + esc(p.kind) + '</td><td>' + esc(p.method) +
@@ -2637,6 +2895,14 @@ async function afterMutation(keepDrawer) {
   await render();
   if (!keepDrawer) closeDrawer();
 }
+async function moveStage(id, status) {
+  const before = (S.boot && S.boot.to_send) || 0;
+  await api('/api/jobs/' + id + '/status', { method: 'POST', body: JSON.stringify({ status: status }) });
+  await refreshChrome();
+  const owed = ((S.boot && S.boot.to_send) || 0) - before;
+  toast(owed > 0 ? 'Marked as ' + status + ' — client message ready to send'
+                 : 'Marked as ' + status, 'good');
+}
 const ACTIONS = {
   'install-app'() { installApp().catch(fail); },
   async 'shop-password'(el) {
@@ -2647,6 +2913,22 @@ const ACTIONS = {
   },
   'setup-page'() { window.open('/setup', '_blank'); },
   'shop-devices'() { render().catch(fail); },
+  'shop-security'() { render().catch(fail); },
+  async 'book-copy'() {
+    try {
+      await api('/api/backups', { method: 'POST', body: '{}' });
+      toast('The book was copied and counted against itself', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  async 'sign-out-all-devices'() {
+    try {
+      const answer = await api('/api/devices', { method: 'DELETE' });
+      toast((answer.devices || 0) + ' other device(s) thrown out — they will have to know the' +
+            ' password again', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
   async 'device-revoke'(el) {
     try {
       await api('/api/devices/' + el.dataset.deviceRevoke, { method: 'DELETE' });
@@ -2753,13 +3035,29 @@ const ACTIONS = {
   async 'status'(el) {
     const id = Number(el.dataset.statusJob);
     try {
-      const before = (S.boot && S.boot.to_send) || 0;
-      await api('/api/jobs/' + id + '/status', { method: 'POST', body: JSON.stringify({ status: el.dataset.status }) });
-      await refreshChrome();
-      const owed = ((S.boot && S.boot.to_send) || 0) - before;
-      toast(owed > 0 ? 'Marked as ' + el.dataset.status + ' — client message ready to send'
-                     : 'Marked as ' + el.dataset.status, 'good');
+      await moveStage(id, el.dataset.status);
       await afterMutation(true); openJobDrawer(id);
+    } catch (err) { fail(err); }
+  },
+  /* The collect screen moves the same stage from its own card, but stays put afterwards: the
+     client is at the counter and the next number goes in the same box. */
+  async 'collect-ready'(el) {
+    try {
+      await moveStage(Number(el.dataset.statusJob), el.dataset.status);
+      await afterMutation(true);
+    } catch (err) { fail(err); }
+  },
+  'collect-pay'(el) {
+    const owed = Number(el.dataset.payAmount || 0);
+    paymentForm({ jobId: Number(el.dataset.payJob), name: el.dataset.payName,
+                  amount: owed, balance: owed });
+  },
+  async 'collect-handover'(el) {
+    const id = Number(el.dataset.statusJob);
+    if (!confirm('Give ' + el.dataset.statusName + ' to the client and close it in the book?')) return;
+    try {
+      await moveStage(id, 'Delivered');
+      await afterMutation(true);
     } catch (err) { fail(err); }
   },
   async 'notify-queue'(el) {

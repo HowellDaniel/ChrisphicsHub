@@ -205,9 +205,24 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at  REAL NOT NULL
 );
 
+-- The book's own memory of being opened: who got in, who was turned away, when the password
+-- changed, when a copy of the records left this Mac. Only the kind of event, the address it
+-- came from and a short note — never a password, never a partial one, never a cookie.
+CREATE TABLE IF NOT EXISTS security_log (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  at        TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  kind      TEXT NOT NULL,
+  address   TEXT NOT NULL DEFAULT '',
+  device    TEXT NOT NULL DEFAULT '',
+  detail    TEXT NOT NULL DEFAULT ''
+);
+
 -- A job's money. `total` prefers the item lines and only falls back to the header
 -- quantity x price when the job has no lines, so old jobs are untouched.
 -- cost = what the lines cost the shop + any expense booked against the job.
+-- Spoilage is booked against a job so the shop knows which batch went wrong, but it is left out
+-- of `cost` and so out of `profit`: a ruined sheet of paper is the shop's loss, not a cost of the
+-- client's job. It still counts as money out in the month-by-month table.
 DROP VIEW IF EXISTS job_accounts;
 CREATE VIEW job_accounts AS
 WITH lines AS (
@@ -224,7 +239,10 @@ priced AS (
                         THEN l.line_gross + j.extras - j.discount
                         ELSE j.quantity * j.unit_price + j.extras - j.discount END, 0), 2) AS total,
          round(coalesce(l.line_cost, 0)
-               + coalesce((SELECT sum(e.amount) FROM expenses e WHERE e.job_id = j.id), 0), 2) AS cost
+               + coalesce((SELECT sum(e.amount) FROM expenses e
+                           WHERE e.job_id = j.id
+                             AND NOT EXISTS (SELECT 1 FROM spoiled_work s
+                                             WHERE s.expense_id = e.id)), 0), 2) AS cost
   FROM jobs j
   LEFT JOIN lines l ON l.job_id = j.id
 )
@@ -302,3 +320,4 @@ CREATE INDEX IF NOT EXISTS idx_signals_row   ON money_signals(source, source_row
 CREATE UNIQUE INDEX IF NOT EXISTS ux_notify_slot ON notifications(job_id, event, channel);
 CREATE INDEX IF NOT EXISTS idx_notify_job    ON notifications(job_id);
 CREATE INDEX IF NOT EXISTS idx_notify_state  ON notifications(state);
+CREATE INDEX IF NOT EXISTS idx_security_recent ON security_log(id DESC);
