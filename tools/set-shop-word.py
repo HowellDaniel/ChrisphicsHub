@@ -61,6 +61,15 @@ def check(label, ok, detail=""):
         fails.append(label)
 
 
+# `--word-file <path>` takes a word the shop wrote themselves, read from a file rather than a
+# command line so it never shows up in the process list. Unless --keep-card is added, that file is
+# deleted at the end — the shop's own words need no card left behind.
+WORD_FILE = ""
+KEEP_CARD = "--keep-card" in sys.argv
+if "--word-file" in sys.argv:
+    WORD_FILE = sys.argv[sys.argv.index("--word-file") + 1]
+
+
 def weak(word):
     """server.py:weak_password_reason, rule for rule."""
     if len(word) < 8:
@@ -115,14 +124,25 @@ check("snapshot holds the book as it was", bool(old_hash),
 
 # ------------------------------------------------------------------ 2. fresh word
 word = ""
-for _ in range(500):
-    digits = "".join(str(secrets.randbelow(10)) for _ in range(2))
-    candidate = "-".join(secrets.choice(POOL) for _ in range(4)) + "-" + digits
-    if not weak(candidate):
-        word = candidate
-        break
-check("a fresh word was generated", bool(word), "%d characters, past every strength rule"
-      % len(word))
+if WORD_FILE:
+    with open(WORD_FILE) as fh:
+        word = fh.read().strip()
+    reason = weak(word)
+    check("the shop's own word passes its own rules", not reason,
+          "refused: %s" % reason if reason else "%d characters, 600k rounds will hold it"
+          % len(word))
+    if reason:
+        print("\nNothing was written to the book — the server would refuse this word too.")
+        sys.exit(1)
+else:
+    for _ in range(500):
+        digits = "".join(str(secrets.randbelow(10)) for _ in range(2))
+        candidate = "-".join(secrets.choice(POOL) for _ in range(4)) + "-" + digits
+        if not weak(candidate):
+            word = candidate
+            break
+    check("a fresh word was generated", bool(word), "%d characters, past every strength rule"
+          % len(word))
 
 hashed = hash_password(word)
 check("hash is the shape the server reads", hashed.startswith("pbkdf2_sha256$600000$")
@@ -153,20 +173,30 @@ stat_after = os.stat(LIVE)
 check("the book is whole after the write", stat_after.st_size >= stat_before.st_size,
       "%d -> %d bytes" % (stat_before.st_size, stat_after.st_size))
 
-# ------------------------------------------------------- 4. hand it to the owner
-note = ("CRISPprint shop sign-in — set %s\n\n"
-        "Type this on any device that asks for the shop password, including this Mac.\n"
-        "Move it into your password vault, then delete this file (Finder: Cmd+Delete).\n"
-        "It was never printed, logged, or sent anywhere else.\n\n"
-        "        %s\n\n"
-        "To change it yourself later: sign in, then Shop & devices.\n"
-        % (time.strftime("%Y-%m-%d %H:%M"), word))
-existed = os.path.exists(DESK)
-with open(DESK, "w") as fh:
-    fh.write(note)
-os.chmod(DESK, 0o600)
-check("the word is in one file on the Desktop", bool(not existed) and os.path.getsize(DESK) > 120,
-      "%s, mode %s" % (os.path.basename(DESK), oct(os.stat(DESK).st_mode & 0o777)))
+# ------------------------------------------------------- 4. hand it to the shop
+if WORD_FILE and not KEEP_CARD:
+    # Their own words: put nothing on disk for it. The Desktop card from a generated word is
+    # removed too, because a stale card is how a wrong password gets typed at the counter.
+    for path in (WORD_FILE, DESK):
+        if os.path.exists(path):
+            os.remove(path)
+    check("the word was kept only by the shop", not os.path.exists(WORD_FILE)
+          and not os.path.exists(DESK), "no card on the Desktop, nothing in a log")
+else:
+    note = ("CRISPprint shop sign-in — set %s\n\n"
+            "Type this on any device that asks for the shop password, including this Mac.\n"
+            "Move it into your password vault, then delete this file (Finder: Cmd+Delete).\n"
+            "It was never printed, logged, or sent anywhere else.\n\n"
+            "        %s\n\n"
+            "To change it yourself later: sign in, then Shop & devices.\n"
+            % (time.strftime("%Y-%m-%d %H:%M"), word))
+    replaced = os.path.exists(DESK)
+    with open(DESK, "w") as fh:
+        fh.write(note)
+    os.chmod(DESK, 0o600)
+    check("the word is in one file on the Desktop", os.path.getsize(DESK) > 120,
+          "%s, mode %s%s" % (os.path.basename(DESK), oct(os.stat(DESK).st_mode & 0o777),
+                             " — replaced the card before it" if replaced else " — new card"))
 
 # ----------------------------------------------------------------- 5. live proof
 jar = http.cookiejar.CookieJar()
