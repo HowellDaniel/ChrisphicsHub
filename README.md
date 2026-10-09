@@ -193,6 +193,14 @@ the device you are holding. Print it, mail it, or open it from **Shop & devices 
 page**. Nothing leaves the building — the page is served by the same Mac that holds the book,
 and the address only resolves on the shop Wi-Fi.
 
+**Which address to hand over.** The server prints both at start-up, and `tools/shop-server.sh
+check` prints them too. This Mac's name (`BROWNHUBs-MacBook-Pro.local`, whatever `check` says)
+is the one worth writing on a card: it survived the router handing this shop a new number on
+2026-10-09, when `192.168.100.29` became `192.168.100.43` and every device holding the old
+number fell to a padlock warning. Names resolve on Apple devices out of the box; on Windows
+and Android use the current number, and renew the certificate when it changes — `certs`
+followed by `install`, which keeps the same authority so no device has to be re-trusted.
+
 Trust the certificate once per device (the `/setup` page walks each one through it), then
 install from the browser itself:
 

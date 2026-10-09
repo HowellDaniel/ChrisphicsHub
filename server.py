@@ -23,6 +23,7 @@ import mimetypes
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sqlite3
 import ssl
@@ -2077,6 +2078,21 @@ def private_address(host):
     except ValueError:
         return False
     return address.is_private or address.is_loopback
+
+
+def wifi_address():
+    """The number this machine holds on the network it is actually using. A UDP socket is opened
+    and pointed at an address but never written to — the operating system answers the route lookup
+    with the source address it would have used, and no packet leaves the building."""
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("10.255.255.255", 1))
+            return probe.getsockname()[0]
+        finally:
+            probe.close()
+    except OSError:
+        return ""
 
 
 def ip_address_of(host):
@@ -4946,7 +4962,18 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
     print("%s is running at %s" % (SHOP["name"], url))
     print("Data file: %s" % DB_PATH)
     if not local_only:
-        print("Devices on this Wi-Fi install from %ssetup" % url)
+        # `0.0.0.0` is where the server listens, not a number anyone can type. Without the Mac's own
+        # Wi-Fi address this line reads `…://127.0.0.1:8834/setup` — which every machine on the
+        # network other than this one fails to open, and the counter has nothing else to go by.
+        peer = display_host
+        named = ""
+        if host in ("0.0.0.0", "::", ""):
+            peer = wifi_address() or display_host
+            named = socket.gethostname()
+        print("Devices on this Wi-Fi install from %s://%s:%d/setup" % (scheme, peer, port))
+        if named.endswith(".local"):
+            print("  Apple devices can also use the name, which outlives a new number:"
+                  " %s://%s:%d/" % (scheme, named, port))
         print("Sign-in: %s" % ("one shop password" if auth_required() and not LAN_NO_LOGIN
                                else "not required (this run was told to skip it)"))
         if not KEEP_AWAKE:
