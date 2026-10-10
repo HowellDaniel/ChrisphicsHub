@@ -28,6 +28,13 @@ dst = sqlite3.connect(CLONE)
 src.backup(dst)
 dst.close()
 src.close()
+# The counter's own Mac now asks to sign in too, which turns a loopback request without a session
+# away — and no check here holds the shop's word. The switch is cleared on this throwaway copy, so
+# the shop's book keeps its own setting and these checks keep writing through the API.
+tidy = sqlite3.connect(CLONE)
+tidy.execute("UPDATE app_state SET value='0' WHERE key='shop_mac_login'")
+tidy.commit()
+tidy.close()
 live_stat = os.stat(LIVE)
 
 env = dict(os.environ, CHRISPHICS_DB=CLONE, CHRISPHICS_SUPPORT=work,
