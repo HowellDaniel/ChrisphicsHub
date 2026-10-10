@@ -189,9 +189,30 @@ keeps opening at 200,000 — the rounds travel in the record — and new ones ar
 
 The shop's address ends in `/setup`: one page with the QR to point a camera at, the
 certificate to download, its SHA-256 fingerprint to read out loud, and the trust steps for
-the device you are holding. Print it, mail it, or open it from **Shop & devices ▸ Install
+the device you are holding. The page reads the device's own browser and puts that device's
+steps first, with the other kinds folded underneath, so an Android phone is never told to
+open Keychain Access. Print it, mail it, or open it from **Shop & devices ▸ Install
 page**. Nothing leaves the building — the page is served by the same Mac that holds the book,
 and the address only resolves on the shop Wi-Fi.
+
+**Android and Windows trust it differently, and both look broken.** An iPhone completes the
+path from the root it already has, so it was happy being handed the leaf certificate alone.
+Chrome on Android and Edge on Windows won't: the authority has to travel with the leaf, which
+is why `certs` now appends the root to `shop-cert.pem` and the server answers with both. Their
+certificate installer also reads the *file name* and opens only `.0`, `.pem`, `.crt` or
+`.cacert.cer` — so the same bytes are handed out under three addresses, and `/setup` links the
+one each device will accept:
+
+| device | file it is given | why |
+| --- | --- | --- |
+| Android | `/CRISPprint-Shop-Root-CA.cacert.cer` | its installer refuses a plain `.cer` name |
+| iPhone, Windows, Mac | `/shop-root-ca.cer` | the one a device can name and tap |
+| anywhere with a text editor | `/shop-root-ca.pem` | same authority, plain base64 |
+
+On Windows the steps say **Current User**, not the local machine store — that path needs no
+administrator password, and Edge and Chrome both honour it. Re-running `certs` for a new
+address keeps the same authority, so a device that already trusts the shop keeps trusting it;
+only the file on the leaf changes.
 
 **Which address to hand over.** The server prints both at start-up, and `tools/shop-server.sh
 check` prints them too. This Mac's name — the one `check` shows, ending in `.local` —
@@ -264,8 +285,14 @@ chmod 600 "$TLS/shop-key.pem"
 ```
 
 `tools/shop-server.sh certs` is exactly that, and `ca` writes the public half to
-`"$TLS/device-download/shop-root-ca.cer"` — which the `/setup` page then serves itself at
-`/shop-root-ca.cer` on the HTTPS port. There is no second server on a second port any more.
+`"$TLS/device-download/"` as both `shop-root-ca.cer` and `shop-root-ca.pem`, plus a copy named
+`CRISPprint-Shop-Root-CA.cacert.cer` for Android's installer, and the addresses the leaf
+answers to in `valid-for.txt` — which the `/setup` page then serves itself at
+`/shop-root-ca.cer` and friends on the HTTPS port. There is no second server on a second port
+any more. `certs` also chains the root onto `shop-cert.pem` so Android and Windows can build a
+path, and records the addresses the new leaf answers to, so `/setup` can name the mismatch out
+loud when a device dials a number the certificate does not cover instead of leaving whoever is
+holding it with a padlock warning and no explanation.
 
 **A plain-HTTP address opens the book but installs nothing**: a browser will only let a device
 keep an app offline over HTTPS. `/setup` says so on an HTTP address instead of sending a phone

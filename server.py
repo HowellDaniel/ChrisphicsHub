@@ -2069,6 +2069,19 @@ def clear_shop_password(current):
 
 TLS_DIR = os.path.expanduser("~/Library/Application Support/CRISPprint TLS")
 CA_DOWNLOAD = os.path.join(TLS_DIR, "device-download", "shop-root-ca.cer")
+CA_PEM_DOWNLOAD = os.path.join(TLS_DIR, "device-download", "shop-root-ca.pem")
+CA_VALID_FOR = os.path.join(TLS_DIR, "device-download", "valid-for.txt")
+# Android's certificate installer refuses a file unless its name ends in .0, .pem, .crt or
+# .cacert.cer, and a browser names the download after the address it came from. Same bytes as
+# shop-root-ca.cer, handed over under the name that device will accept.
+CA_ANDROID_NAME = "CRISPprint-Shop-Root-CA.cacert.cer"
+# One authority, three doors. The DER under two names because Android judges a certificate by its
+# file name, and a plain-text copy for anything that wants to read it rather than install it.
+CA_ROUTES = {"/shop-root-ca.cer": (CA_DOWNLOAD, "CRISPprint-Shop-Root-CA.cer",
+                                   "application/x-x509-ca-cert"),
+             "/" + CA_ANDROID_NAME: (CA_DOWNLOAD, CA_ANDROID_NAME, "application/x-x509-ca-cert"),
+             "/shop-root-ca.pem": (CA_PEM_DOWNLOAD, "CRISPprint-Shop-Root-CA.pem",
+                                   "application/x-x509-ca-cert")}
 QR_HELPER = os.path.join(SUPPORT, "qr-encode")
 
 
@@ -2128,6 +2141,32 @@ def ca_fingerprint():
     return ":".join("%02X" % b for b in hashlib.sha256(raw).digest())
 
 
+def ca_valid_for():
+    """The names and numbers the shop's certificate answers to, written down by tools/shop-server.sh
+    when it made the certificate. A phone that trusts the authority and still warns has nearly
+    always typed an address the certificate was never issued for — the Wi-Fi number moves."""
+    try:
+        with open(CA_VALID_FOR, encoding="utf-8") as fh:
+            return [line.strip() for line in fh if line.strip()]
+    except OSError:
+        return []
+
+
+def install_platform(user_agent):
+    """Which kind of device is reading the install page, so it gets its own steps and the file
+    shape its settings will accept. Unknown browsers get every kind listed below the general one."""
+    low = (user_agent or "").lower()
+    if "android" in low:
+        return "android"
+    if "iphone" in low or "ipad" in low or "ipod" in low:
+        return "ios"
+    if "windows" in low:
+        return "windows"
+    if "macintosh" in low and "safari" in low:
+        return "mac"
+    return "other"
+
+
 def shop_url(fallback_host=""):
     scheme = "https" if SERVE["tls"] else "http"
     host, port = SERVE["host"], SERVE["port"]
@@ -2163,10 +2202,11 @@ def qr_png(words, pixels=560):
         return None
 
 
-def setup_html(request_host=""):
+def setup_html(request_host="", user_agent=""):
     url = shop_url(request_host)
     fingerprint = ca_fingerprint()
     secure = SERVE["tls"]
+    here = install_platform(user_agent)
 
     def esc(value):
         return (str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -2177,26 +2217,94 @@ def setup_html(request_host=""):
              ' not let it be installed as an app or keep it offline. Ask the shop to run'
              ' <code>tools/shop-server.sh certs</code> and <code>install</code> on the shop Mac,'
              ' then use the HTTPS address instead.</p>')
+    # Every device takes the same authority down in a different shape. Android's installer reads
+    # the file name and refuses anything that does not end the way it expects, so it gets a
+    # separate address carrying the same bytes under a name it will open.
+    files = {
+        "android": ("/" + CA_ANDROID_NAME, CA_ANDROID_NAME),
+        "ios": ("/shop-root-ca.cer", "CRISPprint-Shop-Root-CA.cer"),
+        "windows": ("/shop-root-ca.cer", "CRISPprint-Shop-Root-CA.cer"),
+        "mac": ("/shop-root-ca.pem", "CRISPprint-Shop-Root-CA.pem"),
+        "other": ("/shop-root-ca.cer", "CRISPprint-Shop-Root-CA.cer"),
+    }
+    steps = {
+        "android": ("Android phone or tablet", [
+            "Take the certificate down with Chrome, and keep the name it saves as — Android's"
+            " installer opens nothing that does not end in <code>.cacert.cer</code>,"
+            " <code>.pem</code>, <code>.crt</code> or <code>.0</code>.",
+            "Settings ▸ Security, or on a recent Android Security &amp; privacy ▸ More security"
+            " settings ▸ Cryptography &amp; certifications ▸ <b>Install a certificate</b> ▸"
+            " <b>CA certificate</b> ▸ choose the file ▸ <b>Install</b>.",
+            "Android warns that the file could harm the device. It is the shop's own authority —"
+            " read the fingerprint above out loud before trusting it.",
+            "Open the shop address in <b>Chrome</b>, then the browser menu ▸ <b>Install app</b>."]),
+        "ios": ("iPhone or iPad", [
+            "Open the downloaded certificate, then Settings ▸ General ▸ <b>VPN &amp; Device"
+            " Management</b> ▸ install the downloaded profile.",
+            "Settings ▸ General ▸ About ▸ <b>Certificate Trust Settings</b> and turn full trust on"
+            " for it — this is the step phones miss, and without it the warning stays.",
+            "Open the address in <b>Safari</b> and use <b>Share ▸ Add to Home Screen</b>."]),
+        "windows": ("Windows PC", [
+            "Open the downloaded <code>.cer</code> file ▸ <b>Install Certificate</b>.",
+            "Pick <b>Current User</b>. It needs no administrator password, and Edge and Chrome read"
+            " that store just as they read the machine's.",
+            "<b>Place all certificates in the following store</b> ▸ Browse ▸ <b>Trusted Root"
+            " Certification Authorities</b> ▸ OK ▸ Next ▸ Finish.",
+            "Quit the browser fully — it holds on to the answer it already gave — then open the"
+            " address and install it from the app icon in the address bar, or"
+            " <b>… ▸ Apps ▸ Install this site as an app</b>."]),
+        "mac": ("Another Mac", [
+            "Open the certificate so it lands in <b>Keychain Access</b>, then double-click it ▸"
+            " <b>Trust</b> ▸ <b>When using this certificate: Always Trust</b>.",
+            "Open the address in <b>Safari</b>. On the shop's own Mac the desktop app already holds"
+            " the same book."]),
+    }
+    order = ["android", "ios", "windows", "mac"]
+    names = ca_valid_for()
+    # A Host header is the address the device dialled, with the port glued on. Brackets go first,
+    # then the port, so an IPv6 address stays one address rather than splitting on its own colons.
+    host_in_use = (request_host or "").split("]")[0]
+    if host_in_use.startswith("["):
+        host_in_use = host_in_use[1:]
+    if host_in_use.count(":") == 1:
+        host_in_use = host_in_use.rsplit(":", 1)[0]
+    wrong_address = ""
+    if secure and names and host_in_use and host_in_use not in names:
+        alt = next((n for n in names if "." in n or re.match(r"^\d+\.", n)), names[0])
+        wrong_address = (
+            '<p class="warn">This page was opened as <code>%s</code>, but the shop\'s certificate'
+            ' only answers to <code>%s</code>. Trusting it will not clear the warning on this'
+            ' address — the shop\'s Wi-Fi number has moved. Use'
+            ' <a href="https://%s:%d/setup">https://%s:%d/setup</a> on this device instead, and'
+            ' ask the shop to run <code>tools/shop-server.sh certs</code> if that address is the'
+            ' one that has gone stale.</p>'
+            % (esc(host_in_use), esc(", ".join(names)), esc(alt), SERVE["port"],
+               esc(alt), SERVE["port"]))
     cert = ("" if not fingerprint else
             '<h2>One certificate to trust first</h2>'
             '<p>Phones and laptops will not open a shop address that they cannot check.'
             ' Download the shop\'s own certificate once per device, then trust it in that'
             ' device\'s settings.</p>'
-            '<p><a class="big" href="/shop-root-ca.cer">Download CRISPprint-Shop-Root-CA.cer</a></p>'
-            '<p class="fingerprint">It must read<br><code>%s</code></p>' % esc(fingerprint))
-    steps = [
-        ("iPhone or iPad", "Settings ▸ General ▸ VPN &amp; Device Management ▸ Download the"
-         " certificate, then Settings ▸ General ▸ About ▸ Certificate Trust Settings and turn"
-         " full trust on for it. Then open the address in Safari and use Share ▸ Add to Home Screen."),
-        ("Android", "Open the downloaded certificate in Settings ▸ Security ▸"
-         " Encryption &amp; credentials ▸ Install a certificate ▸ CA certificate. Then open the"
-         " address in Chrome and use the menu ▸ Install app."),
-        ("Windows", "Double-click the certificate ▸ Install Certificate ▸ Local Machine ▸ place"
-         " it in Trusted Root Certification Authorities. Then open the address in Edge and use the"
-         " install icon in the address bar."),
-        ("Another Mac", "Open the certificate and trust it in Keychain Access, then open the"
-         " address in Safari. On this Mac the desktop app already holds the same book."),
-    ]
+            '<p><a class="big" href="%s">Download the shop certificate</a></p>'
+            '<p class=note>Your device will save it as <code>%s</code>, and that is the file its'
+            ' settings screen has to be pointed at.</p>'
+            '<p class="fingerprint">It must read<br><code>%s</code></p>'
+            '<p class="note">It answers to: <code>%s</code></p>'
+            '%s'
+            % (esc(files[here][0]), esc(files[here][1]), esc(fingerprint),
+               esc(", ".join(names)) if names else "not recorded on this Mac",
+               wrong_address))
+    on_this = steps.get(here)
+    follow = ("" if not on_this else
+              '<h2>Trust it on this device</h2><ol>%s</ol>'
+              % "".join("<li>%s</li>" % line for line in on_this[1]))
+    others = "".join(
+        '<details><summary>%s</summary><ol>%s</ol><p class="note">The file for that device:'
+        ' <a href="%s">%s</a></p></details>'
+        % (esc(steps[key][0]), "".join("<li>%s</li>" % line for line in steps[key][1]),
+           esc(files[key][0]), esc(files[key][1]))
+        for key in order if key != here)
+    install_list = follow + ('<h2>On another kind of device</h2>' + others if others else "")
     return """<!doctype html><html lang=en><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=robots content="noindex">
@@ -2214,8 +2322,9 @@ border-radius:12px;padding:14px 16px}
 background:#fff;padding:8px;border:1px solid #e2d8d6}
 .big{display:inline-block;background:#c93a3f;color:#fff;padding:11px 16px;border-radius:10px;
 text-decoration:none;font-weight:600}
-ol{padding-left:22px}li{margin:14px 0}li b{display:block}
-code{font:13px ui-monospace,Menlo,Consolas,monospace}
+ol{padding-left:22px}li{margin:14px 0}
+details{margin:16px 0}summary{font-weight:600;cursor:pointer}
+code{font:13px ui-monospace,Menlo,Consolas,monospace;overflow-wrap:break-word}
 /* Only the fingerprint is one unbroken token that has to be allowed to split mid-run. */
 .fingerprint code{word-break:break-all}
 .fingerprint{background:#fff;border:1px solid #e2d8d6;border-radius:10px;padding:10px 14px;font-size:13px}
@@ -2233,8 +2342,7 @@ the book stays on the shop's own computer, and this is a window onto it.</p>
 <p>The shop keeps one password for its devices. Ask whoever runs the counter — it was chosen on
 the shop computer, and every device is signed out whenever it changes.</p>
 %(cert)s
-<h2>Install it</h2>
-<ol>%(steps)s</ol>
+%(install)s
 <p class=note><a href="%(url)s">Open the shop book now</a> · Setup for the person at the counter is
 in the README under “Open and install over HTTPS on the same Wi-Fi”.</p>
 </html>""" % {
@@ -2242,7 +2350,7 @@ in the README under “Open and install over HTTPS on the same Wi-Fi”.</p>
         "qr": ('<p class=qr><img src="/setup-qr.png" width="184" height="184" alt="QR code for'
                ' the shop address"><br><span class=note>Camera on this text, or type the address.</span></p>'
                if qr_png(url) else ""),
-        "steps": "".join("<li><b>%s</b>%s</li>" % (esc(t), d) for t, d in steps),
+        "install": install_list,
     }
 
 
@@ -4086,25 +4194,27 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/print/"):
                 return 200, ("raw", receipt_html(path_id(path.rsplit("/", 1)[1])), "text/html; charset=utf-8")
             if path == "/setup":
-                return 200, ("raw", setup_html(self.headers.get("Host", "")), "text/html; charset=utf-8")
+                return 200, ("raw", setup_html(self.headers.get("Host", ""),
+                                               self.headers.get("User-Agent", "")),
+                             "text/html; charset=utf-8")
             if path == "/setup-qr.png":
                 png = qr_png(shop_url(self.headers.get("Host", "")))
                 if not png:
                     self.send(404, "No QR helper on this Mac", "text/plain")
                     return None
                 return 200, ("raw", png, "image/png")
-            if path == "/shop-root-ca.cer":
+            if path in CA_ROUTES:
                 # The shop's root certificate, handed to a device standing on the same Wi-Fi. A
                 # hosted deployment has no business distributing a Mac's trust root.
+                source, saved_as, mime = CA_ROUTES[path]
                 if not private_address(self.client_ip()):
                     self.send(404, "The shop certificate is only handed out on the shop Wi-Fi",
                               "text/plain")
                     return None
-                if not os.path.isfile(CA_DOWNLOAD):
+                if not os.path.isfile(source):
                     self.send(404, "No certificate has been made for this shop", "text/plain")
                     return None
-                return 200, ("file", CA_DOWNLOAD, "CRISPprint-Shop-Root-CA.cer",
-                             "application/x-x509-ca-cert")
+                return 200, ("file", source, saved_as, mime)
             if not seg:
                 return 200, ("raw", open(os.path.join(PUBLIC, "index.html"), encoding="utf-8").read(),
                              "text/html; charset=utf-8")

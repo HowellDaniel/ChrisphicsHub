@@ -310,6 +310,27 @@ cmd_check() {
 }
 
 # ------------------------------------------------------------------ certs
+chain_the_cert() {   # send the leaf and the authority together, and record what the leaf answers to
+  local root="" pem=""
+  root="$(ca_root)"
+  pem="$root/rootCA.pem"
+  if [ ! -f "$pem" ]; then
+    warn "There is no authority at $pem to chain, so a device gets the shop's own certificate alone."
+    warn "  Run \"mkcert -install\", then tools/shop-server.sh certs again."
+    return
+  fi
+  # A phone that trusts the authority can still be turned away when the server offers only its own
+  # certificate: iOS completes the path from its trust store, Chrome on Android and Edge on Windows
+  # will not. mkcert writes the leaf fresh, so one append is enough and a second run changes nothing.
+  if [ "$(grep -c 'BEGIN CERTIFICATE' "$CERT" 2>/dev/null || true)" -lt 2 ]; then
+    cat "$pem" >> "$CERT"
+    note "The server now answers with its own certificate and the shop authority in one go, which is"
+    note "  the shape Android and Windows browsers need before they will accept a trusted shop."
+  fi
+  mkdir -p "$DL_DIR"
+  cert_san_lines "$CERT" > "$DL_DIR/valid-for.txt"
+}
+
 cmd_certs() {
   local ip="" name="" mk="" root="" line=""
   declare -a wanted=()
@@ -332,7 +353,8 @@ NAMES
   if [ -f "$CERT" ]; then
     if [ -z "$(missing_names "$CERT" "$ip" "$name")" ]; then
       note "The certificate already covers every one of those and is good until $(cert_expiry "$CERT")."
-      note "Nothing to do, so nothing was changed."
+      chain_the_cert
+      note "No new certificate was issued."
       return
     fi
     note "It no longer covers what this Mac needs — the Wi-Fi address or the name moved — so I am issuing"
@@ -358,6 +380,7 @@ NAMES
   fi
   chmod 600 "$KEY"
   chmod 644 "$CERT"
+  chain_the_cert
 
   note "Certificate ready: it answers to $(cert_san_lines "$CERT" | tr '\n' ' ') and is good until $(cert_expiry "$CERT")."
   note "A server that is already running keeps the certificate it started with, so run tools/shop-server.sh install"
@@ -393,6 +416,10 @@ cmd_ca() {
     cp "$pem" "$DL_DIR/shop-root-ca.pem"
     note "A plain-text copy sits beside it as shop-root-ca.pem, for devices that want that shape."
   fi
+  # One authority, handed over under the name each kind of device will accept. The shop server
+  # serves both addresses from this same file, so nothing here has to be kept in two copies.
+  note "A device downloads it from the shop address: /shop-root-ca.cer for iPhone, Windows and Mac,"
+  note "  /CRISPprint-Shop-Root-CA.cacert.cer for Android, whose installer reads the file name."
 
   print="$(openssl x509 -inform PEM -in "$pem" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 || true)"
   echo

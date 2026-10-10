@@ -2344,10 +2344,19 @@ function installInstructions() {
   } else if (ios) {
     steps = '<p>In Safari, tap <b>Share</b>, then choose <b>Add to Home Screen</b> and confirm.</p>';
   } else if (/Android/.test(ua)) {
-    steps = '<p>In Chrome, open the browser menu and choose <b>Install app</b> or ' +
+    steps = '<p>Android opens a certificate only when its file name ends in ' +
+      '<code>.cacert.cer</code>, <code>.pem</code>, <code>.crt</code> or <code>.0</code>, so take ' +
+      'the shop’s as <a href="/CRISPprint-Shop-Root-CA.cacert.cer">CRISPprint-Shop-Root-CA.cacert.cer</a>' +
+      ' and check its fingerprint against the one the setup page prints.</p>' +
+      '<p>Then Settings ▸ Security (or Security &amp; privacy ▸ More security settings ▸ Cryptography' +
+      ' &amp; certifications) ▸ Install a certificate ▸ <b>CA certificate</b> ▸ choose the file.</p>' +
+      '<p>Finally open the address in Chrome, and use the browser menu ▸ <b>Install app</b> or ' +
       '<b>Add to Home screen</b>.</p>';
   } else {
-    steps = '<p>In Microsoft Edge or Chrome, use the install icon in the address bar or open ' +
+    steps = '<p>Double-click the shop’s <a href="/shop-root-ca.cer">CRISPprint-Shop-Root-CA.cer</a>' +
+      ' ▸ Install Certificate ▸ <b>Current User</b> (no administrator password needed) ▸ Trusted Root' +
+      ' Certification Authorities, then quit the browser fully and reopen it.</p>' +
+      '<p>In Microsoft Edge or Chrome, use the install icon in the address bar or open ' +
       'the browser menu and choose <b>Install this site as an app</b>.</p>';
   }
   openModal(modalHeader('Install CRISPprint', 'Add an app shortcut to this device') +
