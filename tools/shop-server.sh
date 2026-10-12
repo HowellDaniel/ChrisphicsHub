@@ -522,6 +522,21 @@ cmd_install() {
   if [ ! -f "$REPO/server.py" ]; then
     fail_with "I cannot find the book's engine at $REPO/server.py — run this script from inside the Chrisphics Hub folder."
   fi
+  # macOS will not let a launchd-spawned python read anything under Documents or Desktop, so a
+  # service installed from there starts, fails with "Operation not permitted", and the shop loses
+  # its server in silence. The served copy outside those folders is the only installable one.
+  case "$REPO" in
+    "$HOME/Documents"/*|"$HOME/Desktop"/*)
+      if [ -f "$HOME/Applications/Chrisphics Hub/tools/shop-server.sh" ]; then
+        fail_with "This copy of the shop lives under $REPO, where a background service is not allowed" \
+          "to read it — a service installed from here starts and dies without a word." \
+          "Run the shop's own copy instead:  \"$HOME/Applications/Chrisphics Hub/tools/shop-server.sh\" install"
+      fi
+      fail_with "This copy of the shop lives under $REPO, where a background service is not allowed" \
+        "to read it. Copy the folder to \"~/Applications/Chrisphics Hub\" first, then run its" \
+        "  tools/shop-server.sh install."
+      ;;
+  esac
   if [ ! -f "$CERT" ] || [ ! -f "$KEY" ]; then
     fail_with "The devices have nothing to trust yet — run tools/shop-server.sh certs first, then come back to install."
   fi
