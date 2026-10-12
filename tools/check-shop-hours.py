@@ -214,6 +214,19 @@ def token_of(cookies):
     return cookie_named(cookies, "crispprint_session")
 
 
+def cookie_max_age(lines, name):
+    """The Max-Age one of these Set-Cookie lines carries, so how long a device may stay inside can
+    be read off the answer its browser was given rather than off the book."""
+    for line in lines or []:
+        head, _, rest = line.partition(";")
+        if head.startswith(name + "="):
+            for bit in rest.split(";"):
+                key, _, value = bit.strip().partition("=")
+                if key.lower() == "max-age":
+                    return int(value)
+    return -1
+
+
 def machine_of():
     """The long key the last answer left in the browser of a machine the counter had named."""
     return cookie_named(LAST["cookies"], "crispprint_machine")
@@ -418,6 +431,42 @@ check("taking the name off signs that machine straight out",
                  (server.token_digest(press),)) is None)
 expect("and the book stops naming it", len(server.shop_computer_view()), 2)
 check("the key it kept opens nothing now", server.computer_by_key(key) is None)
+
+# ------------------------------------------- 1c. how long each kind of device is allowed to stay
+print("\n— a named machine is not on a countdown —")
+server.set_state("session_days", "1")
+wanderer = server.open_session("Chrome on Android")
+resident = server.open_session("Mac · Chrome", forever=True)
+server.keep_shop_computer(also["id"], resident)
+hold = server.one("SELECT expires_at FROM sessions WHERE token_hash = ?",
+                  (server.token_digest(resident),))
+brief = server.one("SELECT expires_at FROM sessions WHERE token_hash = ?",
+                   (server.token_digest(wanderer),))
+check("a visiting device is given the shop's one day",
+      0 < brief["expires_at"] - time.time() < 2 * 86400,
+      "%d hours left" % round((brief["expires_at"] - time.time()) / 3600))
+check("the named machine is given a date no countdown reaches",
+      hold["expires_at"] >= server.SESSION_NEVER,
+      dt.datetime.fromtimestamp(hold["expires_at"]).strftime("%d %b %Y"))
+expect("and it stays inside when the book is touched", server.touch_session(resident), True)
+expect("the shop shortening everyone's stay to a day does not pull it back",
+       server.one("SELECT expires_at FROM sessions WHERE token_hash = ?",
+                  (server.token_digest(resident),))["expires_at"], hold["expires_at"])
+with server._lock:
+    server._db.execute("UPDATE sessions SET expires_at = ? WHERE token_hash = ?",
+                       (time.time() - 60, server.token_digest(wanderer)))
+    server._db.commit()
+expect("while a visiting device that ran out is asked again", server.touch_session(wanderer), False)
+keeper = [row for row in server.shop_computer_view() if row["name"] == also["name"]][0]
+expect("the counter is told this one keeps its sign-in", keeper["stays_forever"], True)
+inside = [(row["shop_computer"], row["stays_forever"])
+          for row in server.signed_in_devices() if row["shop_computer"]]
+expect("and so is the list of devices", inside, [("CHRISPRINT’s iMac (2)", 1)])
+server.revoke_shop_computer(also["id"], "127.0.0.1")
+check("taking the name off ends the forever stay",
+      server.one("SELECT id FROM sessions WHERE token_hash = ?",
+                 (server.token_digest(resident),)) is None)
+server.set_state("session_days", "")
 clear_rules()
 
 # ---------------------------------------------------------------------- 2. a copy of the book
@@ -476,6 +525,8 @@ check("and is told which three hold the places", body.get("error", "").count("·
       body.get("error", "")[:70])
 code, body, _ = call(PORT_REMOTE, "/api/session", token=tokens[0])
 expect("a signed-in device sees the occupancy", body.get("hours", {}).get("devices"), 3)
+expect("and is handed no new sign-in to remember it by",
+       cookie_max_age(LAST["cookies"], "crispprint_session"), -1)
 code, body, _ = call(PORT_REMOTE, "/api/dashboard", token=tokens[0])
 expect("so does the dashboard it is looking at", body.get("hours", {}).get("limit"), 3)
 
@@ -527,10 +578,17 @@ check("the right word and the counter's plate get the iMac in outside the window
 expect("and it is named in the answer", body.get("shop_computer"), "CHRISPRINT’s iMac")
 KEY = machine_of()
 check("the machine is left a key of its own", len(KEY) > 20, "%d characters" % len(KEY))
+expect("and its browser is handed a sign-in meant to outlast the shop",
+       cookie_max_age(LAST["cookies"], "crispprint_session"), server.SHOP_COMPUTER_KEY_AGE)
+expect("with a session in the book stamped the same way",
+       scrape(REMOTE, "select count(*) from sessions where expires_at >= %f"
+              % server.SESSION_NEVER)[0][0], 1)
 seed(REMOTE, dict(open_window(), device_limit="1"))
 code, body, guest = call(PORT_REMOTE, "/api/login", "POST", {"password": WORD})
 check("with the shop open, one visitor can take the one place", code == 200 and bool(guest),
       body.get("error", "")[:60])
+expect("while a visiting device is given the shop's countdown, not the long one",
+       cookie_max_age(LAST["cookies"], "crispprint_session"), server.session_seconds())
 expect("a visitor cannot name itself as one of the shop's own",
        call(PORT_REMOTE, "/api/shop-computers", "POST", {"name": "some laptop"}, token=guest)[0],
        403)
@@ -546,6 +604,11 @@ expect("so the book holds one visitor and one named machine",
 code, body, _ = call(PORT_REMOTE, "/api/session", token=named_again, machine=KEY)
 expect("a named machine is told as much about itself", body.get("shop_computer"),
        "CHRISPRINT’s iMac")
+check("and an ordinary visit hands the same sign-in back to it, so a browser that forgets long"
+      " cookies never loses its place",
+      token_of(LAST["cookies"]) == named_again and
+      cookie_max_age(LAST["cookies"], "crispprint_session") == server.SHOP_COMPUTER_KEY_AGE,
+      "Max-Age %d" % cookie_max_age(LAST["cookies"], "crispprint_session"))
 check("and it is not counted among the visiting places",
       body.get("hours", {}).get("devices"), 1)
 expect("while its own kind is counted apart", body.get("hours", {}).get("own_devices"), 1)

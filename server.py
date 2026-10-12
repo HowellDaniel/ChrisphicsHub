@@ -110,6 +110,11 @@ _db = None
 AUTH_PASSWORD = os.environ.get("CHRISPHICS_AUTH_PASSWORD", "").strip()
 SESSION_SECONDS = 30 * 24 * 60 * 60     # what a device gets until the shop shortens it
 SESSION_DAYS_MIN, SESSION_DAYS_MAX = 1, 90
+# A machine the counter has written down as one of the shop's own is not on a countdown at all:
+# its sign-in is stamped with this date, so the only thing that ends it is taking the name off.
+# A browser will not hold a cookie this long, so the same sign-in is handed back to that machine on
+# every visit it makes — see authenticated().
+SESSION_NEVER = dt.datetime(3000, 1, 1).timestamp()
 # Each stored hash carries the rounds it was made with, so raising this only affects the next
 # password the shop chooses; a book signed in with 200,000 keeps opening at 200,000.
 PBKDF2_ROUNDS = 600_000
@@ -2226,15 +2231,24 @@ def device_name(user_agent):
     return "%s · %s" % (machine, browser)
 
 
-def open_session(user_agent):
+def open_session(user_agent, forever=False):
+    """A visiting device is given the shop's countdown. A machine the counter named is given a date
+    no countdown reaches, so it stays inside the book until its name is taken off it."""
     token = secrets.token_urlsafe(32)
+    until = SESSION_NEVER if forever else time.time() + session_seconds()
     with _lock:
         _db.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
         _db.execute("INSERT INTO sessions (token_hash, device, expires_at) VALUES (?, ?, ?)",
-                    (token_digest(token), device_name(user_agent)[:60],
-                     time.time() + session_seconds()))
+                    (token_digest(token), device_name(user_agent)[:60], until))
         _db.commit()
     return token
+
+
+def session_is_forever(token):
+    """Whether a live sign-in belongs to a named machine, so its browser can be handed the same one
+    again before the browser forgets it."""
+    return bool(one("SELECT 1 AS ok FROM sessions WHERE token_hash = ? AND expires_at >= ?",
+                    (token_digest(token), SESSION_NEVER)))
 
 
 def touch_session(token):
@@ -2248,6 +2262,13 @@ def touch_session(token):
         if not row:
             return False
         now = time.time()
+        if row["expires_at"] >= SESSION_NEVER:
+            # One of the shop's own machines: the counter's name is what keeps it in, not a date,
+            # so the shop shortening its countdown for visitors cannot pull this one back.
+            _db.execute("UPDATE sessions SET last_seen = datetime('now','localtime') WHERE id = ?",
+                        (row["id"],))
+            _db.commit()
+            return True
         remaining = row["expires_at"] - now
         if remaining <= 0:
             _db.execute("DELETE FROM sessions WHERE id = ?", (row["id"],))
@@ -2278,9 +2299,11 @@ def signed_in_devices():
     """Every device holding a live sign-in, and the name of the shop computer it was named as —
     blank for a visiting device. The counter's list and the number of places both read this."""
     return [dict(r) for r in q("SELECT s.id, s.device, s.created_at, s.last_seen,"
-                               " c.name AS shop_computer FROM sessions s"
+                               " c.name AS shop_computer,"
+                               " (s.expires_at >= ?) AS stays_forever FROM sessions s"
                                " LEFT JOIN shop_computers c ON c.session_hash = s.token_hash"
-                               " WHERE s.expires_at > ? ORDER BY s.last_seen DESC", (time.time(),))]
+                               " WHERE s.expires_at > ? ORDER BY s.last_seen DESC",
+                               (SESSION_NEVER, time.time()))]
 
 
 # The shop's own machines, named by the counter. A password proves who is typing; it cannot say
@@ -2311,9 +2334,8 @@ def shop_computer_view():
     and never a plate that is still waiting."""
     out = []
     for row in shop_computer_rows():
-        live = bool(row["session_hash"]) and one(
-            "SELECT 1 AS ok FROM sessions WHERE token_hash = ? AND expires_at > ?",
-            (row["session_hash"], time.time()))
+        hold = one("SELECT expires_at FROM sessions WHERE token_hash = ? AND expires_at > ?",
+                   (row["session_hash"], time.time())) if row["session_hash"] else None
         out.append({"id": row["id"], "name": row["name"], "added": row["created_at"],
                     "waiting": not row["key_hash"],
                     "plate_until": dt.datetime.fromtimestamp(row["expires_at"]).strftime(
@@ -2321,7 +2343,8 @@ def shop_computer_view():
                     "named": bool(row["key_hash"]),
                     "seen": (dt.datetime.fromtimestamp(row["last_seen"]).strftime(
                         "%d %b, %H:%M") if row["last_seen"] else "not yet used"),
-                    "signed_in": bool(live)})
+                    "signed_in": bool(hold),
+                    "stays_forever": bool(hold and hold["expires_at"] >= SESSION_NEVER)})
     return out
 
 
@@ -4539,7 +4562,14 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if self.is_shop_computer() and not shop_mac_locks_itself():
             return True
-        return touch_session(self.session_token())
+        token = self.session_token()
+        if not touch_session(token):
+            return False
+        if session_is_forever(token):
+            # No browser keeps a cookie this long, so a machine the counter named is handed the same
+            # sign-in again on every visit. It stays inside the book without ever typing again.
+            self.cookie(token, SHOP_COMPUTER_KEY_AGE)
+        return True
 
     def set_cookie(self, name, value, max_age):
         secure = "; Secure" if getattr(self.server, "is_tls", False) else ""
@@ -4637,8 +4667,10 @@ class Handler(BaseHTTPRequestHandler):
                               self.headers.get("User-Agent", ""), text(payload.get("error"), 200))
                 return code, payload
             seconds = session_seconds()
-            token = open_session(self.headers.get("User-Agent", ""))
-            self.cookie(token, seconds)
+            token = open_session(self.headers.get("User-Agent", ""), forever=bool(computer))
+            # A visiting device is given the shop's countdown; a machine the counter named is given
+            # the long one, and is handed it again on every visit from here.
+            self.cookie(token, SHOP_COMPUTER_KEY_AGE if computer else seconds)
             answer = {"authenticated": True}
             if computer:
                 if machine_key:
@@ -4652,7 +4684,9 @@ class Handler(BaseHTTPRequestHandler):
             if plate_note:
                 answer["shop_computer_note"] = plate_note
             note_security("signed_in", self.client_ip(), self.headers.get("User-Agent", ""),
-                          "signed in for %d day%s" % (session_days(), "" if session_days() == 1 else "s"))
+                          ("stays signed in while it is one of the shop's own" if computer else
+                           "signed in for %d day%s" % (session_days(),
+                                                       "" if session_days() == 1 else "s")))
             return 200, answer
         if path == "/api/logout" and method == "POST":
             token = self.session_token()

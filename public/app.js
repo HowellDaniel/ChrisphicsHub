@@ -771,8 +771,8 @@ function hoursInner(h) {
     (h.limit ? '<p class="hint">The shop’s own Mac is the counter standing at the counter: it is'
       + ' never turned away, and it does not use one of the places meant for visiting devices.'
       + ' Neither does a machine the counter has written down as one of the shop’s own — those'
-      + ' sign in at any hour, and a visiting device waits until one of the places is signed out'
-      + ' here.</p>'
+      + ' sign in at any hour and keep their sign-in, so a visiting device waits until one of the'
+      + ' places is signed out here.</p>'
       : '<p class="hint">New sign-ins are let in whenever the window above says they are.</p>') +
     '</div>';
 }
@@ -1419,7 +1419,8 @@ async function viewShop() {
       (devices.length ? '<button class="btn sm ghost" data-action="sign-out-all-devices">Throw out every other one</button>' : '') +
       '</h3>' +
       '<div class="tablewrap"><table><thead><tr><th>Device</th><th>Since</th><th>Last used</th><th></th></tr></thead><tbody>' +
-      (devices.length ? devices.map((d) => '<tr><td><span class="strong">' + esc(d.device || 'a device') + '</span></td>' +
+      (devices.length ? devices.map((d) => '<tr><td><span class="strong">' + esc(d.device || 'a device') + '</span>' +
+        (d.shop_computer ? ' <span class="tag">named</span>' : '') + '</td>' +
         '<td class="ref">' + fdate((d.created_at || '').slice(0, 10)) + '</td>' +
         '<td class="ref">' + fdate((d.last_seen || '').slice(0, 10)) + '</td>' +
         '<td class="num"><button class="btn sm ghost" data-device-revoke="' + d.id + '">Sign out</button></td></tr>').join('')
@@ -1427,7 +1428,10 @@ async function viewShop() {
           'app and knows the password, it appears here — and can be thrown out from here.</td></tr>') +
       '</tbody></table></div>' +
       '<p class="hint">A device stays signed in for ' + plural(guard ? guard.session_days : 30, 'day') +
-      ' of ordinary use, then asks again. Signing one out here takes effect the next time it asks ' +
+      ' of ordinary use, then asks again' + (devices.some((d) => d.stays_forever)
+        ? '. A machine marked <i>named</i> is not on that countdown: it keeps its sign-in for as'
+          + ' long as it keeps its name, and the Sign out button here is what ends it.' : '') +
+      '. Signing one out here takes effect the next time it asks ' +
       'for something.</p></div>' +
     '<div class="card"><h3>The shop password<span class="spacer"></span></h3><div class="card-b">' +
       '<p class="hint">' + (login.from_environment
@@ -1559,6 +1563,9 @@ function hoursFields(h) {
    here is the only copy that will ever exist, and it goes to the machine by hand. */
 function computerState(row) {
   if (!row.named) return row.waiting ? 'name plate waiting' : 'never used';
+  if (row.signed_in && row.stays_forever) {
+    return '<span class="tag">stays signed in</span> ' + esc(row.seen);
+  }
   return (row.signed_in ? 'inside the book now' : 'signed in when last here') + ', ' + esc(row.seen);
 }
 function shopComputers(list, shopMac) {
@@ -1573,8 +1580,9 @@ function shopComputers(list, shopMac) {
             + ' device for now, and waits for the window the shop wrote.</p>') +
     (shopMac ? '<p class="hint">The iMac at the press is the shop’s machine, not a visitor: write it'
       + ' down here and it can open the book at any hour and takes none of the places kept for'
-      + ' phones. It is still asked for the shop password — what the name plate buys is the hour,'
-      + ' not the ledger.</p>' +
+      + ' phones. It types the shop password once, together with its name plate; after that the'
+      + ' book keeps its sign-in open and does not ask it again — only taking the name off does,'
+      + ' and that signs the machine out at the same moment.</p>' +
       '<form id="nameComputerForm">' +
       '<label class="field wide"><span>What this machine is called</span>' +
       '<input name="name" maxlength="60" placeholder="CHRISPRINT’s iMac" required></label>' +
