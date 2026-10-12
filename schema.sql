@@ -205,6 +205,25 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at  REAL NOT NULL
 );
 
+-- Machines the counter has named as the shop's own — the iMac at the press, the iMac in the
+-- front window. Being named is what the owner's word alone cannot say: a named machine may take
+-- a fresh sign-in at any hour and holds none of the places meant for visiting devices.
+-- The counter writes the name and gets a short name plate, good for one machine and a few days;
+-- the machine that redeems it is given a long key to keep in its own browser, and it is that key,
+-- hashed here, which marks it as one of the shop's own on every sign-in after. Nothing typed is
+-- stored: neither the name plate nor the key, only their digests.
+CREATE TABLE IF NOT EXISTS shop_computers (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT NOT NULL,
+  code_hash    TEXT NOT NULL,
+  key_hash     TEXT NOT NULL DEFAULT '',
+  session_hash TEXT NOT NULL DEFAULT '',
+  created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  expires_at   REAL NOT NULL,
+  used_at      TEXT,
+  last_seen    REAL
+);
+
 -- The book's own memory of being opened: who got in, who was turned away, when the password
 -- changed, when a copy of the records left this Mac. Only the kind of event, the address it
 -- came from and a short note — never a password, never a partial one, never a cookie.

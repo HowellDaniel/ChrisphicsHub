@@ -490,28 +490,59 @@ function emptyState(title, note, action) {
   return '<div class="empty"><b>' + esc(title) + '</b><span>' + esc(note) + '</span>' +
     (action || '') + '</div>';
 }
-function loginScreen(message) {
+/* Written once, in the shop's own words, so nobody types a password into a box that is about to
+   say no. Deliberately without a countdown here: this card is left on a screen while someone walks
+   to the counter, and a number that quietly goes stale is worse than none. */
+function loginHoursNote(h) {
+  if (!h || !h.written) return '';
+  return '<p class="hint hours-note">' + (h.open
+    ? 'New devices sign in ' + esc(h.when_text) + '.'
+    : 'The shop lets new devices sign in ' + esc(h.when_text) + ', and right now it is outside'
+      + ' that window. A device already signed in keeps working.') +
+    ' A machine the counter has named as one of the shop’s own signs in at any hour — tick the'
+    + ' box below and take its name plate to it.</p>';
+}
+function loginScreen(message, hours) {
   S.session = { required: true, authenticated: false };
   paintSession();
   $('#topbar').innerHTML = '';
   $('#view').innerHTML = '<div class="login-card card"><h1>Sign in to the shop book</h1>' +
     '<p class="hint">Enter the shop password to access shared records.</p>' +
     (message ? '<p class="err">' + esc(message) + '</p>' : '') +
+    loginHoursNote(hours) +
     '<form id="loginForm"><label class="field"><span>Shop password</span>' +
     '<input name="password" type="password" autocomplete="current-password" required autofocus></label>' +
+    '<label class="consent wide"><input type="checkbox" id="shopMachine">' +
+    '<span>This is one of the shop’s own machines</span></label>' +
+    '<label class="field wide" id="plateField" hidden><span>Name plate from the counter</span>' +
+    '<input name="shop_code" maxlength="9" autocomplete="off" spellcheck="false"' +
+    ' autocapitalize="characters" placeholder="KR7P-M2XQ"></label>' +
     '<button class="btn primary">Sign in</button><div class="err" id="loginErr"></div></form></div>';
+  $('#shopMachine').addEventListener('change', (event) => {
+    const field = $('#plateField');
+    field.hidden = !event.target.checked;
+    if (field.hidden) $('#loginForm').shop_code.value = '';
+    else field.querySelector('input').focus();
+  });
   $('#loginForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     $('#loginErr').textContent = '';
     try {
+      const plate = form.shop_code.value.trim();
       const response = await fetch('/api/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: form.password.value }),
+        body: JSON.stringify(plate ? { password: form.password.value, shop_code: plate }
+                                   : { password: form.password.value }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || 'Sign-in failed');
+      // The plate is the counter's business, so a wrong one is said out loud rather than
+      // swallowed by the reload that follows a sign-in that worked anyway.
+      if (body.shop_computer_note) {
+        try { sessionStorage.setItem('chrisphics-note', body.shop_computer_note); } catch (e) {}
+      }
       location.reload();
     } catch (error) {
       $('#loginErr').textContent = error.message || 'Could not sign in. Reconnect to the shop server and try again.';
@@ -708,6 +739,84 @@ function refreshQuiet() {
     .catch(() => window.scrollTo(0, y));
 }
 
+/* --------------------------------------------------------------- shop hours
+   The countdown is measured in the shop, not on the phone reading it: the server hands over the
+   seconds left on its own clock and this only subtracts what has gone by since it was read. A
+   device whose clock is two hours off therefore still shows the right number — and still cannot
+   sign in early, because the server decides that on its own clock too. */
+let hoursTick = null;
+let hoursRead = 0;
+let hoursRetryAt = 0;
+
+function hoursCard(h) {
+  if (!h || (!h.written && !h.limit)) return '';
+  S.hours = h;
+  hoursRead = Date.now();
+  return '<div class="card hours' + (h.open ? '' : ' shut') + '" id="hoursCard">' + hoursInner(h) + '</div>';
+}
+function hoursInner(h) {
+  const own = h.own_devices || 0;
+  const places = (h.limit
+    ? plural(h.devices, 'device') + ' signed in of ' + plural(h.limit, 'place') +
+      ' allowed' + (h.device_names && h.device_names.length ? ' — ' + esc(h.device_names.join(', ')) : '')
+    : plural(h.devices || 0, 'device') + ' signed in · the shop caps nobody') +
+    (own ? ' · ' + plural(own, 'machine') + ' named here as the shop’s own' +
+      (h.own_computers && h.own_computers.length
+        ? ' (' + esc(h.own_computers.join(', ')) + ')' : '') : '');
+  return '<h3><span class="pill ' + (h.open ? 'in' : 'out') + '">' +
+    esc(h.open ? (h.written ? 'Open now' : 'Always open') : 'Closed') + '</span>' +
+    '<span>' + esc(h.when_text) + '</span><span class="spacer"></span>' +
+    '<b class="hours-count" id="hoursCount">' + esc(hoursWords(h, h.seconds_to_change)) + '</b></h3>' +
+    '<div class="card-b"><p class="hint">' + places + '</p>' +
+    (h.limit ? '<p class="hint">The shop’s own Mac is the counter standing at the counter: it is'
+      + ' never turned away, and it does not use one of the places meant for visiting devices.'
+      + ' Neither does a machine the counter has written down as one of the shop’s own — those'
+      + ' sign in at any hour, and a visiting device waits until one of the places is signed out'
+      + ' here.</p>'
+      : '<p class="hint">New sign-ins are let in whenever the window above says they are.</p>') +
+    '</div>';
+}
+function hoursWords(h, seconds) {
+  if (seconds === null || seconds === undefined) return h.open ? 'open all the time' : 'shut';
+  return (h.open ? 'closes in ' : 'opens in ') + clockCountdown(seconds);
+}
+function clockCountdown(total) {
+  const secs = Math.max(0, Math.floor(total));
+  /* A wait of days is not a stopwatch: nobody reads the seconds off a shop that opens Monday. */
+  if (secs >= 86400) {
+    return Math.floor(secs / 86400) + 'd ' + String(Math.floor(secs % 86400 / 3600)).padStart(2, '0')
+      + 'h ' + String(Math.floor(secs % 3600 / 60)).padStart(2, '0') + 'm';
+  }
+  const parts = [Math.floor(secs / 3600), Math.floor(secs % 3600 / 60), secs % 60];
+  let out = parts[0] ? parts[0] + 'h ' : '';
+  out += String(parts[1]).padStart(out ? 2 : 1, '0') + 'm ' + String(parts[2]).padStart(2, '0') + 's';
+  return out;
+}
+function watchShopHours() {
+  if (hoursTick) return;
+  hoursTick = setInterval(() => {
+    const el = $('#hoursCount');
+    const h = S.hours;
+    if (!el || !h || h.seconds_to_change === null || h.seconds_to_change === undefined) return;
+    const left = h.seconds_to_change - Math.floor((Date.now() - hoursRead) / 1000);
+    if (left > 0) { el.textContent = hoursWords(h, left); return; }
+    /* The window has turned over. Ask the shop rather than guess, and never more than every few
+       seconds in case the answer does not come back. */
+    if (Date.now() - hoursRetryAt < 5000) return;
+    hoursRetryAt = Date.now();
+    api('/api/session').then((s) => {
+      if (!s.hours) return;
+      S.hours = Object.assign({ devices: h.devices, limit: h.limit, device_names: h.device_names }, s.hours);
+      hoursRead = Date.now();
+      const card = $('#hoursCard');
+      if (card) {
+        card.innerHTML = hoursInner(S.hours);
+        card.classList.toggle('shut', !S.hours.open);
+      }
+    }).catch(() => {});
+  }, 1000);
+}
+
 /* --------------------------------------------------------------- dashboard */
 async function viewDashboard() {
   const d = await api('/api/dashboard');
@@ -715,6 +824,7 @@ async function viewDashboard() {
     sent_total: 0, clients: [], number: '' };
   try { momo = await loadMomo(); } catch (e) { /* the dashboard still draws without the notices */ }
   watchMomoPanel();
+  watchShopHours();
   const k = d.kpi;
   const in15 = d.trend.reduce((a, t) => a + t.collected, 0);
   const out15 = d.trend.reduce((a, t) => a + t.spent, 0);
@@ -732,6 +842,7 @@ async function viewDashboard() {
   topbar('Dashboard', esc(new Date().toDateString()), filtersBar('dashboard', []));
   $('#view').innerHTML = '<p class="hint editable-hint">Anything underlined you can click: move a due date, change a status, ' +
     'reprice an enquiry — it saves as soon as you press Enter.</p>' +
+    hoursCard(d.hours) +
     '<div class="grid kpis">' +
     stat('Collected today', money(k.collected_today), k.collected_today > 0 ? 'payments entered' : 'nothing entered yet', 'amt good',
       '#/accounts', 'Click to see money in and out') +
@@ -1411,6 +1522,66 @@ function copiesCard(copy, shopMac) {
     '</div></div>';
 }
 
+/* The shop's own hours, in the shop's own words. Monday is 0 because that is how the book counts
+   them, and the line under the boxes is read back from the server after every save — so what the
+   counter sees is what the book now enforces, not what they meant to type. */
+const SHOP_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function hoursFields(h) {
+  const hours = h || {};
+  const days = hours.days || [0, 1, 2, 3, 4, 5, 6];
+  const boxes = SHOP_DAYS.map((name, i) =>
+    '<label class="day"><input type="checkbox" data-day value="' + i + '"' +
+    (days.indexOf(i) >= 0 ? ' checked' : '') + '><span>' + name + '</span></label>').join('');
+  const own = hours.own_devices || 0;
+  const now = hours.written
+    ? (hours.open ? 'Open now' : 'Closed') + ' — ' + esc(hours.when_text) +
+      (hours.limit ? ', and ' + plural(hours.devices || 0, 'device') + ' signed in of '
+        + plural(hours.limit, 'place') + ' allowed' : '') +
+      (own ? ', plus ' + plural(own, 'machine') + ' named here as the shop’s own' : '')
+    : 'Nothing written down yet: new devices get in at any hour, and as many as want to';
+  return '<fieldset class="hours-fields"><legend>When devices may sign in</legend>' +
+    '<label class="field wide"><span>Days a new device is let in</span>' +
+    '<div class="days">' + boxes + '</div></label>' +
+    '<label class="field"><span>Opens (24-hour, like 08:00)</span><input name="open_from"' +
+    ' type="time" value="' + esc(hours.from || '') + '"></label>' +
+    '<label class="field"><span>Closes</span><input name="open_to" type="time"' +
+    ' value="' + esc(hours.to || '') + '"></label>' +
+    '<label class="field"><span>Devices signed in at one time</span><input name="device_limit"' +
+    ' type="number" min="0" max="20" step="1" value="' + (hours.limit || 0) + '"></label>' +
+    '<p class="hint">Both times together or neither — leave them out and the open days run all' +
+    ' day. 0 devices caps nobody. Outside the window a new sign-in is turned away, while a device' +
+    ' already inside keeps working.</p>' +
+    '<p class="hint hours-now">' + now + '</p></fieldset>';
+}
+
+/* The machines the counter has written down as the shop's own. A name plate is handed out once,
+   on this screen only, and the book keeps nothing but its digest afterwards — so the number shown
+   here is the only copy that will ever exist, and it goes to the machine by hand. */
+function computerState(row) {
+  if (!row.named) return row.waiting ? 'name plate waiting' : 'never used';
+  return (row.signed_in ? 'inside the book now' : 'signed in when last here') + ', ' + esc(row.seen);
+}
+function shopComputers(list, shopMac) {
+  const rows = (list || []).map((row) =>
+    '<tr><td><b>' + esc(row.name) + '</b></td><td class="ref">' + computerState(row) + '</td>' +
+    (shopMac ? '<td class="ref"><button class="btn sm ghost" data-action="unname-computer"' +
+      ' data-id="' + row.id + '">Take the name off</button></td>' : '') +
+    '</tr>').join('');
+  return '<h4>The shop’s own machines</h4>' +
+    (rows ? '<div class="tablewrap"><table><tbody>' + rows + '</tbody></table></div>'
+          : '<p class="hint">None written down. Anything that signs in over the Wi-Fi is a visiting'
+            + ' device for now, and waits for the window the shop wrote.</p>') +
+    (shopMac ? '<p class="hint">The iMac at the press is the shop’s machine, not a visitor: write it'
+      + ' down here and it can open the book at any hour and takes none of the places kept for'
+      + ' phones. It is still asked for the shop password — what the name plate buys is the hour,'
+      + ' not the ledger.</p>' +
+      '<form id="nameComputerForm">' +
+      '<label class="field wide"><span>What this machine is called</span>' +
+      '<input name="name" maxlength="60" placeholder="CHRISPRINT’s iMac" required></label>' +
+      '<div class="err" id="nameComputerErr"></div>' +
+      '<button class="btn">Write it down</button></form><div id="plateOut"></div>' : '');
+}
+
 function securityCard(guard, shopMac) {
   if (!guard) {
     return '<div class="card"><h3>Security of this book</h3><div class="card-b">' +
@@ -1443,6 +1614,7 @@ function securityCard(guard, shopMac) {
       ? '<form id="securityForm" class="stack">' +
         '<label class="field"><span>Days a device stays signed in</span><input name="session_days"' +
         ' type="number" min="1" max="90" step="1" value="' + guard.session_days + '"></label>' +
+        hoursFields(guard.hours) +
         '<label class="consent wide"><input type="checkbox" name="shop_mac_signin"' +
         (guard.shop_mac_signin ? ' checked' : '') + '><span>Ask this Mac for the password too' +
         ' (its own Settings windows then save only after the page has signed in)</span></label>' +
@@ -1450,6 +1622,7 @@ function securityCard(guard, shopMac) {
         '<button class="btn primary">Save the security</button></form>'
       : '<p class="hint">How long a device stays signed in, and whether this Mac is asked as well,' +
         ' are settled on the shop’s own computer.</p>') +
+    shopComputers(guard.shop_computers, shopMac) +
     '<h4>What the book remembers of being opened</h4>' +
     (trail ? '<div class="tablewrap"><table><thead><tr><th>When</th><th>What</th><th>From</th>' +
       '<th>Note</th></tr></thead><tbody>' + trail + '</tbody></table></div>'
@@ -1479,6 +1652,34 @@ function wireShopForms() {
       } catch (err) { document.getElementById('copiesErr').textContent = err.message; }
     });
   }
+  const named = document.getElementById('nameComputerForm');
+  if (named) {
+    named.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('nameComputerErr').textContent = '';
+      try {
+        const answer = await api('/api/shop-computers', { method: 'POST',
+          body: JSON.stringify({ name: f.name.value }) });
+        f.reset();
+        await render();
+        // The plate exists in this sentence and in no other place: the book keeps only its
+        // digest, so the counter writes it down or walks over with it. Rendered after the
+        // refresh, or the refresh would erase it.
+        const out = document.getElementById('plateOut');
+        if (out) {
+          out.innerHTML =
+            '<p class="hint">Write this down and take it to <b>' + esc(answer.name) + '</b>. On' +
+            ' that machine, tick “This is one of the shop’s own machines” on the sign-in screen' +
+            ' and type these eight letters beside the shop password.</p>' +
+            '<p class="plate">' + esc(answer.plate_words) + '</p>' +
+            '<p class="hint">Good for ' + plural(answer.plate_days, 'day') + ' and for one' +
+            ' machine only. Once that machine has used it this number is worth nothing, and if it' +
+            ' is lost before then, write the machine down again.</p>';
+        }
+      } catch (err) { document.getElementById('nameComputerErr').textContent = err.message; }
+    });
+  }
   const security = document.getElementById('securityForm');
   if (security) {
     security.addEventListener('submit', async (e) => {
@@ -1486,8 +1687,14 @@ function wireShopForms() {
       const f = e.target;
       document.getElementById('securityErr').textContent = '';
       try {
+        const days = Array.prototype.slice.call(f.querySelectorAll('[data-day]:checked'))
+          .map((box) => box.value).join(',');
         await api('/api/security', { method: 'PUT', body: JSON.stringify({
           session_days: f.session_days.value,
+          open_days: days,
+          open_from: f.open_from.value,
+          open_to: f.open_to.value,
+          device_limit: f.device_limit.value,
           shop_mac_signin: !!f.shop_mac_signin.checked,
         }) });
         toast('Sign-in rules saved', 'good');
@@ -2951,6 +3158,13 @@ const ACTIONS = {
       await render();
     } catch (err) { fail(err); }
   },
+  async 'unname-computer'(el) {
+    try {
+      const answer = await api('/api/shop-computers/' + el.dataset.id, { method: 'DELETE' });
+      toast(answer.unnamed + ' is a visiting machine again, and has been signed out', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
   async 'sign-out'() {
     try {
       await api('/api/logout', { method: 'POST', body: '{}' });
@@ -3447,12 +3661,18 @@ window.chrisphics = {
     const session = await api('/api/session');
     S.session = session;
     paintSession();
-    if (session.required && !session.authenticated) { loginScreen(); return; }
+    if (session.required && !session.authenticated) { loginScreen('', session.hours); return; }
     await boot();
     await refreshChrome();
     if (navigator.onLine) await syncOfflineQueue();
     if (!location.hash) location.hash = '#/dashboard';
     await render();
+    let remembered = '';
+    try {
+      remembered = sessionStorage.getItem('chrisphics-note') || '';
+      sessionStorage.removeItem('chrisphics-note');
+    } catch (e) { /* a private window keeps no notes */ }
+    if (remembered) toast(remembered, 'bad');
     launchShortcut();
   } catch (err) {
     if (err.status === 401) loginScreen(err.message);

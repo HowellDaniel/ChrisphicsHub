@@ -436,7 +436,8 @@ def dashboard():
 
     return {"kpi": kpi, "by_status": by_status, "trend": trend, "overdue": overdue,
             "recent": recent, "debtors": debtors, "mix": mix, "spend": spend,
-            "quotes": quotes, "follow_ups": follow_ups, "shop": SHOP, "today": t}
+            "quotes": quotes, "follow_ups": follow_ups, "shop": SHOP, "today": t,
+            "hours": shop_hours(with_devices=True)}
 
 
 # ------------------------------------------------------------------------- jobs
@@ -1760,6 +1761,230 @@ def session_seconds():
     return session_days() * 24 * 60 * 60
 
 
+# ---------------------------------------------------------------- the shop's own hours
+#
+# Written into the book on the counter's word, 2026-10-12: three devices at a time, Monday to
+# Saturday, eight in the morning till seven at night. Four rows of app_state rather than a table,
+# because these are settings and not records. The important half of the design is what an absent
+# key means: unset is open around the clock with no cap, so a hosted book and any shop that has
+# never answered these questions keeps behaving exactly as it always has. A value that cannot be
+# read is ignored for the same reason — a shop must never lose its counter because of a typo.
+
+SHOP_DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+DEVICE_LIMIT_MAX = 20
+
+
+def open_days_list(raw=None):
+    """Which weekdays a new sign-in is allowed on, Python numbering: Monday is 0. Accepts
+    "0-5" and "0,1,2,3,4,5"; an empty or unreadable setting means every day. Passing the words in
+    directly is how the settings pane checks what it is about to save."""
+    if raw is None:
+        raw = state_value("open_days", "")
+    raw = (raw or "").replace(" ", "")
+    if not raw:
+        return None
+    days = set()
+    for part in raw.split(","):
+        if not part:
+            continue
+        bounds = part.split("-")
+        if len(bounds) == 1:
+            if bounds[0].isdigit() and 0 <= int(bounds[0]) <= 6:
+                days.add(int(bounds[0]))
+        elif len(bounds) == 2 and all(b.isdigit() for b in bounds):
+            low, high = sorted((int(bounds[0]), int(bounds[1])))
+            days.update(n for n in range(min(low, 6), min(high, 6) + 1))
+    return sorted(days) or None
+
+
+def open_minutes_pair():
+    """(opening, closing) as minutes past midnight, or None when no window is written down."""
+    low = _clock_minutes(state_value("open_from", ""))
+    high = _clock_minutes(state_value("open_to", ""))
+    if low is None or high is None or high <= low:
+        return None
+    return low, high
+
+
+def _clock_minutes(value):
+    """'08:00' is 480 minutes after midnight. Anything else earns nothing."""
+    match = re.match(r"^(\d{1,2}):(\d{2})$", (value or "").strip())
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
+def pretty_clock(minutes):
+    """How the counter says the time, not how the book stores it."""
+    if minutes is None:
+        return ""
+    hour, minute = divmod(int(minutes), 60)
+    if minute == 0 and hour == 0:
+        return "midnight"
+    if minute == 0 and hour == 12:
+        return "noon"
+    return "%d:%02d%s" % (hour % 12 or 12, minute, "am" if hour < 12 else "pm")
+
+
+def days_phrase(days):
+    """The open days in the fewest honest words: a run of three or more reads as a range, a
+    shorter one is named out, because 'Monday to Friday' is what a person means by it."""
+    if not days or len(days) == 7:
+        return "every day"
+    runs = []
+    for number in sorted(set(days)):
+        if runs and number == runs[-1][1] + 1:
+            runs[-1][1] = number
+        else:
+            runs.append([number, number])
+    parts = []
+    for start, end in runs:
+        if end - start >= 2:
+            parts.append("%s to %s" % (SHOP_DAY_NAMES[start], SHOP_DAY_NAMES[end]))
+        else:
+            parts.extend(SHOP_DAY_NAMES[n] for n in range(start, end + 1))
+    return ", ".join(parts)
+
+
+def device_limit():
+    """How many devices may hold a live sign-in at once. Blank, unreadable or 0 means the shop
+    caps nobody — the same fail-open reasoning as the hours above."""
+    try:
+        wanted = int((state_value("device_limit", "") or "0").strip())
+    except ValueError:
+        return 0
+    return max(0, min(DEVICE_LIMIT_MAX, wanted))
+
+
+def _opening_windows(days, window, first_day=None, horizon=8):
+    """Every open stretch from that day forward, earliest first, as (weekday, begin, end). A day
+    with no time-of-day window counts as the whole 24 hours, which is what a shop means when it
+    writes down the days and leaves the hours out."""
+    out = []
+    day = first_day or dt.date.today()
+    for _ in range(horizon + 1):
+        if not days or day.weekday() in days:
+            if window:
+                begin = dt.datetime.combine(day, dt.time(*divmod(window[0], 60)))
+                end = dt.datetime.combine(day, dt.time(*divmod(window[1], 60)))
+            else:
+                begin = dt.datetime.combine(day, dt.time(0, 0))
+                end = dt.datetime.combine(day, dt.time(23, 59, 59))
+            out.append((day.weekday(), begin, end))
+        day = day + dt.timedelta(days=1)
+    return out
+
+
+def shop_hours(with_devices=False, now=None):
+    """The shop's window as the book describes it, timed on this Mac's clock and re-read on every
+    call so a change lands without a restart. The countdown travels with it because a phone whose
+    own clock is wrong must not be able to open the book early, or make the dashboard say it is
+    shut at noon. `now` is here so a check can prove a Sunday at 3 in the morning on a Tuesday."""
+    days = open_days_list()
+    window = open_minutes_pair()
+    written = bool((state_value("open_days", "") or "").strip()
+                   or (state_value("open_from", "") or "").strip()
+                   or (state_value("open_to", "") or "").strip())
+    now = now or dt.datetime.now()
+    open_now, seconds, changes, change_at = True, None, "", None
+    if written:
+        stretches = _opening_windows(days, window, now.date())
+        current = next(((b, e) for _, b, e in stretches if b <= now < e), None)
+        if current:
+            seconds = int((current[1] - now).total_seconds())
+            changes, change_at = "close", current[1]
+        else:
+            ahead = [b for _, b, _ in stretches if b > now]
+            open_now = False
+            if ahead:
+                seconds = int((ahead[0] - now).total_seconds())
+                changes, change_at = "open", ahead[0]
+    low, high = window or (None, None)
+    if open_now:
+        state_text = "Open now" if written else "Always open"
+    elif change_at:
+        state_text = "Closed · opens %s at %s" % (change_at.strftime("%A"), pretty_clock(
+            change_at.hour * 60 + change_at.minute))
+    else:
+        state_text = "Closed"
+    if not written:
+        when_text = "around the clock"
+    elif window:
+        when_text = "%s, %s to %s" % (days_phrase(days), pretty_clock(low), pretty_clock(high))
+    else:
+        when_text = days_phrase(days)
+    out = {
+        "written": written,
+        "open": open_now,
+        "all_day": window is None,
+        "days": days or list(range(7)),
+        "days_text": days_phrase(days),
+        "from": "%02d:%02d" % divmod(low, 60) if low is not None else "",
+        "to": "%02d:%02d" % divmod(high, 60) if high is not None else "",
+        "from_text": pretty_clock(low),
+        "to_text": pretty_clock(high),
+        "seconds_to_change": seconds,
+        "changes": changes,
+        "change_at": change_at.strftime("%H:%M") if change_at else "",
+        "when_text": when_text,
+        "state_text": state_text,
+        "limit": device_limit(),
+    }
+    if with_devices:
+        live = signed_in_devices()
+        own = [row["shop_computer"] for row in live if row["shop_computer"]]
+        visiting = [row for row in live if not row["shop_computer"]]
+        # The shop's own machines are not one of the places: two iMacs the counter has named do
+        # not leave the shop with one place for the rest of the world.
+        out["devices"] = len(visiting)
+        out["device_names"] = [row["device"] for row in visiting][:max(out["limit"], 1)]
+        out["own_computers"] = own
+        out["own_devices"] = len(own)
+    return out
+
+
+def sign_in_refusal(is_shop_computer, already_signed_in):
+    """Why this fresh sign-in cannot be let in right now, as (code, message), or None to let it
+    through. Called only once the password has proved itself, so a stranger learns nothing about
+    these rules. The shop's own Mac is the counter standing at the counter, and a machine the
+    counter has named is a second of those the shop keeps on the Wi-Fi: neither is ever turned
+    away for the hour, and neither uses one of the places meant for visiting devices."""
+    if is_shop_computer or already_signed_in:
+        return None
+    hours = shop_hours(with_devices=True)
+    if not hours["open"]:
+        back = hours["when_text"]
+        return 403, {"error": "The shop lets new devices sign in %s. It is outside that window "
+                              "now (%s)." % (back, hours["state_text"]),
+                     "hours": public_hours(hours)}
+    limit = hours["limit"]
+    if limit and hours["devices"] >= limit:
+        taken = ", ".join(hours["device_names"]) or "another device"
+        return 403, {"error": "All %d places are taken (%s). Sign one out under Shop & devices,"
+                              " then this one can come in." % (limit, taken),
+                     "hours": public_hours(hours)}
+    return None
+
+
+def public_hours(hours, with_occupancy=False):
+    """The part of the window a device may see. Before sign-in that is the timetable alone — who
+    is currently inside the book stays private to the counter. A device that has already signed in
+    gets the occupancy too, so the dashboard timer can re-read it without a second call."""
+    out = {k: hours[k] for k in ("written", "open", "all_day", "days_text", "from_text", "to_text",
+                                 "seconds_to_change", "changes", "change_at", "when_text",
+                                 "state_text") if k in hours}
+    if with_occupancy:
+        out["limit"] = hours.get("limit", 0)
+        out["devices"] = hours.get("devices", 0)
+        out["device_names"] = hours.get("device_names", [])
+        out["own_devices"] = hours.get("own_devices", 0)
+        out["own_computers"] = hours.get("own_computers", [])
+    return out
+
+
 # The words people pick when they are asked for a password and want it over with. Not a
 # security promise — a shop password guards the whole ledger, so these are refused outright.
 WORN_OUT_PASSWORDS = frozenset("""
@@ -1890,6 +2115,8 @@ def security_view(trail_limit=40):
             "allowed_fails": LOGIN_ALLOWED_FAILS,
             "calls_per_minute": API_CALLS_PER_MINUTE,
             "devices": len(signed_in_devices()),
+            "shop_computers": shop_computer_view(),
+            "hours": shop_hours(with_devices=True),
             "trail": security_trail(trail_limit)}
 
 
@@ -1917,7 +2144,56 @@ def set_security_settings(patch, where=""):
         changed.append("shop_mac_signin")
         note_security("shop_mac_signin", where, detail="the shop's own Mac must now sign in" if want
                       else "the shop's own Mac is let through on its own")
+    changed += _set_hours_settings(patch, where)
     return security_view()
+
+
+def _set_hours_settings(patch, where=""):
+    """The opening window and the number of devices that may hold a sign-in at once. A field left
+    out of the request is left alone; an empty one is written out of the book, which puts that
+    rule back to its unset meaning — every day, all day, or nobody capped."""
+    changed = []
+    if "open_days" in patch:
+        raw = text(patch["open_days"], 40)
+        if raw and not open_days_list(raw):
+            raise ValueError("The days have to be weekday numbers, Monday being 0 — 0-5 for"
+                             " Monday to Saturday, or leave it empty for every day")
+        set_state("open_days", raw)
+        changed.append("open_days")
+    if "open_from" in patch or "open_to" in patch:
+        low = text(patch.get("open_from", state_value("open_from", "")), 5)
+        high = text(patch.get("open_to", state_value("open_to", "")), 5)
+        for value, which in ((low, "opening"), (high, "closing")):
+            if value and _clock_minutes(value) is None:
+                raise ValueError("The %s time wants hours and minutes on the 24-hour clock,"
+                                 " like 08:00 or 19:30." % which)
+        if bool(low) != bool(high):
+            raise ValueError("Write both times or neither — a shop that opens at 8 needs to say"
+                             " when it closes")
+        if low and high and _clock_minutes(low) >= _clock_minutes(high):
+            raise ValueError("The closing time has to come after the opening one")
+        set_state("open_from", low)
+        set_state("open_to", high)
+        changed += ["open_from", "open_to"]
+    if "device_limit" in patch:
+        raw = text(patch["device_limit"], 8)
+        try:
+            wanted = int(raw) if raw else 0
+        except ValueError:
+            raise ValueError("How many devices at once has to be a whole number — 3, or 0 to"
+                             " cap nobody")
+        if not 0 <= wanted <= DEVICE_LIMIT_MAX:
+            raise ValueError("Devices at one time can be 0 (nobody capped) through %d"
+                             % DEVICE_LIMIT_MAX)
+        set_state("device_limit", wanted)
+        changed.append("device_limit")
+    if changed:
+        hours = shop_hours(with_devices=True)
+        note_security("hours_changed", where,
+                      detail="%s · new window: %s · %d device%s signed in now"
+                             % (", ".join(changed), hours["when_text"], hours["devices"],
+                                "" if hours["devices"] == 1 else "s"))
+    return changed
 
 
 def token_digest(token):
@@ -1999,8 +2275,142 @@ def close_session(token):
 
 
 def signed_in_devices():
-    return [dict(r) for r in q("SELECT id, device, created_at, last_seen FROM sessions"
-                               " WHERE expires_at > ? ORDER BY last_seen DESC", (time.time(),))]
+    """Every device holding a live sign-in, and the name of the shop computer it was named as —
+    blank for a visiting device. The counter's list and the number of places both read this."""
+    return [dict(r) for r in q("SELECT s.id, s.device, s.created_at, s.last_seen,"
+                               " c.name AS shop_computer FROM sessions s"
+                               " LEFT JOIN shop_computers c ON c.session_hash = s.token_hash"
+                               " WHERE s.expires_at > ? ORDER BY s.last_seen DESC", (time.time(),))]
+
+
+# The shop's own machines, named by the counter. A password proves who is typing; it cannot say
+# which machine they are standing at, and the shop's own iMacs need the book before opening time
+# and after it. So the counter writes a machine's name down and is handed a short name plate,
+# good for one machine and a few days. The machine that redeems the plate alongside the shop's own
+# password is given a long key to keep in its own browser, and that key — never the plate, never
+# the key, only their digests — is what marks it as one of the shop's own from then on.
+SHOP_COMPUTER_PLATE_DAYS = 3
+SHOP_COMPUTER_PLATE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no O or 0, no I or 1
+SHOP_COMPUTER_KEY_AGE = 10 * 365 * 24 * 3600   # the key is meant to outlive the shop's patience
+
+
+def plate_words(code):
+    """A name plate as it should be read out across the counter: KR7P-M2XQ."""
+    raw = text(code, 24).upper()
+    return "-".join(raw[i:i + 4] for i in range(0, len(raw), 4))
+
+
+def shop_computer_rows():
+    return [dict(r) for r in q("SELECT id, name, code_hash, key_hash, session_hash, created_at,"
+                               " expires_at, used_at, last_seen FROM shop_computers"
+                               " ORDER BY used_at IS NULL DESC, id DESC")]
+
+
+def shop_computer_view():
+    """What the counter is shown about the machines it has named: names and dates, never a digest
+    and never a plate that is still waiting."""
+    out = []
+    for row in shop_computer_rows():
+        live = bool(row["session_hash"]) and one(
+            "SELECT 1 AS ok FROM sessions WHERE token_hash = ? AND expires_at > ?",
+            (row["session_hash"], time.time()))
+        out.append({"id": row["id"], "name": row["name"], "added": row["created_at"],
+                    "waiting": not row["key_hash"],
+                    "plate_until": dt.datetime.fromtimestamp(row["expires_at"]).strftime(
+                        "%A %d %b, %H:%M"),
+                    "named": bool(row["key_hash"]),
+                    "seen": (dt.datetime.fromtimestamp(row["last_seen"]).strftime(
+                        "%d %b, %H:%M") if row["last_seen"] else "not yet used"),
+                    "signed_in": bool(live)})
+    return out
+
+
+def name_shop_computer(name, where=""):
+    """Write a machine down as one of the shop's own and hand out its name plate. The plate is in
+    the answer and nowhere else in the book, so it can only be read off this screen."""
+    clean = text(name, 60).strip()
+    if not clean:
+        raise ValueError("Give the machine a name you will recognise, like CHRISPRINT's iMac")
+    plate = "".join(secrets.choice(SHOP_COMPUTER_PLATE_ALPHABET) for _ in range(8))
+    with _lock:
+        _db.execute("INSERT INTO shop_computers (name, code_hash, expires_at) VALUES (?, ?, ?)",
+                    (clean, token_digest(plate),
+                     time.time() + SHOP_COMPUTER_PLATE_DAYS * 86400))
+        number = _db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        _db.commit()
+    note_security("computer_named", where, detail="%s was written down as one of the shop's own"
+                                                 % clean[:60])
+    return {"id": number, "name": clean, "plate": plate, "plate_words": plate_words(plate),
+            "plate_days": SHOP_COMPUTER_PLATE_DAYS, "computers": shop_computer_view()}
+
+
+def claim_shop_computer(code):
+    """The plate a machine typed at the door, matched to a name still waiting for it.
+    Returns (row, key) when it matches, or (None, why not) — the why is only ever said to someone
+    who has already proved the shop's password."""
+    plate = re.sub(r"[^A-Za-z0-9]", "", text(code, 24)).upper()
+    if not plate:
+        return None, ""
+    row = one("SELECT id, name, key_hash, expires_at FROM shop_computers WHERE code_hash = ?",
+              (token_digest(plate),))
+    if not row:
+        return None, "No name plate like that was written out here."
+    if row["key_hash"]:
+        return None, ("%s has already been taken up by a machine. If this one lost its place — a"
+                      " cleared browser, a rebuild — ask the counter to name it again."
+                      % row["name"])
+    if row["expires_at"] < time.time():
+        return None, ("That name plate went out of date after %d days. Ask the counter to write"
+                      " out a fresh one for %s." % (SHOP_COMPUTER_PLATE_DAYS, row["name"]))
+    key = secrets.token_urlsafe(32)
+    with _lock:
+        _db.execute("UPDATE shop_computers SET key_hash = ?,"
+                    " used_at = datetime('now','localtime'), last_seen = ? WHERE id = ?",
+                    (token_digest(key), time.time(), row["id"]))
+        _db.commit()
+    return {"id": row["id"], "name": row["name"]}, key
+
+
+def computer_by_key(key):
+    """The named machine this browser belongs to, by the key it keeps, or None."""
+    if not key:
+        return None
+    row = one("SELECT id, name FROM shop_computers WHERE key_hash = ?", (token_digest(key),))
+    return dict(row) if row else None
+
+
+def keep_shop_computer(number, token):
+    """A named machine that just signed in: remember which session is its own, so the counter can
+    un-name the machine and throw that session out with the name. The machine's earlier session
+    goes first — it is the same browser signing in again, not a second device taking a place."""
+    with _lock:
+        before = one("SELECT session_hash FROM shop_computers WHERE id = ?", (number,))
+        if before and before["session_hash"]:
+            _db.execute("DELETE FROM sessions WHERE token_hash = ?", (before["session_hash"],))
+        _db.execute("UPDATE shop_computers SET last_seen = ?, session_hash = ? WHERE id = ?",
+                    (time.time(), token_digest(token), number))
+        _db.commit()
+
+
+def revoke_shop_computer(number, where=""):
+    """Take a machine's name off it. Its session goes with the name, so a machine that was let in
+    at midnight cannot stay inside the book on a name the counter has already withdrawn."""
+    try:
+        wanted = int(number)
+    except (TypeError, ValueError):
+        raise ValueError("The machine is named by its number")
+    row = one("SELECT id, name, session_hash FROM shop_computers WHERE id = ?", (wanted,))
+    if not row:
+        raise LookupError("No machine by that number is named here")
+    with _lock:
+        if row["session_hash"]:
+            _db.execute("DELETE FROM sessions WHERE token_hash = ?", (row["session_hash"],))
+        _db.execute("DELETE FROM shop_computers WHERE id = ?", (wanted,))
+        _db.commit()
+    note_security("computer_revoked", where, detail="%s is not one of the shop's own machines"
+                                                   " any more, and was signed out" % row["name"][:60])
+    return {"unnamed": row["name"], "computers": shop_computer_view()}
+
 
 
 def sign_out_every_device(keep_token=""):
@@ -3938,7 +4348,10 @@ class Handler(BaseHTTPRequestHandler):
             # silently does nothing; a hosted name gets it for six months.
             self.send_header("Strict-Transport-Security", "max-age=15552000")
         for k, v in (extra or {}).items():
-            self.send_header(k, v)
+            # A header may be more than one line — two cookies go down in one answer, and a
+            # browser reads each Set-Cookie on its own.
+            for line in (v if isinstance(v, list) else [v]):
+                self.send_header(k, line)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(data)
@@ -4098,12 +4511,12 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def session_token(self):
-        cookies = self.headers.get("Cookie", "")
-        for item in cookies.split(";"):
-            key, _, value = item.strip().partition("=")
-            if key == "crispprint_session":
-                return value
-        return ""
+        return self.cookie_value("crispprint_session")
+
+    def named_computer(self):
+        """The shop computer this browser was named as, if it carries the key the counter's name
+        plate left behind. Nothing here is trusted without the shop's own password as well."""
+        return computer_by_key(self.cookie_value("crispprint_machine"))
 
     def client_ip(self):
         if THROUGH_PROXY:
@@ -4128,11 +4541,31 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return touch_session(self.session_token())
 
-    def cookie(self, token, max_age):
+    def set_cookie(self, name, value, max_age):
         secure = "; Secure" if getattr(self.server, "is_tls", False) else ""
-        self.response_headers["Set-Cookie"] = (
-            "crispprint_session=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s"
-            % (token, max_age, secure))
+        held = self.response_headers.get("Set-Cookie") or []
+        if isinstance(held, str):
+            held = [held]
+        held.append("%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s"
+                    % (name, value, max_age, secure))
+        self.response_headers["Set-Cookie"] = held
+
+    def cookie(self, token, max_age):
+        self.set_cookie("crispprint_session", token, max_age)
+
+    def machine_cookie(self, key):
+        """The long key saying this browser is one of the machines the counter named. It is not a
+        sign-in and opens nothing by itself — it only says which device may ask for a fresh
+        sign-in at any hour and without using one of the visiting places. It stays where it is
+        when a device signs out, since it describes the machine, not the visit."""
+        self.set_cookie("crispprint_machine", key, SHOP_COMPUTER_KEY_AGE)
+
+    def cookie_value(self, name):
+        for item in (self.headers.get("Cookie") or "").split(";"):
+            key, _, value = item.strip().partition("=")
+            if key == name:
+                return value
+        return ""
 
     def emit(self, code, payload, path, params, headers=None):
         if isinstance(payload, tuple) and payload[0] == "csv":
@@ -4150,9 +4583,12 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {"ok": True}
         if method == "GET" and path == "/api/session":
             signed_in = self.authenticated()
+            named = self.named_computer() if signed_in else None
             return 200, {"required": auth_required(), "authenticated": signed_in,
                          "from_environment": bool(AUTH_PASSWORD),
-                         "this_is_the_shop_computer": self.is_shop_computer()}
+                         "this_is_the_shop_computer": self.is_shop_computer(),
+                         "shop_computer": named["name"] if named else "",
+                         "hours": public_hours(shop_hours(with_devices=signed_in), signed_in)}
         if path == "/api/login" and method == "POST":
             if not auth_required():
                 return 200, {"authenticated": True}
@@ -4162,7 +4598,8 @@ class Handler(BaseHTTPRequestHandler):
                 note_security("locked_out", self.client_ip(), self.headers.get("User-Agent", ""),
                               "%d seconds still to wait" % wait)
                 return 429, {"error": "Too many wrong passwords from here. Wait %d seconds." % wait}
-            if not password_matches(self.body().get("password", "")):
+            sent = self.body()
+            if not password_matches(sent.get("password", "")):
                 wait = note_bad_login(self.client_ip())
                 wrong = _login_tries.get(self.client_ip(), (0, 0))[0]
                 note_security("wrong_password" if not wait else "locked_out", self.client_ip(),
@@ -4174,11 +4611,49 @@ class Handler(BaseHTTPRequestHandler):
                                           " trying again." % wait}
                 return 401, {"error": "Password is incorrect"}
             _login_tries.pop(self.client_ip(), None)
+            # A machine the counter wrote down as one of the shop's own signs in whenever there is
+            # work to do: by the key it was given when it was first named, or by the name plate the
+            # counter has just handed across to it. Either way the shop's password is still asked
+            # for — being named says which machine this is, not who is standing at it.
+            computer = self.named_computer()
+            plate = text(sent.get("shop_code"), 24)
+            machine_key = ""
+            plate_note = ""
+            if plate and not computer:
+                claimed, answer = claim_shop_computer(plate)
+                if claimed:
+                    computer, machine_key = claimed, answer
+                else:
+                    plate_note = answer
+                    note_security("name_plate_refused", self.client_ip(),
+                                  self.headers.get("User-Agent", ""), text(answer, 200))
+            refused = sign_in_refusal(self.is_shop_computer() or bool(computer),
+                                      bool(touch_session(self.session_token())))
+            if refused:
+                code, payload = refused
+                if plate_note:
+                    payload = dict(payload, error=plate_note)
+                note_security("turned_away", self.client_ip(),
+                              self.headers.get("User-Agent", ""), text(payload.get("error"), 200))
+                return code, payload
             seconds = session_seconds()
-            self.cookie(open_session(self.headers.get("User-Agent", "")), seconds)
+            token = open_session(self.headers.get("User-Agent", ""))
+            self.cookie(token, seconds)
+            answer = {"authenticated": True}
+            if computer:
+                if machine_key:
+                    self.machine_cookie(machine_key)
+                keep_shop_computer(computer["id"], token)
+                answer["shop_computer"] = computer["name"]
+                note_security("computer_admitted", self.client_ip(),
+                              self.headers.get("User-Agent", ""),
+                              "%s signed in as one of the shop's own machines"
+                              % computer["name"][:60])
+            if plate_note:
+                answer["shop_computer_note"] = plate_note
             note_security("signed_in", self.client_ip(), self.headers.get("User-Agent", ""),
                           "signed in for %d day%s" % (session_days(), "" if session_days() == 1 else "s"))
-            return 200, {"authenticated": True}
+            return 200, answer
         if path == "/api/logout" and method == "POST":
             token = self.session_token()
             if token:
@@ -4328,6 +4803,21 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, answer
             return 405, {"error": "Use DELETE /api/devices/<number> to sign one device out,"
                                   " or /api/devices to sign every other one out"}
+        if head == "shop-computers":
+            # Which machines are the shop's own is settled at the counter, over this Mac's own
+            # shoulder — it is the one decision in the book that cannot be made from a browser
+            # somewhere else on the Wi-Fi.
+            if not self.is_shop_computer():
+                return 403, {"error": "A machine is named as one of the shop's own on the shop's"
+                                      " own computer, where somebody can see it happen"}
+            if method == "GET":
+                return 200, {"computers": shop_computer_view()}
+            if method == "POST":
+                return 201, name_shop_computer(self.body().get("name"), self.client_ip())
+            if len(rest) >= 2 and method == "DELETE":
+                return 200, revoke_shop_computer(rest[1], self.client_ip())
+            return 405, {"error": "Use GET for the machines named here, POST to name one,"
+                                  " DELETE /api/shop-computers/<number> to take the name off"}
         if head == "backups":
             if method == "GET":
                 return 200, backup_report()

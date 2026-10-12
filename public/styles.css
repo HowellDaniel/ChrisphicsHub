@@ -18,6 +18,9 @@
   --brand: #ab1f23;
   --brand-ink: #8c171b;
   --brand-soft: #fbeceb;
+  /* Crimson type sitting on a crimson wash. On the dark palette the ink would sink into the wash,
+     so this is the one pairing that takes the brightened brand instead. */
+  --on-brand-soft: var(--brand-ink);
   --on-brand: #ffffff;
   --link: #ab1f23;
   /* the logo's grey: money going out, and everything quiet */
@@ -78,6 +81,7 @@
   --brand: #c93a3f;
   --brand-ink: #a8262c;
   --brand-soft: #33191b;
+  --on-brand-soft: #ef8a90;
   --on-brand: #ffffff;
   --link: #ef8a90;
   --grey: #8d8d93;
@@ -282,6 +286,38 @@ input::placeholder { color: var(--placeholder); }
   border-right: 2px solid var(--line-2); border-top: 2px solid var(--line-2); transform: rotate(45deg);
   opacity: 0; transition: opacity .16s ease, border-color .16s ease; }
 .stat.go:hover .arrow { opacity: 1; border-color: var(--brand); }
+
+/* ---------- the shop's own hours ----------
+   One strip on the dashboard that answers "is the shop open, and how much of it is left"
+   without anybody having to ask, and the same words on the sign-in card so no one types the
+   shop password into a door that is shut. Tabular figures, so the seconds do not jog the line. */
+.card.hours { border-left: 4px solid var(--ok); }
+.card.hours.shut { border-left-color: var(--bad); background: var(--bad-soft); }
+.card.hours.shut .hint { color: inherit; }
+.hours-count { font-size: 1.06em; font-weight: 600; letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hours-note { margin-bottom: 12px; }
+fieldset.hours-fields { border: 1px solid var(--line); border-radius: 8px; padding: 13px;
+  display: grid; gap: 11px; margin: 0;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); }
+fieldset.hours-fields legend { font-size: .78em; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); font-weight: 600; padding: 0 6px; }
+fieldset.hours-fields .wide, fieldset.hours-fields p { grid-column: 1 / -1; }
+.days { display: flex; flex-wrap: wrap; gap: 7px; }
+.days .day { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line);
+  border-radius: 7px; padding: 6px 10px; font-size: .85em; cursor: pointer; user-select: none; }
+.days .day:has(input:checked) { background: var(--brand-soft); border-color: var(--brand);
+  color: var(--on-brand-soft); font-weight: 600; }
+.days .day input { accent-color: var(--brand); margin: 0; width: auto; }
+.days .day:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* A name plate is read once, across a counter, and kept nowhere but on paper — so it is set big,
+   wide and selectable, and looks like a slip of paper rather than a value in a table. */
+.plate { font-size: 1.7em; font-weight: 700; letter-spacing: .16em; text-align: center;
+  font-variant-numeric: tabular-nums; background: var(--brand-soft); color: var(--on-brand-soft);
+  border: 1px dashed var(--brand); border-radius: 10px; padding: 11px 8px; margin: 10px 0 6px;
+  user-select: all; -webkit-user-select: all; }
+#plateOut { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 4px; }
 
 /* ---------- click-to-change cells ----------
    The shop adjusts a book all day: a date slips, a stage moves, a name was typed wrong.
@@ -668,6 +704,9 @@ label.field.wide { grid-column: 1 / -1; }
      thumb. A ledger row is already ~99px tall here, so nothing is lost by making them full. */
   .btn.sm { min-height: 44px; }
   input, select, textarea { min-height: 44px; font-size: 16px; }
+  /* A tick box is not a field: at 44px it drops below the line of its own label. The whole label
+     is the tap target, so the box itself only has to be readable. */
+  input[type="checkbox"], input[type="radio"] { min-height: 0; width: 20px; height: 20px; }
   .tab { min-height: 44px; }
   /* Click-to-change values stay text rather than becoming buttons, but a thumb still needs
      something to hit — so the tappable box grows without moving the line it sits in. */
