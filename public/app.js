@@ -2352,6 +2352,12 @@ function installInstructions() {
       ' &amp; certifications) ▸ Install a certificate ▸ <b>CA certificate</b> ▸ choose the file.</p>' +
       '<p>Finally open the address in Chrome, and use the browser menu ▸ <b>Install app</b> or ' +
       '<b>Add to Home screen</b>.</p>';
+  } else if (/Macintosh/.test(ua)) {
+    steps = '<p>Open the shop’s <a href="/shop-root-ca.cer">CRISPprint-Shop-Root-CA.cer</a> so it' +
+      ' lands in <b>Keychain Access</b>, then double-click it ▸ <b>Trust</b> ▸' +
+      ' <b>When using this certificate: Always Trust</b>.</p>' +
+      '<p>Then open the address in <b>Safari</b>. On the shop’s own Mac the desktop app already' +
+      ' holds the same book, so there is nothing here to install.</p>';
   } else {
     steps = '<p>Double-click the shop’s <a href="/shop-root-ca.cer">CRISPprint-Shop-Root-CA.cer</a>' +
       ' ▸ Install Certificate ▸ <b>Current User</b> (no administrator password needed) ▸ Trusted Root' +
