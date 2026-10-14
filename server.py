@@ -328,6 +328,16 @@ def path_id(value):
 
 # --------------------------------------------------------------------- dashboards
 
+# What the shop can still actually collect. Money a client handed over without it being put
+# against a job sits as credit on their account, and it is still their money paying for their
+# work — so it comes off what that client owes. Floored at zero per client, because one client's
+# overpayment must never be allowed to hide another client's debt.
+COLLECTABLE_SQL = """
+  SELECT round(coalesce(sum(max(ca.open_job_balance - ca.account_credit, 0)), 0), 2)
+  FROM client_accounts ca JOIN clients c ON c.id = ca.id WHERE c.archived = 0
+"""
+
+
 def dashboard():
     t = today()
     month_start = t[:8] + "01"
@@ -350,8 +360,7 @@ def dashboard():
         (SELECT count(*) FROM leads WHERE stage NOT IN ('Won','Lost')
            AND follow_up IS NOT NULL AND follow_up <= ?) AS leads_due,
         (SELECT round(coalesce(sum(value),0),2) FROM leads WHERE stage NOT IN ('Won','Lost')) AS pipeline_value,
-        (SELECT round(coalesce(sum(balance),0),2) FROM job_accounts
-           WHERE kind='Job' AND balance > 0 AND status <> 'Cancelled') AS outstanding,
+        (%s) AS outstanding,
         (SELECT round(coalesce(sum(total),0),2) FROM job_accounts
            WHERE kind='Job' AND status<>'Cancelled' AND date(created_at) >= ?) AS billed_month,
         (SELECT round(coalesce(sum(profit),0),2) FROM job_accounts
@@ -364,7 +373,8 @@ def dashboard():
            FROM payments WHERE paid_at >= ?) AS collected_month,
         (SELECT round(coalesce(sum(CASE WHEN kind='Refund' THEN -amount ELSE amount END),0),2)
            FROM payments WHERE paid_at = ?) AS collected_today
-    """, (t, week_start, t, t, month_start, month_start, month_start, week_start, month_start, t))
+    """ % COLLECTABLE_SQL, (t, week_start, t, t, month_start, month_start, month_start,
+                             week_start, month_start, t))
 
     by_status = {r["status"]: r["c"] for r in q(
         "SELECT status, count(*) c FROM jobs WHERE kind='Job' AND status IN ('Pending','Printing','Ready')"
@@ -402,11 +412,16 @@ def dashboard():
       ORDER BY ja.created_at DESC, ja.id DESC LIMIT 10
     """)
 
+    # Same rule as the outstanding figure above: what a client still owes is their job balances less
+    # any money they handed over that is still sitting on their account.
     debtors = q("""
-      SELECT ja.client_id AS id, c.name, c.phone, round(sum(ja.balance),2) AS owed, count(*) AS jobs
-      FROM job_accounts ja JOIN clients c ON c.id = ja.client_id
-      WHERE ja.kind='Job' AND ja.balance > 0 AND ja.status <> 'Cancelled'
-      GROUP BY ja.client_id HAVING owed > 0 ORDER BY owed DESC LIMIT 8
+      SELECT ca.id, c.name, c.phone,
+             round(max(ca.open_job_balance - ca.account_credit, 0), 2) AS owed,
+             (SELECT count(*) FROM job_accounts ja WHERE ja.client_id = ca.id AND ja.kind='Job'
+                AND ja.balance > 0 AND ja.status <> 'Cancelled') AS jobs
+      FROM client_accounts ca JOIN clients c ON c.id = ca.id
+      WHERE c.archived = 0 AND ca.open_job_balance - ca.account_credit > 0
+      ORDER BY owed DESC LIMIT 8
     """)
 
     mix = q("""
@@ -985,6 +1000,11 @@ EMAIL_SMTP_PASSWORD = os.environ.get("CHRISPHICS_EMAIL_SMTP_PASSWORD", "")
 EMAIL_FROM = os.environ.get("CHRISPHICS_EMAIL_FROM", EMAIL_SMTP_USERNAME)
 EMAIL_FROM_NAME = os.environ.get("CHRISPHICS_EMAIL_FROM_NAME", SHOP["name"])
 EMAIL_SMTP_SECURITY = os.environ.get("CHRISPHICS_EMAIL_SMTP_SECURITY", "starttls").lower()
+# Mailboxes the counter registers itself live in the email_accounts table, but their passwords do
+# not: this book is copied every night and mirrored to a second folder, and a mail password riding
+# along with the ledger is a mail password leaked. They stay in one file beside the book instead,
+# at the same mode 600 the TLS key is kept at.
+EMAIL_SECRETS_PATH = os.path.join(SUPPORT, "email-secrets.json")
 
 COUNTRY_DIAL = "233"        # Ghana: 059 387 2873 and +233 59 387 2873 are the same number.
 NOTIFY_EVENTS = ["Quote", "Booked", "Pending", "Printing", "Ready", "Delivered", "Cancelled"]
@@ -1262,6 +1282,271 @@ def queue_message(job_id, event, automatic=None):
     return notify_rows(job_id, event)
 
 
+# ---------------------------------------------------------------- the shop's own mailboxes
+#
+# Job notices leave from a mailbox the counter registers on its own screen, so setting one up is a
+# minute at the desk rather than an afternoon editing the service file and restarting the shop. One
+# mailbox is marked as the sender and the others wait ready to be switched on. A password goes in
+# and is never handed back out — the screen is told whether one is saved, never what it is.
+
+EMAIL_ADDRESS_PATTERN = r"[^@\s]+@[^@\s]+\.[^@\s]+"
+
+
+def email_secret_map():
+    """The mail passwords, keyed by account id as text. Missing file or unreadable JSON simply
+    means no mailbox has a word yet — the shop is told, rather than left guessing."""
+    try:
+        with open(EMAIL_SECRETS_PATH, "r", encoding="utf-8") as handle:
+            stored = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return stored if isinstance(stored, dict) else {}
+
+
+def write_email_secrets(secrets):
+    """Rewrite the password file whole, at mode 600 and never in place: a crash halfway through an
+    overwrite would leave the shop with no mailbox at all."""
+    staging = EMAIL_SECRETS_PATH + ".new"
+    try:
+        folder = os.path.dirname(EMAIL_SECRETS_PATH) or "."
+        os.makedirs(folder, exist_ok=True)
+        handle = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            json.dump(secrets, out)
+        os.chmod(staging, 0o600)   # O_TRUNC leaves a file that already existed in its old mode
+        os.replace(staging, EMAIL_SECRETS_PATH)
+    except OSError:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def set_email_secret(account_id, password):
+    secrets = email_secret_map()
+    if password:
+        secrets[str(account_id)] = password
+    else:
+        secrets.pop(str(account_id), None)
+    return write_email_secrets(secrets)
+
+
+def default_email_account():
+    return one("SELECT * FROM email_accounts WHERE is_default = 1 ORDER BY id LIMIT 1")
+
+
+def email_account_view():
+    """What the counter's screen is shown: every detail of a mailbox except its password."""
+    held = email_secret_map()
+    return [{"id": row["id"], "label": row["label"], "from_address": row["from_address"],
+             "from_name": row["from_name"], "smtp_host": row["smtp_host"],
+             "smtp_port": row["smtp_port"], "smtp_security": row["smtp_security"],
+             "username": row["username"], "is_default": bool(row["is_default"]),
+             "has_password": str(row["id"]) in held, "last_sent_at": row["last_sent_at"],
+             "last_error": row["last_error"], "created_at": row["created_at"]}
+            for row in q("SELECT * FROM email_accounts ORDER BY is_default DESC, id")]
+
+
+def email_settings(account=None):
+    """The mailbox a notice really leaves from, and why not when there is nothing to leave from.
+    A registered account wins; with none in the book the environment still speaks, so a shop that
+    set CHRISPHICS_EMAIL_* before this existed keeps sending exactly as it did."""
+    row = account if account is not None else default_email_account()
+    if row is None:
+        missing = [name for name, value in (
+            ("CHRISPHICS_EMAIL_SMTP_HOST", EMAIL_SMTP_HOST),
+            ("CHRISPHICS_EMAIL_SMTP_USERNAME", EMAIL_SMTP_USERNAME),
+            ("CHRISPHICS_EMAIL_SMTP_PASSWORD", EMAIL_SMTP_PASSWORD),
+            ("CHRISPHICS_EMAIL_FROM", EMAIL_FROM),
+        ) if not value]
+        try:
+            port = int(EMAIL_SMTP_PORT)
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except ValueError:
+            missing.append("a valid CHRISPHICS_EMAIL_SMTP_PORT")
+            port = 0
+        if EMAIL_SMTP_SECURITY not in ("starttls", "ssl"):
+            missing.append("CHRISPHICS_EMAIL_SMTP_SECURITY=starttls or ssl")
+        if EMAIL_FROM and not re.fullmatch(EMAIL_ADDRESS_PATTERN, EMAIL_FROM):
+            return None, "CHRISPHICS_EMAIL_FROM must be a valid email address."
+        if missing:
+            return None, "Configure " + ", ".join(missing) + " to enable email delivery."
+        return {"account_id": None, "from_address": EMAIL_FROM,
+                "from_name": EMAIL_FROM_NAME, "host": EMAIL_SMTP_HOST, "port": port,
+                "security": EMAIL_SMTP_SECURITY, "username": EMAIL_SMTP_USERNAME,
+                "password": EMAIL_SMTP_PASSWORD}, ""
+    password = email_secret_map().get(str(row["id"]), "")
+    if not password:
+        return None, ("The %s mailbox has no password saved. Open Email accounts on Shop & devices"
+                      " and type it once." % row["label"])
+    return {"account_id": row["id"], "from_address": row["from_address"],
+            "from_name": row["from_name"] or SHOP["name"], "host": row["smtp_host"],
+            "port": row["smtp_port"], "security": row["smtp_security"],
+            "username": row["username"] or row["from_address"], "password": password}, ""
+
+
+def hide_secret(spoken, password):
+    """A provider sometimes repeats back what it was handed, and its words land in the book's error
+    column and on the counter's screen. The password never goes there."""
+    if password and password in spoken:
+        return spoken.replace(password, "[hidden]")
+    return spoken
+
+
+def send_over_email(settings, to_address, subject, body):
+    """Hand one message to the mailbox's provider and return its Message-ID."""
+    message = EmailMessage()
+    safe_name = settings["from_name"].replace("\r", " ").replace("\n", " ").strip()
+    message["From"] = formataddr((safe_name, settings["from_address"]))
+    message["To"] = to_address
+    message["Subject"] = subject
+    message["Message-ID"] = make_msgid()
+    message.set_content(body)
+    context = ssl.create_default_context()
+    password = settings["password"]
+    try:
+        if settings["security"] == "ssl":
+            with smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=20,
+                                  context=context) as smtp:
+                smtp.login(settings["username"], password)
+                refused = smtp.send_message(message)
+        else:
+            with smtplib.SMTP(settings["host"], settings["port"], timeout=20) as smtp:
+                smtp.ehlo()
+                smtp.starttls(context=context)
+                smtp.ehlo()
+                smtp.login(settings["username"], password)
+                refused = smtp.send_message(message)
+    except smtplib.SMTPAuthenticationError:
+        raise RuntimeError("The mail server refused the word saved for %s."
+                           % settings["from_address"]) from None
+    except (smtplib.SMTPException, OSError, ssl.SSLError, ValueError) as error:
+        raise RuntimeError("Email could not be sent through %s: %s"
+                           % (settings["host"], hide_secret(str(error)[:300], password))) from None
+    if refused:
+        raise RuntimeError("Email provider refused the recipient.")
+    return str(message["Message-ID"])
+
+
+def mark_email_account(account_id, error=""):
+    """Keep the provider's verdict on the mailbox row, so the counter can see which mailbox is the
+    problem without opening a job. Environment settings have no row to mark."""
+    if not account_id:
+        return
+    with _lock:
+        if error:
+            _db.execute("UPDATE email_accounts SET last_error=?,"
+                        " updated_at=datetime('now','localtime') WHERE id=?",
+                        (error[:400], account_id))
+        else:
+            _db.execute("UPDATE email_accounts SET last_error='',"
+                        " last_sent_at=datetime('now','localtime'),"
+                        " updated_at=datetime('now','localtime') WHERE id=?", (account_id,))
+        _db.commit()
+
+
+def save_email_account(body, account_id=None):
+    """Take a mailbox from the counter's own screen. A blank password on an existing mailbox keeps
+    the word already saved — the screen never shows it back, so it cannot send it back either."""
+    if not isinstance(body, dict):
+        raise ValueError("Send the mailbox as a JSON object")
+    label = text(body.get("label"), 40, True, "A name for the mailbox")
+    address = text(body.get("from_address"), 160, True, "The address clients reply to")
+    if not re.fullmatch(EMAIL_ADDRESS_PATTERN, address):
+        raise ValueError("The reply address has to be a real email address, like shop@crispprint.com.")
+    host = text(body.get("smtp_host"), 160, True, "The mail server")
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", host):
+        raise ValueError("The mail server is a name, like smtp.zoho.com — no spaces or address.")
+    try:
+        port = int(body.get("smtp_port", 587))
+    except (TypeError, ValueError):
+        raise ValueError("The mail port is a number, like 587 or 465.") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("The mail port has to be between 1 and 65535.")
+    security = text(body.get("smtp_security"), 10, False, "The connection").strip().lower() or "starttls"
+    if security not in ("starttls", "ssl"):
+        raise ValueError("The connection is either starttls or ssl.")
+    from_name = text(body.get("from_name"), 60)
+    username = text(body.get("username"), 160)
+    password = str(body.get("password") or "").strip()[:200]
+    if account_id is None and not password:
+        raise ValueError("%s needs its mail password before it can send anything." % label)
+    with _lock:
+        if account_id is None:
+            first = one("SELECT id FROM email_accounts ORDER BY id LIMIT 1") is None
+            row = _db.execute(
+                "INSERT INTO email_accounts (label, from_address, from_name, smtp_host, smtp_port,"
+                " smtp_security, username, is_default) VALUES (?,?,?,?,?,?,?,?)",
+                (label, address, from_name, host, port, security, username, 1 if first else 0))
+            account_id = row.lastrowid
+        else:
+            if not one("SELECT id FROM email_accounts WHERE id=?", (account_id,)):
+                raise LookupError("That mailbox is no longer in the book.")
+            _db.execute(
+                "UPDATE email_accounts SET label=?, from_address=?, from_name=?, smtp_host=?,"
+                " smtp_port=?, smtp_security=?, username=?,"
+                " updated_at=datetime('now','localtime') WHERE id=?",
+                (label, address, from_name, host, port, security, username, account_id))
+        _db.commit()
+    if password and not set_email_secret(account_id, password):
+        raise RuntimeError("The mailbox was kept, but its password could not be written beside the"
+                           " book. Set it again on Shop & devices.")
+    return {"accounts": email_account_view(), "id": account_id}
+
+
+def delete_email_account(account_id):
+    """Forget a mailbox and its password. If it was the sender, the oldest one left takes over, so
+    the shop is never left with queued notices and nothing to send them through."""
+    row = one("SELECT * FROM email_accounts WHERE id=?", (account_id,))
+    if not row:
+        raise LookupError("That mailbox is no longer in the book.")
+    with _lock:
+        _db.execute("DELETE FROM email_accounts WHERE id=?", (account_id,))
+        if row["is_default"]:
+            _db.execute("UPDATE email_accounts SET is_default=1"
+                        " WHERE id=(SELECT MIN(id) FROM email_accounts)")
+        _db.commit()
+    set_email_secret(account_id, "")
+    return {"accounts": email_account_view(), "removed": account_id}
+
+
+def set_default_email_account(account_id):
+    row = one("SELECT id FROM email_accounts WHERE id=?", (account_id,))
+    if not row:
+        raise LookupError("That mailbox is no longer in the book.")
+    with _lock:
+        _db.execute("UPDATE email_accounts SET is_default=(id=?)", (account_id,))
+        _db.commit()
+    return {"accounts": email_account_view()}
+
+
+def test_email_account(account_id, to_address):
+    """Send one real message through this mailbox and report what the provider said, so the counter
+    knows the details are right before a client's job notice depends on them."""
+    row = one("SELECT * FROM email_accounts WHERE id=?", (account_id,))
+    if not row:
+        raise LookupError("That mailbox is no longer in the book.")
+    settings, why = email_settings(row)
+    if not settings:
+        raise ValueError(why)
+    to = text(to_address, 160).strip() or settings["from_address"]
+    if not re.fullmatch(EMAIL_ADDRESS_PATTERN, to):
+        raise ValueError("There is no valid address to test that mailbox with.")
+    subject = "%s test from Chrisphics Hub" % row["label"]
+    body = ("This is a test from the shop's book. If you can read this, %s (%s) can send clients"
+            " their job notices.\n" % (row["label"], settings["from_address"]))
+    try:
+        message_id = send_over_email(settings, to, subject, body)
+    except RuntimeError as error:
+        mark_email_account(row["id"], str(error))
+        raise
+    mark_email_account(row["id"])
+    return {"sent_to": to, "message_id": message_id, "accounts": email_account_view()}
+
+
 def refresh_pending_status_notification(job_id):
     job = one("SELECT kind,status FROM jobs WHERE id=?", (job_id,))
     if job and job["kind"] == "Job" and job["status"] in AUTO_NOTIFY_EVENTS:
@@ -1283,25 +1568,7 @@ def notification_config_error(channel):
             return "Configure " + ", ".join(missing) + " to enable WhatsApp delivery."
         return ""
     if channel == "Email":
-        missing = [name for name, value in (
-            ("CHRISPHICS_EMAIL_SMTP_HOST", EMAIL_SMTP_HOST),
-            ("CHRISPHICS_EMAIL_SMTP_USERNAME", EMAIL_SMTP_USERNAME),
-            ("CHRISPHICS_EMAIL_SMTP_PASSWORD", EMAIL_SMTP_PASSWORD),
-            ("CHRISPHICS_EMAIL_FROM", EMAIL_FROM),
-        ) if not value]
-        try:
-            port = int(EMAIL_SMTP_PORT)
-            if not 1 <= port <= 65535:
-                raise ValueError
-        except ValueError:
-            missing.append("a valid CHRISPHICS_EMAIL_SMTP_PORT")
-        if EMAIL_SMTP_SECURITY not in ("starttls", "ssl"):
-            missing.append("CHRISPHICS_EMAIL_SMTP_SECURITY=starttls or ssl")
-        if EMAIL_FROM and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", EMAIL_FROM):
-            return "CHRISPHICS_EMAIL_FROM must be a valid email address."
-        if missing:
-            return "Configure " + ", ".join(missing) + " to enable email delivery."
-        return ""
+        return email_settings()[1]
     return "Unknown notification channel."
 
 
@@ -1359,29 +1626,16 @@ def send_whatsapp_notification(row):
 
 
 def send_email_notification(row):
-    message = EmailMessage()
-    safe_name = EMAIL_FROM_NAME.replace("\r", " ").replace("\n", " ").strip()
-    message["From"] = formataddr((safe_name, EMAIL_FROM))
-    message["To"] = row["to_address"]
-    message["Subject"] = row["subject"]
-    message["Message-ID"] = make_msgid()
-    message.set_content(row["body"])
-    port = int(EMAIL_SMTP_PORT)
-    context = ssl.create_default_context()
-    if EMAIL_SMTP_SECURITY == "ssl":
-        with smtplib.SMTP_SSL(EMAIL_SMTP_HOST, port, timeout=20, context=context) as smtp:
-            smtp.login(EMAIL_SMTP_USERNAME, EMAIL_SMTP_PASSWORD)
-            refused = smtp.send_message(message)
-    else:
-        with smtplib.SMTP(EMAIL_SMTP_HOST, port, timeout=20) as smtp:
-            smtp.ehlo()
-            smtp.starttls(context=context)
-            smtp.ehlo()
-            smtp.login(EMAIL_SMTP_USERNAME, EMAIL_SMTP_PASSWORD)
-            refused = smtp.send_message(message)
-    if refused:
-        raise RuntimeError("Email provider refused the recipient.")
-    return str(message["Message-ID"])
+    settings, why = email_settings()
+    if not settings:
+        raise RuntimeError(why)
+    try:
+        message_id = send_over_email(settings, row["to_address"], row["subject"], row["body"])
+    except RuntimeError as error:
+        mark_email_account(settings["account_id"], str(error))
+        raise
+    mark_email_account(settings["account_id"])
+    return message_id
 
 
 def _claim_notification(note_id):
@@ -3887,6 +4141,15 @@ def accounts_view(params):
       FROM payments p JOIN clients c ON c.id = p.client_id
       WHERE p.job_id IS NULL GROUP BY c.id HAVING credit <> 0 ORDER BY credit DESC
     """)
+    # Money handed over and left on the account has already bought part of that client's work, even
+    # though no job row carries it. Set it against their jobs here, biggest balance first, so the
+    # list shows where the difference between its balances and the headline figure has gone.
+    held = {row["id"]: row["credit"] for row in credit if row["credit"] > 0}
+    for d in debtors:
+        avail = held.get(d["client_id"], 0.0)
+        d["covered_by_credit"] = round(min(avail, d["balance"]), 2)
+        d["still_owed"] = round(d["balance"] - d["covered_by_credit"], 2)
+        held[d["client_id"]] = round(avail - d["covered_by_credit"], 2)
     # The settled side of the book: billed work whose balance has been cleared, most recent first.
     settled = q("""
       SELECT ja.id, ja.ref, ja.client_id, ja.client, c.phone, ja.title, ja.category, ja.status,
@@ -3900,12 +4163,12 @@ def accounts_view(params):
     return {"ledger": ledger, "debtors": debtors, "credit": credit, "settled": settled,
             "spent": q("SELECT * FROM monthly_pnl LIMIT 13"),
             "totals": one("""
-              SELECT round(coalesce(sum(balance),0),2) AS receivable,
+              SELECT (%s) AS receivable,
                      round(coalesce(sum(CASE WHEN due_date IS NOT NULL AND due_date < ?
                                               AND status NOT IN ('Delivered','Cancelled')
                                               THEN balance ELSE 0 END),0),2) AS overdue_value
               FROM job_accounts WHERE kind='Job' AND status <> 'Cancelled' AND balance > 0
-            """, (today(),)),
+            """ % COLLECTABLE_SQL, (today(),)),
             "spent_total": one("""
               SELECT round(coalesce(sum(amount),0),2) AS all_time,
                      round(coalesce(sum(CASE WHEN spent_on >= ? THEN amount ELSE 0 END),0),2) AS this_month
@@ -4011,6 +4274,36 @@ def report(params):
 
 # --------------------------------------------------------------------- csv export
 
+# The columns each export adds up at the foot of the file. Only amounts that belong to a whole
+# row make the list: a column of unit prices has no shop-wide total, only the line it is on does.
+EXPORT_TOTAL_COLUMNS = {
+    "jobs": ("total", "cost", "profit", "paid", "balance"),
+    "items": ("line_total", "line_cost", "profit"),
+    "expenses": ("amount",),
+    "leads": ("value",),
+    "clients": ("billed", "received", "balance_due"),
+    "payments": ("amount",),
+    "accounts": ("total", "paid", "balance"),
+}
+
+
+def export_totals(name, rows):
+    def amount(row, key):
+        value = row.get(key)
+        if value is None:
+            return 0.0
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        # The shop's own "collected" figure counts a refund against what came in; so does this.
+        if name == "payments" and row.get("kind") == "Refund":
+            return -out
+        return out
+    return {key: round(sum(amount(row, key) for row in rows), 2)
+            for key in EXPORT_TOTAL_COLUMNS.get(name, ())}
+
+
 def export_rows(name, params):
     if name == "jobs":
         rows, cols = list_jobs(params), [
@@ -4072,6 +4365,15 @@ def export_rows(name, params):
     writer.writerow([label for _, label in cols])
     for row in rows:
         writer.writerow(["" if row.get(key) is None else row.get(key) for key, _ in cols])
+    keys = EXPORT_TOTAL_COLUMNS.get(name, ())
+    if keys:
+        totals = export_totals(name, rows)
+        tally = "%d row%s" % (len(rows), "" if len(rows) == 1 else "s")
+        if name == "payments" and any(row.get("kind") == "Refund" for row in rows):
+            # a refund stays money-out in its own row, so the foot does not add up to the column
+            tally += ", refunds counted off"
+        writer.writerow(["Total (%s)" % tally]
+                        + ["%.2f" % totals[key] if key in keys else "" for key, _ in cols[1:]])
     return buf.getvalue(), "%s-%s.csv" % (name, today()), len(rows)
 
 
@@ -4550,12 +4852,24 @@ class Handler(BaseHTTPRequestHandler):
         return self.client_address[0] if self.client_address else "?"
 
     def is_shop_computer(self):
-        """Loopback means this Mac — the counter's own screen, which the shop already controls.
-        Behind a proxy every visitor arrives from the proxy's address, so loopback proves nothing."""
+        """This Mac is the shop's own screen: the counter's machine, which the shop already
+        controls, and the only place a mailbox or a copy schedule may be settled.
+
+        Loopback says so. So does arriving on the very address this server is listening on: the
+        app and the browser on this Mac open the shop at its Wi-Fi number, so a call from
+        192.168.100.11 to 192.168.100.11 is still a call from this Mac — and a phone out on the
+        network arrives as its own address, which can never equal it. Behind a proxy every visitor
+        arrives from the proxy's address, so neither form proves anything."""
         if THROUGH_PROXY:
             return False
         ip = self.client_ip()
-        return ip.startswith("127.") or ip == "::1"
+        if ip.startswith("127.") or ip == "::1":
+            return True
+        try:
+            local = self.connection.getsockname()[0]
+        except OSError:
+            return False
+        return bool(local) and ip == local
 
     def authenticated(self):
         if not auth_required() or LAN_NO_LOGIN:
@@ -4697,6 +5011,41 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {"authenticated": False}
 
         return self.dispatch_api(method, path, params, seg)
+
+    def mailbox_writes(self, method, rest):
+        """The four things the counter's Email accounts screen asks of the book. Split out of
+        dispatch_api so one try/except can turn a mail server's refusal into a 400 with the
+        provider's own words, rather than a 500 that blames the shop's own Mac."""
+        if method == "POST" and len(rest) == 1:
+            answer = save_email_account(self.body())
+            note_security("mailbox_added", self.client_ip(),
+                          self.headers.get("User-Agent", ""), "mailbox %s added" % answer["id"])
+            return 201, answer
+        if len(rest) == 2 and method == "PUT":
+            return 200, save_email_account(self.body(), path_id(rest[1]))
+        if len(rest) == 2 and method == "DELETE":
+            answer = delete_email_account(path_id(rest[1]))
+            note_security("mailbox_forgotten", self.client_ip(),
+                          self.headers.get("User-Agent", ""),
+                          "mailbox %s removed, %d left" % (answer["removed"],
+                                                           len(answer["accounts"])))
+            return 200, answer
+        if len(rest) == 3 and rest[2] == "default" and method == "POST":
+            answer = set_default_email_account(path_id(rest[1]))
+            note_security("mailbox_chosen", self.client_ip(),
+                          self.headers.get("User-Agent", ""),
+                          "mailbox %s now sends client notices" % rest[1])
+            return 200, answer
+        if len(rest) == 3 and rest[2] == "test" and method == "POST":
+            answer = test_email_account(path_id(rest[1]), self.body().get("to"))
+            note_security("mailbox_tested", self.client_ip(),
+                          self.headers.get("User-Agent", ""),
+                          "test letter sent through mailbox %s" % rest[1])
+            return 200, answer
+        return 405, {"error": "Use GET for the shop's mailboxes, POST to add one,"
+                              " PUT or DELETE /api/email-accounts/<number> to change one,"
+                              " POST .../default to make it the sender,"
+                              " POST .../test to send a letter through it"}
 
     def dispatch_api(self, method, path, params, seg):
         if method == "GET" and (not seg or seg[0] != "api"):
@@ -4852,6 +5201,25 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, revoke_shop_computer(rest[1], self.client_ip())
             return 405, {"error": "Use GET for the machines named here, POST to name one,"
                                   " DELETE /api/shop-computers/<number> to take the name off"}
+        if head == "email-accounts":
+            # A mailbox comes with the keys to the shop's own mail, so it is registered where
+            # somebody can watch it happen — the same rule by which the shop's machines and the
+            # copies of the book are settled. Reading the list is open like any other screen; the
+            # list never carries a password.
+            if method == "GET":
+                return 200, {"accounts": email_account_view(),
+                             "sending": notification_config_error("Email")}
+            if not self.is_shop_computer():
+                return 403, {"error": "A mailbox and its password are added on the shop's own"
+                                      " computer, where somebody can see it happen"}
+            try:
+                return self.mailbox_writes(method, rest)
+            except RuntimeError as error:
+                # A mail server that says no, or a secret file the Mac would not take, is the shop's
+                # own details being wrong — not the counter's machine breaking down. A 500 here
+                # reads as a fault in the shop's own server, so it is answered as a 400 instead and
+                # the provider's own words go back to the screen that asked.
+                return 400, {"error": str(error)}
         if head == "backups":
             if method == "GET":
                 return 200, backup_report()

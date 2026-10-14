@@ -88,7 +88,7 @@ echo "   stamped: version 1.1, commit $COMMIT, built $BUILT"
 echo "4/5 compiling the Swift shell"
 swiftc -O -swift-version 5 -framework Cocoa -framework WebKit -framework PDFKit \
   -framework ServiceManagement -framework IOKit \
-  -o "$BIN" "$SRC/src/main.swift"
+  -o "$BIN" "$SRC"/src/main.swift "$SRC"/src/Theme.swift
 chmod +x "$BIN"
 
 echo "5/5 signing so macOS will run it"

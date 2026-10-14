@@ -46,6 +46,11 @@ subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-da
 
 env = dict(os.environ, CHRISPHICS_DB=CLONE, CHRISPHICS_SUPPORT=work,
            CHRISPHICS_BACKUP_DIR=os.path.join(work, "Backups"), PYTHONUNBUFFERED="1")
+# A server that listens past this computer refuses to open the accounts on a book with no sign-in
+# word — and since the counter cleared the book, that is what a copy of it is. This check is about
+# the address the shop hands out, not about signing in, so its throwaway copy is given a word made
+# up here and now, never the shop's, and nothing signs in with it.
+env["CHRISPHICS_AUTH_PASSWORD"] = "throwaway-" + os.urandom(8).hex()
 
 fails = []
 

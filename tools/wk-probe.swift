@@ -17,9 +17,11 @@
 //
 // WKPROBE_SCRIPT=<file> injects that JavaScript into every page before it runs, which is how a
 // probe of the shop's own DOM is written once as functions instead of pasted into a shell argument.
-// WKPROBE_HANDLERS=<names> binds those native script handlers, the way the .app binds "theme",
+// WKPROBE_HANDLERS=<names> binds those native script handlers, the way the .app binds "external",
 // before the web view exists — a page decides whether it is inside the Mac app on the first frame,
 // so a handler added later would never be seen.
+// WKPROBE_FRESH_DATA=1 starts from a browser that remembers nothing, the way a machine that has
+// never met the shop does.
 import AppKit
 import WebKit
 
@@ -41,7 +43,12 @@ final class Hook: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDe
     var loadFailed = false
 
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
-        if let body = message.body as? String { print("  console> " + body) }
+        // "probe" is this harness's own console collector. Anything else is a handler the page
+        // was written for — the .app's "external", say — and what arrives there is the evidence a
+        // check wants, so it is named rather than hidden among the console lines.
+        let body = (message.body as? String) ?? String(describing: message.body)
+        if message.name == "probe" { print("  console> " + body) }
+        else { print("  posted " + message.name + ": " + body) }
     }
     // The .app implements these panels natively; here they are logged and accepted
     // so a flow that stops for confirmation can still be walked end to end.
@@ -94,6 +101,24 @@ if let script = ProcessInfo.processInfo.environment["WKPROBE_SCRIPT"],
    let source = try? String(contentsOfFile: script, encoding: .utf8) {
     config.userContentController.addUserScript(WKUserScript(source: source, injectionTime: .atDocumentStart,
                                                             forMainFrameOnly: true))
+}
+
+// The default website store outlives this process, so a run can inherit another run's cached
+// records — and the version tags read from them, which the shop then refuses as "changed on
+// another device". A check that means to see the page as a machine that never met the shop does
+// not want that history, so it asks for the browser to start clean.
+if ProcessInfo.processInfo.environment["WKPROBE_FRESH_DATA"] != nil {
+    let store = WKWebsiteDataStore.default()
+    var wiped = false
+    store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+                     modifiedSince: Date(timeIntervalSince1970: 0)) { wiped = true }
+    let until = Date().addingTimeInterval(15)
+    while !wiped && Date() < until {
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+    }
+    if !wiped {
+        FileHandle.standardError.write("wk-probe: the old browser data did not clear\n".data(using: .utf8)!)
+    }
 }
 
 let frame = NSRect(x: 0, y: 0, width: 1440, height: 950)

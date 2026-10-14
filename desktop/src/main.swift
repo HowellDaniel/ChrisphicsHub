@@ -13,42 +13,8 @@ let kAppName = "Chrisphics Hub"
 // Never rename this one: it is the folder holding the shop's live book.
 let kDataFolder = "Chrisphics Hub"
 
-// ---------------------------------------------------------------- appearance
-// The page owns the palette; the shell only follows it — window chrome, menu tick,
-// and the value handed to the page before it paints so a restart looks the same.
-enum Theme: String {
-    case light, dark, system
-
-    static let key = "crispprint-theme"
-    static var saved: Theme { Theme(rawValue: UserDefaults.standard.string(forKey: key) ?? "") ?? .system }
-
-    var label: String {
-        switch self {
-        case .light: return "Light"
-        case .dark: return "Dark"
-        case .system: return "Follow the Mac"
-        }
-    }
-
-    var appearance: NSAppearance? {
-        switch self {
-        case .light: return NSAppearance(named: .aqua)
-        case .dark: return NSAppearance(named: .darkAqua)
-        case .system: return nil
-        }
-    }
-
-    /// Remember the choice and put the shell's own chrome in step with it.
-    func commit() {
-        UserDefaults.standard.set(rawValue, forKey: Theme.key)
-        NSApp.appearance = appearance
-        NotificationCenter.default.post(name: Theme.changedNotification, object: rawValue)
-    }
-
-    /// Posted whenever the palette changes, whoever asked for it — the menu, the page, or
-    /// Settings ▸ Appearance. One change, three places that show it.
-    static let changedNotification = Notification.Name("crispprint-theme-changed")
-}
+// The appearance rule lives in Theme.swift beside this file, where the check tool can drive
+// all twenty-four hours of it.
 
 struct EngineError: Error { let message: String }
 
@@ -438,12 +404,6 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate, N
                         script: "window.print = function(){ window.webkit.messageHandlers.sheetPrint.postMessage(1); };",
                         on: config.userContentController)
         } else {
-            // This web view keeps no storage between launches, so the shell hands the page
-            // the remembered appearance before it paints — without this, a restart would
-            // fall back to following the Mac whatever the shop last chose.
-            Bridge.bind("theme",
-                        script: "try{localStorage.setItem('\(Theme.key)','\(Theme.saved.rawValue)')}catch(e){}",
-                        on: config.userContentController)
             Bridge.bind("external", script: nil, on: config.userContentController)
         }
         web = WKWebView(frame: window.contentView!.bounds, configuration: config)
@@ -561,11 +521,6 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate, N
         switch message.name {
         case "sheetPrint":
             printSheet()
-        case "theme":
-            // The page has already re-painted itself; this only brings the shell with it.
-            guard let raw = message.body as? String, let theme = Theme(rawValue: raw) else { return }
-            theme.commit()
-            (NSApp.delegate as? AppDelegate)?.themeDidPick(theme)
         case "external":
             // A client message is handed to the Mac: WhatsApp or Mail takes it from here and
             // the shop presses send there. Only these destinations are let out, so a stray
@@ -841,7 +796,6 @@ enum Shell {
     static var main: WebWindow? { WebWindow.all.first { $0.kind == .main } }
 
     static func route(_ hash: String) { main?.run("window.location.hash='\(hash)'") }
-    static func applyTheme(_ theme: Theme) { main?.run("window.chrisphics.theme('\(theme.rawValue)')") }
     static func applyZoom() { WebWindow.all.forEach { $0.setZoom(Prefs.zoom) } }
 }
 
@@ -1071,47 +1025,6 @@ final class GeneralPane: Pane {
     @objc private func openBackups() { NSWorkspace.shared.open(Paths.shared.backups) }
 }
 
-final class AppearancePane: Pane {
-    override var paneTitle: String { "Appearance" }
-    override var symbol: String { "circle.lefthalf.filled" }
-
-    private var radios = [NSButton]()
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        for theme in [Theme.light, .dark, .system] {
-            let radio = NSButton(radioButtonWithTitle: theme.label, target: self, action: #selector(pick(_:)))
-            radio.identifier = NSUserInterfaceItemIdentifier(theme.rawValue)
-            radio.state = theme == Theme.saved ? .on : .off
-            radios.append(radio)
-            stack.addArrangedSubview(radio)
-        }
-        statusLabel = noteLabel("")
-        place(form([("Mode:", stack)],
-                   notes: [noteLabel("Light and Dark are the shop's own palettes. Follow the Mac copies "
-                                        + "whatever System Settings ▸ Appearance is set to, and changes with it."),
-                           statusLabel!]))
-        NotificationCenter.default.addObserver(self, selector: #selector(refresh(_:)),
-                                               name: Theme.changedNotification, object: nil)
-    }
-
-    @objc private func pick(_ sender: NSButton) {
-        guard let raw = sender.identifier?.rawValue, let theme = Theme(rawValue: raw) else { return }
-        Shell.applyTheme(theme)
-    }
-
-    @objc private func refresh(_ note: Notification) {
-        let raw = (note.object as? String) ?? Theme.saved.rawValue
-        for radio in radios { radio.state = radio.identifier?.rawValue == raw ? .on : .off }
-    }
-
-    deinit { NotificationCenter.default.removeObserver(self) }
-}
-
 final class ProfilePane: Pane {
     override var paneTitle: String { "Profile" }
     override var symbol: String { "person.crop.circle" }
@@ -1287,7 +1200,7 @@ final class SettingsTabs: NSTabViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         tabStyle = .toolbar
-        for pane in [GeneralPane(), AppearancePane(), ProfilePane(), UpdatesPane()] {
+        for pane in [GeneralPane(), ProfilePane(), UpdatesPane()] {
             let item = NSTabViewItem(viewController: pane)
             item.label = pane.paneTitle
             item.image = NSImage(systemSymbolName: pane.symbol, accessibilityDescription: pane.paneTitle)
@@ -1347,11 +1260,11 @@ enum Settings {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var loading: NSWindow?
-    private var appearanceMenu: NSMenu?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         NSApp.setActivationPolicy(.regular)
-        NSApp.appearance = Theme.saved.appearance
+        NSApp.appearance = Theme.appearance
+        Theme.startClockWatch()
         buildMenu()
         // A shop that asked to stay open stays open, from the first moment after sign-in.
         if Prefs.keepAwake { Awake.shared.set(true) }
@@ -1453,8 +1366,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         main.addItem(submenu("View", [
             item("Reload", #selector(reloadPage), "R"),
             .separator(),
-            appearanceSubmenu(),
-            .separator(),
             item("Dashboard", #selector(goDashboard), "1"),
             item("Print Jobs", #selector(goJobs), "2"),
             /* The counter's screen, so it sits beside the order book. It has no number key: ⌘1…⌘0
@@ -1497,32 +1408,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         items.forEach { menu.addItem($0) }
         parent.submenu = menu
         return parent
-    }
-
-    private func appearanceSubmenu() -> NSMenuItem {
-        let parent = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
-        let menu = NSMenu(title: "Appearance")
-        for theme in [Theme.light, .dark, .system] {
-            let entry = NSMenuItem(title: theme.label, action: #selector(pickTheme(_:)), keyEquivalent: "")
-            entry.target = self
-            entry.representedObject = theme.rawValue
-            entry.state = theme == Theme.saved ? .on : .off
-            menu.addItem(entry)
-        }
-        parent.submenu = menu
-        appearanceMenu = menu
-        return parent
-    }
-
-    // Going through the page keeps one route to the palette: it repaints and tells the
-    // shell back what is now showing, so the tick and the window chrome cannot disagree.
-    @objc private func pickTheme(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let theme = Theme(rawValue: raw) else { return }
-        main?.run("window.chrisphics.theme('\(theme.rawValue)')")
-    }
-
-    func themeDidPick(_ theme: Theme) {
-        appearanceMenu?.items.forEach { $0.state = $0.representedObject as? String == theme.rawValue ? .on : .off }
     }
 
     private var main: WebWindow? { WebWindow.all.first { $0.kind == .main } }
@@ -1580,7 +1465,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(printSheet), #selector(exportPDF): return sheet != nil
-        case #selector(pickTheme(_:)): return main != nil
         case #selector(newJob), #selector(newQuote), #selector(newEnquiry), #selector(newClient),
              #selector(newExpense), #selector(receivePayment),
              #selector(goDashboard), #selector(goJobs), #selector(goCollect), #selector(goClients), #selector(goLeads),

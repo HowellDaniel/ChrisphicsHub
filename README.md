@@ -22,7 +22,7 @@ there is never a moment when the shop's records only exist in one place.
 | `server.py`, `schema.sql`, `public/` | the records engine and the screens it serves |
 | `desktop/` | the native shell's Swift source and `build-app.sh` |
 | `render.yaml` | Render web service, HTTPS proxy, password and persistent-disk setup |
-| `tools/` | `shop-server.sh` runs the shop's always-on server, `nightly-backup.sh` copies the book each night, `carry-book.py` hands a copy to a hosted book, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
+| `tools/` | `shop-boot.sh` keeps the shop online on whatever address the Wi-Fi gives this Mac, `shop-server.sh` installs that service and its certificates, `nightly-backup.sh` copies the book each night, `carry-book.py` hands a copy to a hosted book, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
 | `~/Library/Application Support/Chrisphics Hub/` | your actual records — not in this folder |
 
 ## Start it
@@ -44,10 +44,9 @@ untouched as the safety copy. From then on only the new name is used.
 - `File` — New Job `⌘N`, New Quote `⇧⌘N`, New Enquiry `⌘I`, New Client `⌘K`,
   Receive Payment `⌘R`, Record Money Out `⌘E`.
 - `View` — `⌘1`…`⌘9` and `⌘0` jump between the screens (Collect sits under Print Jobs with no key
-  of its own); Reload `⇧⌘R` after changing `public/`;
-  **Appearance** picks Light, Dark or "Follow the Mac". Inside the app this is where the look is
-  chosen, so the same three buttons on the page footer hide themselves here; they show only in a
-  browser tab or on a phone, which have no Settings window.
+  of its own); Reload `⇧⌘R` after changing `public/`. There is no **Appearance** menu and no look to
+  pick: the shop's clock decides it, a machine that slept through 5:00pm corrects itself, and the
+  app's own window chrome turns over with the page.
 - `Data` — Back Up Book Now `⌘B`, Show Data File in Finder, Open Backup Folder.
 - A job's **Job sheet** opens in its own window. Print Job Sheet `⌘P` goes through the normal
   macOS print dialog (the sheet's own print button is wired to it); **Export Job Sheet as
@@ -55,17 +54,16 @@ untouched as the safety copy. From then on only the new name is used.
 
 ### Settings `⌘,`
 
-`Chrisphics Hub ▸ Settings…` (`⌘,`) opens the app's own settings window — four panes in a toolbar,
+`Chrisphics Hub ▸ Settings…` (`⌘,`) opens the app's own settings window — three panes in a toolbar,
 and the window resizes to whichever pane you are in.
 
 | Pane | What it holds |
 | --- | --- |
 | **General** | open at login; which screen the app shows first (any of the ten, or "Where I left off"); text size 90–140%; keep this Mac awake while the shop is open; which records engine the window is attached to; where the book and the backups live, with Back up now / Show book in Finder / Open backups |
-| **Appearance** | **Light**, **Dark**, **Follow the Mac** — the same three choices as `View ▸ Appearance` and as the buttons on the page footer in a browser or on a phone; change one anywhere and the others re-tick |
 | **Profile** | the shop's name, tagline, phone and address, kept *in the book*; the MoMo number, the address devices install from, and the currency are read out but not editable here |
 | **Updates** | this build's version, commit and build date, the repository, **Check for update**, and a button to open the repository |
 
-General and Appearance describe one machine, so they live in that Mac's own preferences
+General describes one machine, so it lives in that Mac's own preferences
 (`UserDefaults`) and never in the book. Profile is the opposite: **Save** posts through the shop's
 API into the book, so every later job sheet, quote and queued client message is written from those
 words, and a phone signing in to the same server sees them too. That is why the server takes
@@ -85,7 +83,7 @@ From the command line, the browser route is `./run.sh`. Useful flags:
 | `./run.sh` | start and open the browser |
 | `./run.sh --no-browser` | start without opening a browser tab |
 | `./run.sh --port 8080` | use a different port if 8712 is taken |
-| `./run.sh --host 0.0.0.0 --port 8834 --tls-cert /path/shop-cert.pem --tls-key /path/shop-key.pem` | serve the installable app over the shop Wi-Fi with HTTPS; the book needs a shop password first |
+| `./run.sh --host 0.0.0.0 --port 8834 --tls-cert /path/shop-cert.pem --tls-key /path/shop-key.pem` | serve the installable app over the shop Wi-Fi with HTTPS; the book needs a shop password first, unless the shop deliberately runs open — see [The shape the shop runs today](#run-the-shop-all-the-time) |
 | `./run.sh --seed` | add sample clients, jobs, a quote, expenses and enquiries — only into an empty book |
 | `python3 server.py --backup` | write one checked, tidied copy into the Backups folder and exit |
 | `python3 server.py --allow-sleep` | serve the network without asking the Mac to stay awake |
@@ -99,6 +97,7 @@ shop's own network.
 
 ```sh
 tools/shop-server.sh check      # how this Mac looks to the shop — reads only, changes nothing
+tools/shop-server.sh wifi-ip    # the address this Mac holds on the shop network (the keeper asks here)
 tools/shop-server.sh certs      # a certificate for this Mac's current Wi-Fi address and name
 tools/shop-server.sh ca         # the public certificate file a phone has to be given once
 tools/shop-server.sh install    # the service, and the nightly copy of the book
@@ -113,20 +112,49 @@ server, then run it again. `install --take-over` stops that server for you after
 and typing `yes`.
 
 What it installs is two ordinary launch agents in `~/Library/LaunchAgents/`: the book served
-by `/usr/bin/python3 server.py --host 0.0.0.0 --port 8834 --tls-cert … --tls-key …`, restarted
-by `launchd` whenever it exits badly, and `tools/nightly-backup.sh` at 22:30 each night.
+by `tools/shop-boot.sh` (below), and `tools/nightly-backup.sh` at 22:30 each night.
 The server itself keeps a copying clock too, so a book that is overdue gets copied while the
 shop is trading rather than waiting for 22:30 — see [Your data](#your-data).
 Neither file holds a secret: the password lives in the book as a hash, the private key stays
 in `~/Library/Application Support/CRISPprint TLS/shop-key.pem` at mode 600, and the logs land
 beside the book as `shop-server.log` and `shop-server.error.log`.
 
+**The keeper: `tools/shop-boot.sh`.** This is what makes the counter open by itself when the Mac
+is switched on. `server.py` has to be told which address to hold, and the router decides that
+number, so a service handed a fixed one either dies when the Wi-Fi has not joined yet at login or
+— worse — keeps running bound to an address this Mac no longer holds, which looks perfectly
+healthy to `launchd` while every device in the shop finds nothing. The keeper is one small
+supervisor in front of the engine: it reads the address from `tools/shop-server.sh wifi-ip` (one
+rule, kept in one place), waits out a Wi-Fi that has not arrived, issues a leaf that names the
+number the devices dial, starts the engine on it, and re-reads the address every fifteen seconds
+so a move at 3am is a re-bind and a fresh certificate rather than a dark counter. It starts at
+login, again every five minutes if it is not running, and whenever it dies badly; a stop is passed
+straight to the engine so nothing orphans on the port; and a second keeper seeing the shop already
+answering exits without starting a second engine over one book. It asks the kernel who holds the
+port (`lsof -sTCP:LISTEN`) rather than dialling it — a connection to a number nothing answers on
+only lets go when macOS decides, tens of seconds later, and a keeper stuck mid-probe is a counter
+that stays dark and cannot even be stopped.
+
+**The shape the shop runs today.** Since 2026-10-14 the service on this Mac is *not* the one above:
+the owner was shown what an open Wi-Fi means and answered **"Open the Wi-Fi, no word"**, so the
+LaunchAgent holds `--allow-unauthenticated-lan` and no `--host` at all — the keeper supplies the
+address — and the log says `Sign-in: not required (this run was told to skip it)`. Two consequences
+are live, not hypothetical: anyone who joins that Wi-Fi reads the whole accounts without a password
+(see [One shop password](#one-shop-password) for the door that is standing open); and the engine
+holds one address at a time, so `127.0.0.1:8834` is closed and `Chrisphics Hub.app` cannot attach to
+it and starts its own engine beside it — which is why the app is quit, or rebuilt, while this shape
+runs. `--allow-unauthenticated-lan` also demands a private, non-loopback IPv4, so the keeper will not
+start the engine until this Mac genuinely has a shop address to bind.
+
 **When the Wi-Fi address moves.** Routers hand out new addresses, and the shop's is one of
-them. The server answers on every address the Mac holds, so the shop does not go quiet; the
-*certificate* is the part that names one number, so phones show a padlock warning until it is
-renewed. `tools/shop-server.sh status` says when that has happened, and `certs` followed by
-`install` puts it right in two commands — devices keep trusting the same authority throughout.
-Reserving the Mac's address in the router avoids the question altogether.
+them. The keeper now takes that by itself: it notices the number it was holding is gone, lets go of
+the stale bind, asks `tools/shop-server.sh certs` for a leaf naming the new one, and serves again
+without anyone being told. With a password and `0.0.0.0` the bind never names a number, so only the
+certificate is the thing to renew; on the no-word shape both move together, and the keeper does
+both. `tools/shop-server.sh status` still says what is running, and `certs` followed by
+`install` remains the manual cure if the keeper is ever missing. Reserving the Mac's address in the
+router still avoids the question, and the *devices*' bookmarks type the number, so a moved address
+means the counter reprints its QR and tells phones the new one.
 
 ### One shop password
 
@@ -235,7 +263,7 @@ Under 720px the book becomes a phone app rather than a shrunken desktop. The sid
 gone; **Desk · Jobs · Money · Clients · More** sit in a tab bar at thumb height, and **More**
 opens a sheet holding the remaining screens (spoiled work, pending sync, enquiries, expenses,
 reports, Shop & devices) and, at its end, the page footer itself — the book's counts, its last
-copy and where it is kept, with the theme switch, signing out and the backup button. A job's
+copy and where it is kept, with signing out and the backup button. A job's
 record and every form rise from the bottom of the screen, the first column of a wide ledger
 pins itself so a scrolled row is still identifiable, and everything you press is at least 44px
 tall. The status strip and the
@@ -367,6 +395,10 @@ LaunchAgents installed only while the shop's records live on this Mac
 
 **Dashboard** — money in today / this week / month to date, what customers still owe,
 what is late, what is ready for pickup, a 15-day cash chart, and what you print most.
+The first thing on it is the shop's own **day**: the month laid out the way an iPhone's medium
+calendar widget lays it out, beside a clock the size of a phone's lock screen, the date in full
+underneath, the time running to the second, and the hour the look
+turns over — see [Colour and appearance](#colour-and-appearance).
 Above the tiles sits **Money in and out by MoMo**: wallet alerts the shop did not type, read
 out of Messages or pasted in, waiting to be booked ([see below](#money-in-and-out-by-momo)).
 Below that: quotes still waiting for an answer, enquiries due for a chase, and where the
@@ -446,6 +478,11 @@ synced or need conflict review.
 **Reports** — billed, what it cost, profit, collected, still owed and delivered for any
 date range, grouped by day, week or month; broken down by service, by payment method, by
 client and by expense category. Every table exports to CSV for Excel or the accountant.
+The **Profit on jobs** card at the top deliberately shows a dash instead of a sum: the
+counter asked for the figure off that card, because a job's cost is typed in by hand and he
+does not accept a profit total built from it as a headline. Nothing else moved — the Profit
+columns in every table below still do the arithmetic, job by job, and the same is true of
+the dashboard's own profit card, so the number is one scroll away for anyone who wants it.
 
 **Shop & devices** — the book's own back office, and the only screen about the shop rather
 than its work. Four figures along the top: the address devices use, whether a password is
@@ -456,15 +493,23 @@ from, and a button that throws it out — **The shop password** (choose, change,
 sign-in off, all from this Mac only), **Copies of the book**, which says when the last copy
 was made, whether it was checked against the original, where the second folder got to, how
 many are kept, how much room is left and when the next one is due — and lets the shop set the
-cadence, the nights kept and the second folder, or copy it now; and **Security of this book**,
+cadence, the nights kept and the second folder, or copy it now; **Email accounts**, which lists
+the mailboxes the shop sends client notices from, their server, when one last sent and what the
+mail server said the last time it refused, and lets this Mac add one, change one, forget one,
+choose which one sends, and press **Test this account** to hand one real letter to that server;
+and **Security of this book**,
 which states the rules a device is signing in under (rounds, days signed in, this Mac asked or
 not, HTTPS, the wrong-password wait and the per-minute ceiling) and lists the last forty
 things that happened to the book's guard, twelve shown at a time: sign-ins, turn-aways,
-lockouts, devices thrown out, password changes, cross-origin refusals and every copy — the
-book keeps four hundred of those lines, and no password, no partial password and no cookie
-ever goes into one. The last two cards can be *read* by a
+lockouts, devices thrown out, password changes, cross-origin refusals, mailboxes added, chosen,
+tested and forgotten, and every copy — the
+book keeps four hundred of those lines, and no password, no partial password, no mail account
+word and no cookie ever goes into one. Those last three cards can be *read* by a
 signed-in phone but only changed on the shop's own Mac, which says so plainly rather than
-greying itself out. While no password is set the screen opens with a warning: the book is open
+greying itself out. *The shop's own Mac* is this machine by either of its numbers: loopback, and
+the Wi-Fi address the counter's own browser and the app reach the book at — a call from
+`192.168.100.11` to `192.168.100.11` is this Mac talking to itself, and a device out on the
+network arrives as its own address, which can never equal it. While no password is set the screen opens with a warning: the book is open
 to anything on the Wi-Fi.
 
 ## How the money works
@@ -486,12 +531,59 @@ A payment typed without choosing a job becomes **credit on the client's account*
 when somebody hands over money before the work is booked. Refunds are entered as
 `Refund` and count against what was received.
 
+That credit is why **Owed to the shop** and **Owed on jobs** are not the sum of the job balances:
+each client's held credit is set against their own open jobs, biggest first, and the figure is
+floored at zero per client — one client's overpayment never hides another client's debt. The
+Outstanding table shows the arithmetic job by job, and its rows add back up to the headline.
+Because a page copied into `public/` goes live without a restart, the screen can be a build ahead
+of the server answering it; when that server has no netting to report, the page says plain
+"job balances" and asks for each job's own balance rather than calling anything covered.
+`tools/check-owed-net.py` renders the screen against both builds to keep that honest.
+
 Profit is only as good as the costs you enter. A job with nothing costed shows its whole
 price as profit in pale type, with the margin reading **not costed** — record the item
 costs or an expense and it turns into a real figure.
 
 Every change is written to the job's record: status moves, edits (shown as
 `Unit price: ₵ 45.00 -> ₵ 50.00`), notes and payments. Nothing is silently overwritten.
+
+## Taking an order at the counter
+
+The book is used one-handed, with a client standing at the desk, so the order screen is written for
+that minute rather than for a form. Twelve hundred flyers at twenty-five pese is typed the way it is
+said out loud — `1,200` and `₵0.25` — and it books **₵ 300.00**. Every money and quantity box takes a
+comma, a space or the `₵` sign, settles to plain digits the moment he leaves it, and stores plain
+digits; nothing is kept in the book with punctuation in it.
+
+- **The caret starts in a box you can type into.** In the client box when an order opens, in the
+  **amount** box when the money sheet opens. The first keystroke is never lost to a heading.
+- **Enter steps through the ticket instead of saving it.** From the price box it moves to the next
+  cell; from the last cell it opens another line. The order is booked by **Book it** or by
+  ⌘/Ctrl+Enter — and a booking that cannot be made stays open with the reason written on it.
+- **A pasted list lays itself out.** Product, specification, quantity and price, separated by tabs or
+  newlines, become one line each: the way a list arrives over WhatsApp.
+- **A name that matches one client picks them; a name that matches nobody puts them on file.** Enter
+  opens the new-client box with the typing already carried into it. Four walk-ins typed at this desk
+  are already sitting in the book as four separate clients, so the search answers to one.
+- **The cash belongs on the order screen.** A box under the total, a chip that fills it to the whole
+  figure, and one line saying which it became. Money that covers the job is recorded as a **Payment**
+  and the balance reads `₵ 0.00`, so the accounts never claim a paid client still owes; money short of
+  the total is a **Deposit** and leaves the rest owing.
+- **A settled job still takes money.** Any figure handed over after it was cleared is a Payment that
+  sits as credit on that job, shown as a negative balance — an advance on the next run, a second
+  instalment, money handed back. The money screen lists **every** job and choosing a person narrows it
+  to theirs, so a paid ticket is never a dead end.
+- **Yesterday's ticket is tomorrow's order in one press.** **Same order again** on the job sheet opens
+  a fresh booking with the client, the lines, the quantities and the prices already written, leaving
+  the date, the money and the status for him to set. It books a new row and the old one is untouched.
+- **A figure the book refuses comes back typed.** Click-to-change on the dashboard and the enquiry
+  list writes straight to the book; if the record moved on another device, or is gone, the typing is
+  put back in the field instead of wiped, and the page takes the record's current state so the next
+  attempt lands rather than being refused again.
+
+On the phone the ticket stops pretending to be a spreadsheet: each line becomes a small card with its
+own field names printed above the boxes, every input stays at 16px so the browser does not zoom away
+from the rest of the order while he types, and nothing on the screen has to be scrolled sideways.
 
 ## Money in and out by MoMo
 
@@ -631,6 +723,43 @@ server. If a provider is not configured, messages stay queued and show the missi
 the server never reports them as sent, and the job screen hands them to the shop to send by
 hand instead.
 
+### Email accounts
+
+The environment route above needs a terminal, a restart, and a mail password sitting in a shell.
+**Shop & devices ▸ Email accounts** is the same thing done at the counter: register the mailboxes
+the shop sends from — a name for the drawer, the address the client sees, the display name, the
+SMTP host, port and security, the sign-in name, and the app password — and the notices go out
+through them from that moment, with no restart.
+
+- **One mailbox sends.** The first one registered becomes the sender; **Make this the sender**
+  hands the place to another. The rest sit ready, so a mailbox the provider has locked can be
+  stood aside without the shop losing email altogether.
+- **The password does not live in the book.** Every other detail of a mailbox is ledger material
+  and is kept in `chrisphics.db`; the word is kept in `email-secrets.json`, one small file beside
+  the book at mode `600` — readable only by this Mac's own user. The book is copied every night,
+  mirrored to a second folder if you set one, downloaded from the page footer, and this repository
+  is public: a mail password travelling with the ledger is a mail password leaked. The screen can
+  therefore say *word saved* and never show it back. A password box left empty on an edit keeps the
+  word that is already there; **Forget** takes the mailbox and its word out together.
+- **Test this account** hands one real letter to that mail server, addressed to the mailbox's own
+  address, and reports what the server said. A refusal comes back in the shop's own words naming
+  the mailbox (*The mail server refused the word saved for shop@example.com.*) and is written on
+  that row as its **Last error**, so the counter can see which mailbox is the problem without
+  opening a job. A mail server saying no is the shop's details being wrong, not the counter's
+  machine breaking down, so it is answered as a 400 about the mail rather than a 500 about the
+  shop's Mac. A successful test clears the error and stamps **Last sent**.
+- **Only this Mac changes them.** The shop's own computer registers, edits, forgets, chooses the
+  sender and tests. A phone or a second machine out on the Wi-Fi can read which mailbox letters
+  go out through and when one last failed, and is turned away from every write — a mailbox and its
+  password are added where somebody can see it happen.
+- **A registered mailbox wins over the environment.** With nothing registered, email still falls
+  back to `CHRISPHICS_EMAIL_*`, so the Render box and any machine set up the older way keeps
+  working. With one registered, the environment is not consulted for that channel.
+
+`python3 tools/check-email-accounts.py` proves all of this against a mail server that is real but
+worth nothing — a throwaway SMTP listener on this Mac, its own CA and certificate, holding the
+conversations the shop's own `smtplib` believes.
+
 Email drafts and messages include the job reference, work, total, due date and balance. Once
 WhatsApp is configured, automatic updates use the approved short status template above; until
 then the queued message carries the shop's full wording, because it leaves through the shop's
@@ -691,6 +820,11 @@ never touches your records.
   Time Machine now and then — or set the second folder and let the copying do it.
 - **Restore**: quit the app, move your backup file into that folder renamed to
   `chrisphics.db`, and start again.
+- **The one thing that is not in the book**: if you register mailboxes on **Shop & devices ▸
+  Email accounts**, their passwords live in `email-secrets.json` beside `chrisphics.db`, at mode
+  `600`. A restored book with no file beside it comes back with its mailboxes listed and each one
+  saying *no word saved*; type the word once on that mailbox and it sends again. Take both files
+  off the Mac if you move the shop to another machine.
 - **Move to another Mac**: copy the `.app` and the `chrisphics.db` file. Only Python 3
   (already on macOS) is needed to run it.
 - **Start with an empty book**: quit, then delete `chrisphics.db` from that folder.
@@ -736,21 +870,134 @@ grey `#808085` it pairs with, measured from the artwork rather than eyeballed. B
 darkened for text (`--brand-ink`, `--link`) so they hold up as type on paper, and the mark's
 own inks (`#C93A3F` / `#9A9AA0`) are what the Dock icon and the tab icon are drawn with.
 
-There are three appearances — **Light**, **Dark** and **System**. In the Mac app pick one under
-`View ▸ Appearance` or in **Settings ▸ Appearance**, and the footer's own three buttons stay out of
-the way; in a browser tab or on a phone, where there is no Settings window, they sit at the end of
-the page footer. The choice is remembered on this Mac, and System follows the
-Mac's own Light/Dark setting the moment you change it. The dark palette is a real second
+There is **one appearance, and it is the clock's**: the light look between **8:00am and 5:00pm**, the
+dark one outside those hours, turning over by itself with nobody pressing anything (a machine that
+slept through 5:00pm corrects itself when it wakes). Nothing anywhere offers a choice of look — the
+page footer's buttons, `View ▸ Appearance` and **Settings ▸ Appearance** were all taken out on the
+owner's word (2026-10-13: "Remove Light, Dark or System because By clock is already there"), and the
+day/night checks now *fail if any of them comes back*. The dashboard
+card that carries the date and the running time says which of the two the clock is asking for.
+That card is **three widgets**, because the three versions before it went unseen; the last of them drew
+"let the calendar widget be the medium type with all the days on it, not small". So the calendar is
+the iPhone's **medium** form: the month and its year as a header, seven columns of initials running
+Monday to Sunday, and all forty-two cells under them — every day of the month, plus the weeks of the
+months either side in the quiet ink — with today set in a crimson roundel. It is the medium *content*
+at a landscape shape; see the "reduce the two widget" note below. Beside it the clock is
+drawn at **lock-screen size** (56px on a desktop, 32px on a phone), the seconds and am/pm kept small.
+Both wear this shop's own tokens, not somebody else's red: the roundel is crimson by day and the
+amber of an evening notice after, and the inks are measured rather than asserted — today's type
+7.11:1 on crimson, the day numerals 16.62:1 on the page, the month name, the neighbouring days and the
+weekday initials all past AA. Two of them had to change with the palette: the evening amber is a light
+colour on the dark palette, so its roundel ink turns *dark* there (white on it reads 2.46:1), and the
+month name cannot wear that palette's brand, which is only 3.22:1 on the lifted face, so it takes the
+brightened link red at 6.74:1. The face always holds six rows, so a month of four or five Fridays
+never changes the card's height next to the clock, and on a phone the month takes the whole row with
+the clock dropping under it rather than its cells shrinking to nothing. The whole date is still written
+out underneath, so nothing a widget leaves out is lost to anyone reading the screen aloud — and the
+widget is announced as "October 2026. Today is Tuesday 13." rather than forty-two numbers.
+There is nothing to overrule the clock with: the Mac app's own window chrome goes dark at 5:00pm and
+light at 8:00am alongside the page rather than waiting for the next opening, and it watches the hour
+after the window is drawn so a shop left open across 5:00pm turns over by itself. A machine that met
+the shop before the choice existed may still carry an old stored word; the page ignores it.
+The dark palette is a real second
 palette, not a filter: surfaces lift off black, the crimson brightens so it survives on a
 dark counter, and the status pills go from pale washes to deep ones with lightened type.
-Native date pickers and scrollbars follow the appearance too. Text clears WCAG AA in both
+Native date pickers and scrollbars follow the palette too. Text clears WCAG AA in both
 palettes on all seven screens, the job drawer and the new-job form.
+
+Both hours live in one place per file — `DAY_START` / `DAY_END` in `public/app.js`, repeated in the
+pre-paint script of `public/index.html` because that has to decide the palette before `app.js`
+exists — and `tools/check-daylight-theme.py` fails if the two ever disagree.
+
+The third widget on that card is the **weather**, added the same evening: "Add the weather after the
+calendar widget in the same size like the calendar". Same size is a fact about two painted boxes, so
+it is measured as one — the month and the weather both come out of a desktop at **302×185**, wearing
+the same `--cal-face`, the same `22px` corner and the same counter shadow, the weather tile stretched
+to the month's height rather than guessing at it. It sits *after* the calendar, and on a phone it takes
+the row underneath it at the month's own width (329px there), all six hours still in view. What is on
+it is the iPhone's medium weather form: the town and a drawn glyph along the top, the temperature at
+**40px**, the condition as a word (`Partly cloudy`, not `2`), the day's high and low, what it feels
+like and the damp, and six hours along the bottom.
+
+He then looked at the pair and said **"reduce the two widget and make them landscape"**. They were two
+**340×275** blocks that filled the card, and in his own window — a content column near 630px — they
+could not share a row, so they stacked one over the other and the clock fell off the screen. Both are
+now **302×185** on a desktop: the same month, the same six hours, a third less of the card, and each
+tile at least a half again wider than it is tall. What shrank is the row and the padding, never the
+month — all forty-two cells are still on the face, at 15px numerals in 20px rows with a 20px roundel.
+At the counter's width the two now sit side by side on one band, which is the part a full-desktop
+screenshot cannot show, so `tools/check-daylight-theme.py` measures that window too: one run holds the
+page at 860×800 and fails if the weather drops under the month, if the two boxes stop agreeing, or if
+either stops lying down.
+
+The figures come from **Open-Meteo** for Accra — no key, plain HTTPS, and the shop's own server stays
+local rather than becoming a weather station, which is why this shipped as a `public/` change with no
+restart. The six hours are laid out on the *service's* own clock, not the machine's, so a laptop with
+the wrong time cannot move the forecast. The glyph is drawn in the shop's slate (`--cool`, the same
+token the card's own left border wears) and turns to amber only for the sun — never a borrowed sky
+blue — and the weather is carried by the glyph's **shape** (sun, cloud, rain, snow, fog, storm, and a
+crescent when the service says it is night), so a machine that cannot tell the two inks still reads
+the right weather. Every ink on the tile is the calendar's token, so every pair is one the shop already
+measures: the temperature and condition 16.62:1 by day and 13.26:1 by night, the town 7.11:1 and
+6.74:1, the quiet lines 5.43:1 and 5.94:1.
+
+And when the sky does not answer, the tile does not make anything up. It asks once when the dashboard
+opens, then every twenty minutes while it has a real reading to show — but a screen with **nothing** to
+show is chased again after a **minute**, because the shop's counter is left open all day and one slow
+answer at 8:00am must not leave it saying "No weather" until 8:20. Nor does it say that while the ask is
+still in the air — that tile reads *"Getting the weather…"* until an answer actually comes back refused,
+because a machine reaching the service at that second is not a machine that cannot reach it. A machine
+that is refused says so in plain words —
+*"No weather — this machine cannot reach the forecast."* — and draws **no figure at all** rather than a
+zero. A machine that has an old reading in its pocket keeps showing it and marks it `read at 7:50 pm`,
+because a figure from yesterday on a screen people trust is worse than none. The whole tile is
+announced as one sentence — "Accra: Overcast, 27 degrees, feels like 30, high 32, low 25." — or as
+"Accra, no reading yet." when there is nothing to say. `tools/check-daylight-theme.py` runs all of it
+against a frozen clock and a **forecast of the check's own choosing**, because a test that passes or
+fails depending on the weather outside the counter is not a test; it then runs once more with the real
+service left alone, to prove the page can actually read what Accra answers.
+
+On the dashboard only, the panels are **glass**. Each card and each money tile is a translucent
+sheet that samples what is behind it (`backdrop-filter: blur(20px) saturate(130%)`), lifted on a
+soft shadow, with a hairline of light running round its rim where it catches the day; a money tile
+gives a little under a press and settles back. For there to be anything to see through, the screen
+carries an ambient wash of the shop's own three colours — the crimson, the pipeline blue, the amber
+of a notice — laid in soft blobs behind the panels and never on top of the type, and a second
+arrangement of the same three colours crossfades over it every half-minute, so a tile's tint drifts
+while the figure on it holds still. It is the same material in both appearances, just tinted for the
+counter it sits on: a brighter sheet by day, a deeper one at night with the rim still shining.
+**This is the material, not Apple's lens** — real refraction of the content behind is not something
+this app's rendering engines can be asked for, so nothing bends or magnifies at the edges.
+
+The first ship of it went unseen, and the reason is worth keeping: a panel that is 72% white lets
+through 28% of what is under it, and what was under it was crimson at `.16` alpha — dark pigment,
+already nearly grey. Measured through the glass it came out at chroma 6 out of 255, which is not a
+colour anybody can see. So the wash is built from bright tints at high alpha instead: the hue rides
+on lightness rather than eating it, which is the only way to get colour through a white sheet and
+still keep the money figures readable. The same arithmetic says a blob edge has to be crisp for the
+blur to have anything to smear, which is what makes the glass read as a material at all. Through the
+glass the panel now sits at chroma 23-29 by day and 28-42 at night, against the 1-6 it used to be.
+
+It is deliberately narrow: `render()` takes the glass class off on every route and only
+`viewDashboard()` puts it back, so the other seven screens, the sign-in door and the printed job
+sheet are untouched. The two alarm cards — a job running late and the shop being shut — stay solid
+opaque, because a warning the counter has to read at a glance is not allowed to be see-through. An
+engine with no `backdrop-filter` at all gets a solid panel instead of a washed-out one, and a machine
+asking for reduced motion gets no transitions and a wash that sits still at half-strength rather than
+drifting. `tools/check-liquid-glass.py` measures the contrast of every ink through **every** stop of
+both wash layers, with the panel's own `saturate()` applied before the compositing rather than after
+(worst case 4.60:1 light, 4.89:1 dark, both past WCAG AA), fails if the wash stops being colourful
+enough to see, loads all eight other screens to prove they did not change, and reads the values back
+off a page laid out in the same WebKit the Mac app ships.
 
 The printed job sheet is the one thing that stays black on white in either appearance, so a
 photocopy and a customer's copy look the same.
 
 To retune a colour, change the token in `public/styles.css` — the light values are in the
-`:root` block at the top, the dark ones in `:root[data-theme="dark"]` just under it. Every
+`:root` block at the top, the dark ones in `:root[data-theme="dark"]` just under it. The glass has
+its own set in those same two blocks (`--glass`, `--glass-rim`, `--glass-spec`, `--glass-shadow`,
+`--wash-*`); its corner radius (`--r-glass`) is written once, above them both, because the panels
+are the same shape at midnight as at noon. Every
 screen reads those variables, so one line moves the whole app. The logo itself is
 `public/img/brand.png`; the favicon is drawn inline in `public/index.html` and the Dock icon
 by `desktop/make-icon.swift`.
@@ -763,15 +1010,20 @@ the Poppins on this Mac does not carry that feature. To change the look, change 
 one place; weights used anywhere in the CSS are snapped to the four Poppins ships
 (400 / 500 / 600 / 700), so an in-between weight silently becomes its nearest one.
 
-Five dev checks live in `tools/`, and none of them needs anything installed:
+The dev checks live in `tools/`, and none of them needs anything installed:
 
 | Command | What it answers |
 | --- | --- |
 | `python3 tools/js-check.py` | does `public/app.js` still parse? (one stray bracket empties every screen) |
 | `python3 tools/check-profile-settings.py` | can the shop's own details be saved and read back out of the book, do bad ones get refused, and does a cleared one fall back to its default? Runs against a **copy** of the book on a throwaway port. |
 | `python3 tools/check-backups-security.py` | does the book get copied by itself, checked, mirrored, retained and reported; and is it guarded — password rules, salted 600,000-round hash, session length, devices thrown out, wrong-password waits, the per-minute ceiling, cross-origin refusals, the security trail, HTTPS headers? Runs four throwaway servers on ports 8897–8899 against a **copy** of the book, in its own backup folders, and closes by proving no job, client, payment, expense or message moved and that the shop's own file was not written to. |
+| `python3 tools/check-daylight-theme.py` | does the dashboard carry the shop's date and a clock that runs, and does the look follow the hour — light 8:00am–5:00pm, dark outside, turning over by itself with nobody touching it, and that no surface offering a hand-picked look survives — the page carries no appearance buttons, and a `crispprint-theme` word left in a browser by an older build is proved ignored? It also measures the two widgets as painted: that the calendar is the **medium** type with **all forty-two cells of the month on it, in order**, today marked exactly once and in the right row and column, the grid seven columns wide, the numerals and the month name large enough to be seen from the counter, and all five inks (roundel, month name, numerals, neighbouring months, weekday initials) re-measured against AA out of the palette the page is actually wearing. It walks one page held open across a midnight and across the last minute of a month, and closes by proving nothing hangs off a 390px screen and the shop's own file was not written to. Every page is run in the same WebKit the app uses with its clock frozen by an injected script, so the hour under test is the hour the page believes from its pre-paint script onwards. |
+| `python3 tools/check-app-daylight.py` | does the Mac app's own **By clock** keep the same day as the page? `desktop/src/Theme.swift` is compiled on its own into a throwaway command that answers for all twenty-four hours, so the window chrome's rule is run rather than read; it also fails if the shell's 8/17 ever disagrees with the page's, and refuses any appearance mode, menu or Settings pane coming back. |
+| `python3 tools/check-flexible-entry.py` | can the counter take an order and its money without fighting the screen? A real WebKit view drives the shipped page against a **copy** of the book: the caret landing in a box, `1,200` and `₵0.25` booking ₵ 300.00, Enter stepping through the lines instead of half-booking, a pasted list laying itself out, cash on the order screen recorded as a Payment so the balance reads zero, money taken on a job the book already calls settled, one press repeating yesterday's ticket, a refused figure coming back typed, and the whole ticket readable at 390px. Runs one at a time — the view's browser data is per address, so a second concurrent run wipes the first one's mid-scenario. |
+| `python3 tools/check-shop-boot.py` | does the counter open by itself? The real keeper is run against a **copy** of the book, a throwaway support folder, a throwaway certificate and a stand-in helper, and watched through three scenes: switched on before the Wi-Fi has joined (it waits, says so in the log, and serves the moment the lease appears — nobody restarts anything), the address moving under a shop that is already serving (it lets go of the dead bind, re-certifies for the new number, and is serving again by itself when the lease comes back), and a second keeper arriving to find the shop answering (it refuses to start another engine over one book). It then reads the live service file for the keys that make the rest true — login start, restart on a bad exit, the five-minute re-arm, the short throttle, and no address of the day pinned in it — proves the served copies of both tools match this repository, that the address rule lives in one place, and closes by showing the live book is exactly the bytes it started with. Ports 8911–8913 are claimed first, so a number somebody else is holding cannot fake a pass. |
+| `python3 tools/check-email-accounts.py` | can the shop register the mailboxes it sends from, and does the mail actually go? A **throwaway SMTP server** is run on this Mac — real sockets, real STARTTLS, real `AUTH`, on a certificate minted for this one run from its own CA — so *Test this account* is proved against a server rather than a mock. Runs two throwaway shop servers on free ports it asks the kernel for, against a **copy** of the book, in its own support and backup folders: registration and its refusals, the first mailbox becoming the sender and a second waiting, an edit with the password box left empty keeping the saved word, a mailbox that is no longer in the book answered honestly, and every path gated so a phone out on the Wi-Fi can read the list but cannot add, change, forget, choose or test. It then proves the two rules the feature exists for: that no copy of the book, no server log, no API response and no stored provider error ever carries a word, while the secrets file sits beside the book at mode `600` and not among the copies; and that a client's **Ready** notice goes out by itself through the mailbox the shop chose, over TLS, with the provider's own receipt kept against the message and the job timeline saying so. A refusal is checked to be a 400 about the mail rather than a 500 about the Mac, an untrusted certificate is checked to be refused, a provider that repeats the word back is checked to come back `[hidden]`, and the registered mailbox is checked to win over `CHRISPHICS_EMAIL_*`. Closes by proving only the throwaway job and client moved, in the copy, and that the shop's own file is the bytes it started with. |
 | `swift tools/make-qr.swift "<address>" /tmp/shop-qr.png 520` | the counter's QR as a printable PNG — and every code is read back before the file is trusted (`--verify <file.png>` checks one already drawn) |
-| `swiftc -O tools/wk-probe.swift -o /tmp/wk-probe` then `/tmp/wk-probe <url> <dir> "open\|/#/jobs" "shot\|jobs"` | what a screen actually rendered, in the same WebKit the app uses, as text plus a PNG |
+| `swiftc -O tools/wk-probe.swift -o /tmp/wk-probe` then `/tmp/wk-probe <url> <dir> "open\|/#/jobs" "shot\|jobs"` | what a screen actually rendered, in the same WebKit the app uses, as text plus a PNG. `WKPROBE_HANDLERS=external` registers a handler the app's shell registers, so a page can be read as the app sees it — what it posts there comes back as `posted external: …`. `WKPROBE_SCRIPT=<file>` injects a script before the page's own, and `WKPROBE_FRESH_DATA=1` starts the browser with none of the history it kept from the last run |
 
 ## Notes
 

@@ -34,6 +34,7 @@ tools/shop-server.sh — make this Mac the shop's always-on server
   install   Run the book as a service that comes back by itself, and copy it nightly.
   status    Is it running, what did it last say, when is the next copy.
   remove    Stop the services and take back the two files this tool created. Logs stay.
+  wifi-ip   The address this Mac holds on the shop network, or nothing. (tools/shop-boot.sh asks here.)
 
 Add --take-over when a server is already running by hand and you want this tool to stop
 it and take the address over. It always asks you to type yes before changing anything.
@@ -134,10 +135,11 @@ NAMES
   printf '%s' "$out"
 }
 
-# The service answers on every address this Mac has, not on the Wi-Fi number of the day: a router
-# that hands out a fresh address at midnight must not take the shop offline until someone notices.
-# The certificate is the part that names one address, and `certs` is what refreshes it.
-SERVE_HOST="0.0.0.0"
+# The service runs through tools/shop-boot.sh, which answers on every address this Mac has — not on
+# the Wi-Fi number of the day — so a router handing out a fresh address at midnight does not take
+# the shop offline until someone notices. A keeper started with --allow-unauthenticated-lan has no
+# choice but to name one number (server.py demands it), so it re-reads the address and re-issues the
+# certificate instead of dying quietly. The certificate is the part that names one address.
 
 book_has_password() {   # 0 yes, 1 no, 2 cannot tell
   local value=""
@@ -439,9 +441,8 @@ server_plist() {   # $1 = file to write
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/python3</string>
-    <string>$REPO/server.py</string>
-    <string>--host</string><string>$SERVE_HOST</string>
+    <string>/bin/bash</string>
+    <string>$SRC/shop-boot.sh</string>
     <string>--port</string><string>$PORT</string>
     <string>--tls-cert</string><string>$CERT</string>
     <string>--tls-key</string><string>$KEY</string>
@@ -450,7 +451,8 @@ server_plist() {   # $1 = file to write
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
   <dict><key>SuccessfulExit</key><false/></dict>
-  <key>ThrottleInterval</key><integer>20</integer>
+  <key>StartInterval</key><integer>300</integer>
+  <key>ThrottleInterval</key><integer>15</integer>
   <key>WorkingDirectory</key><string>$REPO</string>
   <key>StandardOutPath</key><string>$LOG</string>
   <key>StandardErrorPath</key><string>$ERRLOG</string>
@@ -777,6 +779,9 @@ case "$cmd" in
   install) cmd_install ;;
   remove) cmd_remove ;;
   status) cmd_status ;;
+  # tools/shop-boot.sh asks here rather than keeping its own copy of the answer: two rules for
+  # "which address is the shop's" would drift, and the keeper would bind a number nothing trusts.
+  wifi-ip) wifi_ip; printf '\n' ;;
   "") usage ;;
   *) warn "I do not know \"$cmd\"."; usage; exit 2 ;;
 esac

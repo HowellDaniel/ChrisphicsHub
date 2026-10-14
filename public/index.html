@@ -16,17 +16,13 @@
 <script>
 /* Decide the theme before the first paint, or the screen flashes the wrong one on load. */
 (function () {
-  var stored = null;
-  try { stored = localStorage.getItem("crispprint-theme"); } catch (e) {}
-  var mode = stored === "light" || stored === "dark" ? stored : "system";
-  var dark = mode === "dark" || (mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-  document.documentElement.dataset.themeMode = mode;
-  /* Inside the Mac app the look is chosen in Settings ▸ Appearance, so the page does not ask a
-     second time. A handler named "theme" is only ever bound by that shell. */
-  try {
-    if (window.webkit.messageHandlers.theme) document.documentElement.dataset.native = "1";
-  } catch (e) { /* a browser tab, or a phone: nothing seeds the look for it */ }
+  /* The two hours app.js calls DAY_START and DAY_END, written out again because this runs while
+     app.js does not exist yet: a screen that paints light at 8pm and corrects itself a second later
+     is exactly the flash this script was put here to prevent. tools/check-daylight-theme.py fails
+     if these numbers and the ones in app.js ever drift apart. There is nothing else to work out:
+     the shop's clock is the only look there is, and nothing is stored to read. */
+  var h = new Date().getHours();
+  document.documentElement.dataset.theme = (h < 8 || h >= 17) ? "dark" : "light";
 })();
 </script>
 </head>
@@ -74,11 +70,6 @@
       <span class="spacer"></span>
       <button class="linkbtn" data-action="backup">Download data backup</button>
       <button class="linkbtn" data-action="sign-out" id="signOut" hidden>Sign out of this device</button>
-      <div class="themeseg" role="group" aria-label="Appearance">
-        <button type="button" data-theme-set="light" aria-pressed="false">Light</button>
-        <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
-        <button type="button" data-theme-set="system" aria-pressed="true">System</button>
-      </div>
     </footer>
   </main>
 </div>

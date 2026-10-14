@@ -151,6 +151,26 @@ CREATE TABLE IF NOT EXISTS notifications (
   updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+-- A mailbox the shop sends job notices from, one row each. The one marked default is what
+-- automatic delivery uses. The mail password is deliberately NOT kept here: this book is copied
+-- every night and mirrored to another folder, and a mail password travelling with the ledger is a
+-- mail password leaked. It stays in email-secrets.json beside the book at mode 600 instead.
+CREATE TABLE IF NOT EXISTS email_accounts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  label         TEXT NOT NULL,                        -- what the counter calls it: Shop office
+  from_address  TEXT NOT NULL,                        -- the address clients see and reply to
+  from_name     TEXT NOT NULL DEFAULT '',             -- '' prints the shop's own name
+  smtp_host     TEXT NOT NULL,
+  smtp_port     INTEGER NOT NULL DEFAULT 587,
+  smtp_security TEXT NOT NULL DEFAULT 'starttls',     -- starttls | ssl
+  username      TEXT NOT NULL DEFAULT '',             -- '' logs in as the address above
+  is_default    INTEGER NOT NULL DEFAULT 0,
+  last_sent_at  TEXT,                                 -- last handover the provider accepted
+  last_error    TEXT NOT NULL DEFAULT '',             -- the provider's own words, never the password
+  created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
 -- A payment notice the shop did not type: read out of Messages, or pasted in.
 -- The alert text is money news, not a bill, so it waits here until it is matched to a
 -- client and booked — `payment_id` is what makes re-reading the same text harmless.
