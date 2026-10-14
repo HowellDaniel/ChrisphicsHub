@@ -7,3 +7,8 @@ __pycache__/
 # The app bundle under the old misspelled name. The shop is still running from it;
 # it is deleted once "Chrisphics Hub.app" replaces it. Never rebuild or publish this one.
 Chriphics Hub.app/
+
+# Two one-off scripts that settled the shop's own ledger: they name clients and their money,
+# and this repository is public. Keep them on the Mac, never in it.
+tools/clear-owed-on-jobs.sql
+tools/write-off-152-profit.sql
