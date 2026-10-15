@@ -760,11 +760,13 @@ the shop sends from — a name for the drawer, the address the client sees, the 
 SMTP host, port and security, the sign-in name, and the app password — and the notices go out
 through them from that moment, with no restart.
 
-A fresh form arrives already aimed at the shop's own Gmail (`smtp.gmail.com`, port `587`, STARTTLS,
-`chriphicshubgh@gmail.com`), because that is the mailbox the letters actually leave from. Only the
-app password is left in the empty box, and only the counter may type it: Gmail wants a 16-character
-app password from the account's own security settings, not the word that opens the mailbox on a
-phone. Ask for it, and nobody — including this repository — ever sees it.
+A fresh form arrives already aimed at Gmail's servers (`smtp.gmail.com`, port `587`, STARTTLS), which
+are the same for every Gmail mailbox. The address itself is typed by the counter, and so is the app
+password: no mailbox is written into the program, because this repository is public and an address
+named in it is an address a stranger can aim a phishing letter at. Gmail wants a 16-character app
+password from the account's own security settings, not the word that opens the mailbox on a phone —
+and nobody, this repository included, ever sees that either. Once a mailbox is registered it lives in
+the book with its address, so the counter is only ever asked once.
 
 - **One mailbox sends.** The first one registered becomes the sender; **Make this the sender**
   hands the place to another. The rest sit ready, so a mailbox the provider has locked can be

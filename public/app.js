@@ -1850,10 +1850,11 @@ function securityCard(guard, shopMac) {
    book at mode 600 instead, so this screen can say that a password is saved and never show it back. */
 let emailEditing = null;
 
-/* The shop's letters go out over its own Gmail, so a fresh form arrives already aimed at it and only
-   the app password is left to type — the one thing nobody but the counter may touch, and the one
-   thing that never goes into the book. */
-const GMAIL_MAILBOX = { label: 'Gmail', from_address: 'chriphicshubgh@gmail.com',
+/* The shop's letters go out over Gmail, so a fresh form arrives already aimed at Google's servers:
+   host, port and connection are the same for every Gmail mailbox, and the counter is left to type
+   the address and the app password. No mailbox is written into this program — the shelf it lives on
+   is public, and an address named there is one a stranger can aim a phishing letter at. */
+const GMAIL_MAILBOX = { label: 'Gmail', from_address: '',
   smtp_host: 'smtp.gmail.com', smtp_port: 587, smtp_security: 'starttls' };
 
 function emailForm(account, shopName) {
