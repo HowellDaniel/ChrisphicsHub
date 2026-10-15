@@ -36,6 +36,12 @@ tidy.execute("UPDATE app_state SET value='0' WHERE key='shop_mac_login'")
 tidy.commit()
 tidy.close()
 live_stat = os.stat(LIVE)
+# The shop has since settled its own contact number on the counter's screen, so a copy of the book
+# arrives holding a profile. Read what it really keeps: a check may not assume the shop has never
+# used Settings ▸ Profile, or it fails for the wrong reason every time the shop does the right thing.
+stored_profile = dict(sqlite3.connect(CLONE).execute(
+    "SELECT key, value FROM app_state WHERE key IN ('shop_name','shop_tagline','shop_phone',"
+    " 'shop_address')").fetchall())
 
 env = dict(os.environ, CHRISPHICS_DB=CLONE, CHRISPHICS_SUPPORT=work,
            CHRISPHICS_BACKUP_DIR=os.path.join(work, "Backups"), PYTHONUNBUFFERED="1")
@@ -81,8 +87,13 @@ try:
     check("GET /api/shop answers", code == 200, "%s" % shop["shop"]["name"])
     check("the money number is shown", shop.get("momo_number") == "0506399641",
           shop.get("momo_number", ""))
-    check("nothing is kept in the book yet",
-          not any(shop.get("kept_in_book", {}).values()), str(shop.get("kept_in_book")))
+    fields4 = (("name", "shop_name"), ("tagline", "shop_tagline"),
+               ("phone", "shop_phone"), ("address", "shop_address"))
+    kept_now = dict((f, k in stored_profile) for f, k in fields4)
+    check("what the book keeps is what the server speaks",
+          shop.get("kept_in_book") == kept_now
+          and all(shop["shop"][f] == stored_profile[k] for f, k in fields4 if k in stored_profile),
+          "holds %s" % ", ".join(f for f in kept_now if kept_now[f]) or "nothing yet")
 
     code, raw = call("PUT", "/api/shop", {"name": "CRISPprint Ghana Ltd",
                                           "tagline": "Printing & Design Services",
