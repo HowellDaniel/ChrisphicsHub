@@ -274,9 +274,19 @@ try:
     #    chasing because a figure the server never sent happened to be missing.
     old_dir = os.path.join(work, "old-build")
     os.makedirs(old_dir)
-    with open(os.path.join(old_dir, "server.py"), "wb") as fh:
-        fh.write(subprocess.run(["git", "show", "HEAD:server.py"], cwd=REPO,
-                                 capture_output=True).stdout)
+    # Pinned to the commit before the credit figure first entered the server, found by search
+    # rather than by number: HEAD was this check's first answer, and it went stale the day the fix
+    # it tests was committed — the page then read against a build that knew all about credit.
+    landed = subprocess.run(["git", "log", "--format=%H", "-S", "covered_by_credit", "--",
+                             "server.py"], cwd=REPO, capture_output=True, text=True).stdout.split()
+    old_ref = (landed[-1] + "^:server.py") if landed else "HEAD:server.py"
+    shown = subprocess.run(["git", "show", old_ref], cwd=REPO, capture_output=True)
+    if not check("the build behind has never heard of account credit",
+                 shown.returncode == 0 and b"covered_by_credit" not in shown.stdout, old_ref[:24]):
+        fails.append("the Accounts screen was never rendered, so the skew went untested")
+    else:
+        with open(os.path.join(old_dir, "server.py"), "wb") as fh:
+            fh.write(shown.stdout)
     for name in ("public", "schema.sql"):
         os.symlink(os.path.join(REPO, name), os.path.join(old_dir, name))
     OLD_CLONE = os.path.join(work, "old-clone.db")
