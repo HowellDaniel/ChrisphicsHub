@@ -119,6 +119,11 @@ Neither file holds a secret: the password lives in the book as a hash, the priva
 in `~/Library/Application Support/CRISPprint TLS/shop-key.pem` at mode 600, and the logs land
 beside the book as `shop-server.log` and `shop-server.error.log`.
 
+Every line in `shop-server.error.log` starts with the time and then the **address of the machine
+that asked**, so when the counter wants to know who came calling — `19:11:47  192.168.100.14
+"GET /api/momo HTTP/1.1" 200 -` — it is there. Only the address is written: no machine code, no
+sign-in word, nothing a reader of that file could use to become someone else.
+
 **The keeper: `tools/shop-boot.sh`.** This is what makes the counter open by itself when the Mac
 is switched on. `server.py` has to be told which address to hold, and the router decides that
 number, so a service handed a fixed one either dies when the Wi-Fi has not joined yet at login or
@@ -399,10 +404,10 @@ The first thing on it is the shop's own **day**: the month laid out the way an i
 calendar widget lays it out, beside a clock the size of a phone's lock screen, the date in full
 underneath, the time running to the second, and the hour the look
 turns over — see [Colour and appearance](#colour-and-appearance).
-Above the tiles sits **Money in and out by MoMo**: wallet alerts the shop did not type, read
-out of Messages or pasted in, waiting to be booked ([see below](#money-in-and-out-by-momo)).
-Below that: quotes still waiting for an answer, enquiries due for a chase, and where the
+Below the tiles: quotes still waiting for an answer, enquiries due for a chase, and where the
 month's money went.
+The *MoMo money in and out* card that used to sit above the tiles is gone — the owner asked for it
+off the Dashboard on 2026-10-15 ([see below](#money-in-and-out-by-momo)).
 
 The dashboard is the one screen you work *in*, not just read. Every number tile is a way
 into the screen behind it, and the things the shop changes during a day — a job's title,
@@ -588,18 +593,41 @@ from the rest of the order while he types, and nothing on the screen has to be s
 ## Money in and out by MoMo
 
 Clients pay into **0506399641**. When a payment alert arrives as an SMS in **Messages** on
-this Mac, the dashboard should already know about it — the *MoMo money in and out* card at the
-top of the Dashboard is how that happens.
+this Mac, the shop's own Python reads it — but since 2026-10-15 nothing on the Dashboard shows
+it: the owner's word was *"remover the momo in and out on the dashboard"*, and the *MoMo money in
+and out* card, its buttons and its styling came off `public/app.js` and `public/styles.css` with
+it. The reading, the storage and the money-marking below all still work; only the screen that
+presented them is gone. Money that came through the number now enters the book the way any other
+payment does — **at the Collect screen or on the client's page, with `MoMo` chosen as the method**.
 
-**Watch Messages** turns on a reader that looks at Messages every twenty seconds. It opens
-`~/Library/Messages/chat.db` **read-only**, never writes to it, and never sends anything.
-macOS protects that file, so the first time you switch it on the app needs permission:
-*System Settings ▸ Privacy & Security ▸ Full Disk Access*, tick **Chrisphics Hub** (or the
-terminal you started `server.py` from), then press **Check Messages now**. Without it the card
-says so in one line instead of failing quietly, and the paste box still works.
+The reader itself is a server-side poller, not part of the card. While `momo_watch` is on — and it
+defaults to on — every twenty seconds it opens `~/Library/Messages/chat.db` **read-only**, never
+writes to it, and never sends anything, and stores what it recognises in `money_signals`. macOS
+protects that file, so the engine that runs it needs the door:
+*System Settings ▸ Privacy & Security ▸ Full Disk Access*, aimed at whichever program is doing the
+reading — the Mac app and the Wi-Fi server that starts itself at boot are two different programs to
+macOS, and granting one does not grant the other. Either one reading is enough, and the one that
+cannot get in keeps out of the way: while any read is under ninety seconds old — the shared
+`momo_read_ok` stamp, or a blank refusal with a fresh poll behind it, which is all an app built
+before that stamp existed leaves — the shut engine writes nothing at all, so it cannot stamp its
+refusal over the working reader, and equally cannot renew that proof with its own silence once the
+reader has gone home. `tools/check-momo-door.py` proves both halves.
 
-**Paste an alert instead — this needs no permission**: drop the SMS text into the box and press
-**Read it**. Same reading, no disk access.
+**The consequence of the card being gone**: notices the reader stores have no screen any more, so
+they sit in `money_signals` as `Unreviewed` and nothing can be booked from them. Turning the reader
+off is a one-line write to `app_state` (`momo_watch` = `0`) on the shop's own Mac, and it needs the
+same care as any book write — snapshot the file first. **Both were done on 2026-10-15**: this shop's
+book now carries `momo_watch='0'`, so no engine reads Messages at all, and the 43 stored notices (all
+MTN and Telecel housekeeping, none a client paying in) were deleted after a `.backup` of the book.
+The card is recoverable from git: it lived in `public/app.js` before this pass, and the
+`POST /api/momo` endpoints it used are untouched.
+
+**The book is the authority for what came through the number.** Whatever the reader does, every
+payment recorded with **MoMo** as its method is summed by `momo_ledger()` — this month and all the
+time — and the clients who sent it are listed with their totals and last payment day; that payload
+still answers on `GET /api/momo` even though no card reads it. Marking a payment MoMo changes its
+label and nothing else: the day's, week's and month's takings read the same whichever method is
+ticked, which is the half that `tools/check-momo-ledger.py` is strictest about.
 
 What the reader takes from a text:
 
@@ -611,39 +639,39 @@ direction     money coming in, or money going out of the wallet
 
 Number and name are what tie an alert to a client: the payer's number is matched against each
 client's phone and WhatsApp (normalised to the same 233 form), and if no number matches, the
-name is tried. That is as far as it goes — nothing is guessed, and an alert that cannot be
-placed waits in the panel with the reason written out, so a person can name the client and
-pick the job. **Money going out** (`you sent`, `sent to`, `paid to`, `withdraw`, `debited`…)
-is flagged and never booked as a payment in — it has its own recording path below. Airtime
+name is tried. That is as far as it goes — nothing is guessed, and an alert that cannot be placed
+is stored with the reason written out in its row. **Money going out** (`you sent`, `sent to`,
+`paid to`, `withdraw`, `debited`…) is flagged `Out` and never booked as a payment in. Airtime
 messages, prizes and promotions are dropped and never appear as a notice at all.
 
-Press **Book it** and the money enters the book like any other payment: `MoMo` as the method,
-**the client's own name as the transaction reference**, the amount, the job you chose (or left
-as *Kept on their account (credit)* when nothing is owed), and the raw alert kept in the note
-as the proof. The collected and owed figures on the Dashboard move at once, and while the
-Dashboard is open the card refreshes on its own every twenty seconds, so an alert that arrives
-while you are working shows itself without a click.
+Booking an alert used to be one press on the card: `MoMo` as the method, **the client's own name as
+the transaction reference**, the amount, the job chosen (or none, leaving it as credit on their
+account), and the raw alert kept in the note as the proof. That press is gone with the card; the
+same entry now happens at the counter — a payment added on the Collect screen or the client's page,
+method `MoMo`, the client's name in the reference box, the alert text in the note.
 
-**A send out belongs in the book as well.** Money leaving the wallet is either the shop paying
-for something or money handed back to a client, and only the person at the counter knows which
-— so a send never books itself, whatever **Book without asking** is set to. The row asks
-**Who this went to**, and the two answers are recorded differently:
+**A send out belongs in the book as well, and it has no screen either.** Money leaving the wallet is
+either the shop paying for something or money handed back to a client, and only the person at the
+counter knows which, so `POST /api/momo/<id>/send` never fires on its own — an `Out` notice waits.
+The two answers the card used to ask for are recorded differently:
 
-* choose the client and **Record send** writes a **Refund** on their account. The amount comes
-  off what they had paid, the job's balance grows back, and the job timeline says
-  *refunded to the client* — never *received*;
-* leave it on **Nobody in the book — money out**, choose a **Money out for** category, and it
-  enters the Expenses ledger against the payee named in the alert, with the raw text kept as
-  the proof.
+* against a client it is a **Refund** on their account: the amount comes off what they had paid,
+  the job's balance grows back, and the job timeline says *refunded to the client* — never
+  *received*;
+* with no client chosen it enters the Expenses ledger against the payee named in the alert, with
+  the raw text kept as the proof.
 
-The panel counts sends separately from money in, so the two never add up to the wrong total.
-Delete that payment or expense later and the notice comes back to the waiting list with a line
-saying why, instead of vanishing from both places at once.
+Sends are counted separately from money in the payload (`sent` / `sent_total` against
+`booked` / `booked_total`), so the two never add up to the wrong total. Delete that payment or
+expense later and the notice returns to `Unreviewed` with a line saying why, instead of vanishing
+from both places at once.
 
-**Book without asking** takes the last click away: an alert whose amount, direction and client
-all read cleanly books itself the moment it is seen. It is off by default and asks you to
-confirm before it turns on, because it writes money into the book with no human between the
-SMS and the ledger. Anything it cannot place with certainty still waits for you.
+**Book without asking** (`momo_auto`, off by default) is the one path that still writes money with
+nobody pressing anything: an alert whose amount, direction and client all read cleanly books itself
+the moment it is seen. The card's confirmation dialog went with the card, so switching it on is now
+a write to `app_state` on the shop's own Mac — and it should stay off unless the reading below has
+been checked against a real alert, because it puts money in the book with no human between the SMS
+and the ledger. Anything it cannot place with certainty still waits.
 
 Only texts that actually read as money news are stored, and only in the `money_signals` table
 of the same SQLite file, next to everything else in the book. Nothing is uploaded, and the
@@ -652,8 +680,9 @@ excluded when the reader looks for the payer, so your own number is never mistak
 client's.
 
 Alert wording differs by network and changes over time. Before trusting **Book without
-asking**, read one real alert from your own SMS through the panel and check the amount, the
-name and the direction come back as they should.
+asking**, run `poll_messages()` from the shop's own server code in a throwaway copy of the book and
+check the amount, the name and the direction of one real alert come back as they should — the card
+that used to show that reading is gone, so this is the only way to see it.
 
 ## Telling the client
 
@@ -730,6 +759,12 @@ The environment route above needs a terminal, a restart, and a mail password sit
 the shop sends from — a name for the drawer, the address the client sees, the display name, the
 SMTP host, port and security, the sign-in name, and the app password — and the notices go out
 through them from that moment, with no restart.
+
+A fresh form arrives already aimed at the shop's own Gmail (`smtp.gmail.com`, port `587`, STARTTLS,
+`chriphicshubgh@gmail.com`), because that is the mailbox the letters actually leave from. Only the
+app password is left in the empty box, and only the counter may type it: Gmail wants a 16-character
+app password from the account's own security settings, not the word that opens the mailbox on a
+phone. Ask for it, and nobody — including this repository — ever sees it.
 
 - **One mailbox sends.** The first one registered becomes the sender; **Make this the sender**
   hands the place to another. The rest sit ready, so a mailbox the provider has locked can be
@@ -863,7 +898,12 @@ nobody.
 The `.app` carries its own copy of the program, so after editing anything run
 `./desktop/build-app.sh` and reopen the app. That only rebuilds the program — your data
 file is never touched. If the app is already open, `View ▸ Reload` is enough for changes
-under `public/`.
+under `public/` — the engine inside the app reads those files off disk on every request, so a
+front-end edit can be copied straight into the bundle and shows on the next reload with no restart.
+**State of this bundle on 2026-10-15:** its `public/` was copied in by hand that way, which leaves
+the ad-hoc signature's resource seal stale (the executable is untouched, so its CDHash did not
+move). The next `./desktop/build-app.sh` restores a valid seal — and any re-sign, even one with no
+code recompiled, moves the CDHash and so costs a fresh Full Disk Access grant.
 
 **Colour and appearance.** The palette comes off the logo itself: crimson `#AB1F23` and the
 grey `#808085` it pairs with, measured from the artwork rather than eyeballed. Both are
@@ -980,15 +1020,17 @@ glass the panel now sits at chroma 23-29 by day and 28-42 at night, against the 
 
 It is deliberately narrow: `render()` takes the glass class off on every route and only
 `viewDashboard()` puts it back, so the other seven screens, the sign-in door and the printed job
-sheet are untouched. The two alarm cards — a job running late and the shop being shut — stay solid
-opaque, because a warning the counter has to read at a glance is not allowed to be see-through. An
-engine with no `backdrop-filter` at all gets a solid panel instead of a washed-out one, and a machine
-asking for reduced motion gets no transitions and a wash that sits still at half-strength rather than
-drifting. `tools/check-liquid-glass.py` measures the contrast of every ink through **every** stop of
-both wash layers, with the panel's own `saturate()` applied before the compositing rather than after
-(worst case 4.60:1 light, 4.89:1 dark, both past WCAG AA), fails if the wash stops being colourful
-enough to see, loads all eight other screens to prove they did not change, and reads the values back
-off a page laid out in the same WebKit the Mac app ships.
+sheet are untouched. It went wider for an hour on 2026-10-14 — every screen, a second tier inside the
+panels, the top bar too — and the counter sent it back the same evening ("this doesn't look good"),
+which is what one class gate is for. The two alarm cards — a job running late and the shop being
+shut — stay solid opaque, because a warning the counter has to read at a glance is not allowed to be
+see-through. An engine with no `backdrop-filter` at all gets a solid panel instead of a washed-out
+one, and a machine asking for reduced motion gets no transitions and a wash that sits still at
+half-strength rather than drifting. `tools/check-liquid-glass.py` measures the contrast of every ink
+through **every** stop of both wash layers, with the panel's own `saturate()` applied before the
+compositing rather than after (worst case 4.60:1 light, 4.89:1 dark, both past WCAG AA), fails if the
+wash stops being colourful enough to see, loads all eight other screens to prove they did not change,
+and reads the values back off a page laid out in the same WebKit the Mac app ships.
 
 The printed job sheet is the one thing that stays black on white in either appearance, so a
 photocopy and a customer's copy look the same.
