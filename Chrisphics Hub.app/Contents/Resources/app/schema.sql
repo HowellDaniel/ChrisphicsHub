@@ -151,6 +151,26 @@ CREATE TABLE IF NOT EXISTS notifications (
   updated_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+-- A mailbox the shop sends job notices from, one row each. The one marked default is what
+-- automatic delivery uses. The mail password is deliberately NOT kept here: this book is copied
+-- every night and mirrored to another folder, and a mail password travelling with the ledger is a
+-- mail password leaked. It stays in email-secrets.json beside the book at mode 600 instead.
+CREATE TABLE IF NOT EXISTS email_accounts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  label         TEXT NOT NULL,                        -- what the counter calls it: Shop office
+  from_address  TEXT NOT NULL,                        -- the address clients see and reply to
+  from_name     TEXT NOT NULL DEFAULT '',             -- '' prints the shop's own name
+  smtp_host     TEXT NOT NULL,
+  smtp_port     INTEGER NOT NULL DEFAULT 587,
+  smtp_security TEXT NOT NULL DEFAULT 'starttls',     -- starttls | ssl
+  username      TEXT NOT NULL DEFAULT '',             -- '' logs in as the address above
+  is_default    INTEGER NOT NULL DEFAULT 0,
+  last_sent_at  TEXT,                                 -- last handover the provider accepted
+  last_error    TEXT NOT NULL DEFAULT '',             -- the provider's own words, never the password
+  created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
 -- A payment notice the shop did not type: read out of Messages, or pasted in.
 -- The alert text is money news, not a bill, so it waits here until it is matched to a
 -- client and booked — `payment_id` is what makes re-reading the same text harmless.
@@ -203,6 +223,25 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   last_seen   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   expires_at  REAL NOT NULL
+);
+
+-- Machines the counter has named as the shop's own — the iMac at the press, the iMac in the
+-- front window. Being named is what the owner's word alone cannot say: a named machine may take
+-- a fresh sign-in at any hour and holds none of the places meant for visiting devices.
+-- The counter writes the name and gets a short name plate, good for one machine and a few days;
+-- the machine that redeems it is given a long key to keep in its own browser, and it is that key,
+-- hashed here, which marks it as one of the shop's own on every sign-in after. Nothing typed is
+-- stored: neither the name plate nor the key, only their digests.
+CREATE TABLE IF NOT EXISTS shop_computers (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  name         TEXT NOT NULL,
+  code_hash    TEXT NOT NULL,
+  key_hash     TEXT NOT NULL DEFAULT '',
+  session_hash TEXT NOT NULL DEFAULT '',
+  created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  expires_at   REAL NOT NULL,
+  used_at      TEXT,
+  last_seen    REAL
 );
 
 -- The book's own memory of being opened: who got in, who was turned away, when the password

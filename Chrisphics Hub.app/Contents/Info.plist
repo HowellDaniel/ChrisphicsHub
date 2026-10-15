@@ -34,9 +34,9 @@
 	<key>CFBundleVersion</key>
 	<string>1.1</string>
 	<key>ChrisphicsBuildCommit</key>
-	<string>fe4c97f</string>
+	<string>206b492</string>
 	<key>ChrisphicsBuildDate</key>
-	<string>2026-10-09T20:05:55Z</string>
+	<string>2026-10-14T21:29:49Z</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>11.0</string>
 	<key>NSAppTransportSecurity</key>

@@ -23,6 +23,7 @@ import mimetypes
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sqlite3
 import ssl
@@ -109,6 +110,11 @@ _db = None
 AUTH_PASSWORD = os.environ.get("CHRISPHICS_AUTH_PASSWORD", "").strip()
 SESSION_SECONDS = 30 * 24 * 60 * 60     # what a device gets until the shop shortens it
 SESSION_DAYS_MIN, SESSION_DAYS_MAX = 1, 90
+# A machine the counter has written down as one of the shop's own is not on a countdown at all:
+# its sign-in is stamped with this date, so the only thing that ends it is taking the name off.
+# A browser will not hold a cookie this long, so the same sign-in is handed back to that machine on
+# every visit it makes — see authenticated().
+SESSION_NEVER = dt.datetime(3000, 1, 1).timestamp()
 # Each stored hash carries the rounds it was made with, so raising this only affects the next
 # password the shop chooses; a book signed in with 200,000 keeps opening at 200,000.
 PBKDF2_ROUNDS = 600_000
@@ -322,6 +328,16 @@ def path_id(value):
 
 # --------------------------------------------------------------------- dashboards
 
+# What the shop can still actually collect. Money a client handed over without it being put
+# against a job sits as credit on their account, and it is still their money paying for their
+# work — so it comes off what that client owes. Floored at zero per client, because one client's
+# overpayment must never be allowed to hide another client's debt.
+COLLECTABLE_SQL = """
+  SELECT round(coalesce(sum(max(ca.open_job_balance - ca.account_credit, 0)), 0), 2)
+  FROM client_accounts ca JOIN clients c ON c.id = ca.id WHERE c.archived = 0
+"""
+
+
 def dashboard():
     t = today()
     month_start = t[:8] + "01"
@@ -344,8 +360,7 @@ def dashboard():
         (SELECT count(*) FROM leads WHERE stage NOT IN ('Won','Lost')
            AND follow_up IS NOT NULL AND follow_up <= ?) AS leads_due,
         (SELECT round(coalesce(sum(value),0),2) FROM leads WHERE stage NOT IN ('Won','Lost')) AS pipeline_value,
-        (SELECT round(coalesce(sum(balance),0),2) FROM job_accounts
-           WHERE kind='Job' AND balance > 0 AND status <> 'Cancelled') AS outstanding,
+        (%s) AS outstanding,
         (SELECT round(coalesce(sum(total),0),2) FROM job_accounts
            WHERE kind='Job' AND status<>'Cancelled' AND date(created_at) >= ?) AS billed_month,
         (SELECT round(coalesce(sum(profit),0),2) FROM job_accounts
@@ -358,7 +373,8 @@ def dashboard():
            FROM payments WHERE paid_at >= ?) AS collected_month,
         (SELECT round(coalesce(sum(CASE WHEN kind='Refund' THEN -amount ELSE amount END),0),2)
            FROM payments WHERE paid_at = ?) AS collected_today
-    """, (t, week_start, t, t, month_start, month_start, month_start, week_start, month_start, t))
+    """ % COLLECTABLE_SQL, (t, week_start, t, t, month_start, month_start, month_start,
+                             week_start, month_start, t))
 
     by_status = {r["status"]: r["c"] for r in q(
         "SELECT status, count(*) c FROM jobs WHERE kind='Job' AND status IN ('Pending','Printing','Ready')"
@@ -396,11 +412,16 @@ def dashboard():
       ORDER BY ja.created_at DESC, ja.id DESC LIMIT 10
     """)
 
+    # Same rule as the outstanding figure above: what a client still owes is their job balances less
+    # any money they handed over that is still sitting on their account.
     debtors = q("""
-      SELECT ja.client_id AS id, c.name, c.phone, round(sum(ja.balance),2) AS owed, count(*) AS jobs
-      FROM job_accounts ja JOIN clients c ON c.id = ja.client_id
-      WHERE ja.kind='Job' AND ja.balance > 0 AND ja.status <> 'Cancelled'
-      GROUP BY ja.client_id HAVING owed > 0 ORDER BY owed DESC LIMIT 8
+      SELECT ca.id, c.name, c.phone,
+             round(max(ca.open_job_balance - ca.account_credit, 0), 2) AS owed,
+             (SELECT count(*) FROM job_accounts ja WHERE ja.client_id = ca.id AND ja.kind='Job'
+                AND ja.balance > 0 AND ja.status <> 'Cancelled') AS jobs
+      FROM client_accounts ca JOIN clients c ON c.id = ca.id
+      WHERE c.archived = 0 AND ca.open_job_balance - ca.account_credit > 0
+      ORDER BY owed DESC LIMIT 8
     """)
 
     mix = q("""
@@ -435,7 +456,8 @@ def dashboard():
 
     return {"kpi": kpi, "by_status": by_status, "trend": trend, "overdue": overdue,
             "recent": recent, "debtors": debtors, "mix": mix, "spend": spend,
-            "quotes": quotes, "follow_ups": follow_ups, "shop": SHOP, "today": t}
+            "quotes": quotes, "follow_ups": follow_ups, "shop": SHOP, "today": t,
+            "hours": shop_hours(with_devices=True)}
 
 
 # ------------------------------------------------------------------------- jobs
@@ -978,6 +1000,11 @@ EMAIL_SMTP_PASSWORD = os.environ.get("CHRISPHICS_EMAIL_SMTP_PASSWORD", "")
 EMAIL_FROM = os.environ.get("CHRISPHICS_EMAIL_FROM", EMAIL_SMTP_USERNAME)
 EMAIL_FROM_NAME = os.environ.get("CHRISPHICS_EMAIL_FROM_NAME", SHOP["name"])
 EMAIL_SMTP_SECURITY = os.environ.get("CHRISPHICS_EMAIL_SMTP_SECURITY", "starttls").lower()
+# Mailboxes the counter registers itself live in the email_accounts table, but their passwords do
+# not: this book is copied every night and mirrored to a second folder, and a mail password riding
+# along with the ledger is a mail password leaked. They stay in one file beside the book instead,
+# at the same mode 600 the TLS key is kept at.
+EMAIL_SECRETS_PATH = os.path.join(SUPPORT, "email-secrets.json")
 
 COUNTRY_DIAL = "233"        # Ghana: 059 387 2873 and +233 59 387 2873 are the same number.
 NOTIFY_EVENTS = ["Quote", "Booked", "Pending", "Printing", "Ready", "Delivered", "Cancelled"]
@@ -1255,6 +1282,271 @@ def queue_message(job_id, event, automatic=None):
     return notify_rows(job_id, event)
 
 
+# ---------------------------------------------------------------- the shop's own mailboxes
+#
+# Job notices leave from a mailbox the counter registers on its own screen, so setting one up is a
+# minute at the desk rather than an afternoon editing the service file and restarting the shop. One
+# mailbox is marked as the sender and the others wait ready to be switched on. A password goes in
+# and is never handed back out — the screen is told whether one is saved, never what it is.
+
+EMAIL_ADDRESS_PATTERN = r"[^@\s]+@[^@\s]+\.[^@\s]+"
+
+
+def email_secret_map():
+    """The mail passwords, keyed by account id as text. Missing file or unreadable JSON simply
+    means no mailbox has a word yet — the shop is told, rather than left guessing."""
+    try:
+        with open(EMAIL_SECRETS_PATH, "r", encoding="utf-8") as handle:
+            stored = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return stored if isinstance(stored, dict) else {}
+
+
+def write_email_secrets(secrets):
+    """Rewrite the password file whole, at mode 600 and never in place: a crash halfway through an
+    overwrite would leave the shop with no mailbox at all."""
+    staging = EMAIL_SECRETS_PATH + ".new"
+    try:
+        folder = os.path.dirname(EMAIL_SECRETS_PATH) or "."
+        os.makedirs(folder, exist_ok=True)
+        handle = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            json.dump(secrets, out)
+        os.chmod(staging, 0o600)   # O_TRUNC leaves a file that already existed in its old mode
+        os.replace(staging, EMAIL_SECRETS_PATH)
+    except OSError:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def set_email_secret(account_id, password):
+    secrets = email_secret_map()
+    if password:
+        secrets[str(account_id)] = password
+    else:
+        secrets.pop(str(account_id), None)
+    return write_email_secrets(secrets)
+
+
+def default_email_account():
+    return one("SELECT * FROM email_accounts WHERE is_default = 1 ORDER BY id LIMIT 1")
+
+
+def email_account_view():
+    """What the counter's screen is shown: every detail of a mailbox except its password."""
+    held = email_secret_map()
+    return [{"id": row["id"], "label": row["label"], "from_address": row["from_address"],
+             "from_name": row["from_name"], "smtp_host": row["smtp_host"],
+             "smtp_port": row["smtp_port"], "smtp_security": row["smtp_security"],
+             "username": row["username"], "is_default": bool(row["is_default"]),
+             "has_password": str(row["id"]) in held, "last_sent_at": row["last_sent_at"],
+             "last_error": row["last_error"], "created_at": row["created_at"]}
+            for row in q("SELECT * FROM email_accounts ORDER BY is_default DESC, id")]
+
+
+def email_settings(account=None):
+    """The mailbox a notice really leaves from, and why not when there is nothing to leave from.
+    A registered account wins; with none in the book the environment still speaks, so a shop that
+    set CHRISPHICS_EMAIL_* before this existed keeps sending exactly as it did."""
+    row = account if account is not None else default_email_account()
+    if row is None:
+        missing = [name for name, value in (
+            ("CHRISPHICS_EMAIL_SMTP_HOST", EMAIL_SMTP_HOST),
+            ("CHRISPHICS_EMAIL_SMTP_USERNAME", EMAIL_SMTP_USERNAME),
+            ("CHRISPHICS_EMAIL_SMTP_PASSWORD", EMAIL_SMTP_PASSWORD),
+            ("CHRISPHICS_EMAIL_FROM", EMAIL_FROM),
+        ) if not value]
+        try:
+            port = int(EMAIL_SMTP_PORT)
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except ValueError:
+            missing.append("a valid CHRISPHICS_EMAIL_SMTP_PORT")
+            port = 0
+        if EMAIL_SMTP_SECURITY not in ("starttls", "ssl"):
+            missing.append("CHRISPHICS_EMAIL_SMTP_SECURITY=starttls or ssl")
+        if EMAIL_FROM and not re.fullmatch(EMAIL_ADDRESS_PATTERN, EMAIL_FROM):
+            return None, "CHRISPHICS_EMAIL_FROM must be a valid email address."
+        if missing:
+            return None, "Configure " + ", ".join(missing) + " to enable email delivery."
+        return {"account_id": None, "from_address": EMAIL_FROM,
+                "from_name": EMAIL_FROM_NAME, "host": EMAIL_SMTP_HOST, "port": port,
+                "security": EMAIL_SMTP_SECURITY, "username": EMAIL_SMTP_USERNAME,
+                "password": EMAIL_SMTP_PASSWORD}, ""
+    password = email_secret_map().get(str(row["id"]), "")
+    if not password:
+        return None, ("The %s mailbox has no password saved. Open Email accounts on Shop & devices"
+                      " and type it once." % row["label"])
+    return {"account_id": row["id"], "from_address": row["from_address"],
+            "from_name": row["from_name"] or SHOP["name"], "host": row["smtp_host"],
+            "port": row["smtp_port"], "security": row["smtp_security"],
+            "username": row["username"] or row["from_address"], "password": password}, ""
+
+
+def hide_secret(spoken, password):
+    """A provider sometimes repeats back what it was handed, and its words land in the book's error
+    column and on the counter's screen. The password never goes there."""
+    if password and password in spoken:
+        return spoken.replace(password, "[hidden]")
+    return spoken
+
+
+def send_over_email(settings, to_address, subject, body):
+    """Hand one message to the mailbox's provider and return its Message-ID."""
+    message = EmailMessage()
+    safe_name = settings["from_name"].replace("\r", " ").replace("\n", " ").strip()
+    message["From"] = formataddr((safe_name, settings["from_address"]))
+    message["To"] = to_address
+    message["Subject"] = subject
+    message["Message-ID"] = make_msgid()
+    message.set_content(body)
+    context = ssl.create_default_context()
+    password = settings["password"]
+    try:
+        if settings["security"] == "ssl":
+            with smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=20,
+                                  context=context) as smtp:
+                smtp.login(settings["username"], password)
+                refused = smtp.send_message(message)
+        else:
+            with smtplib.SMTP(settings["host"], settings["port"], timeout=20) as smtp:
+                smtp.ehlo()
+                smtp.starttls(context=context)
+                smtp.ehlo()
+                smtp.login(settings["username"], password)
+                refused = smtp.send_message(message)
+    except smtplib.SMTPAuthenticationError:
+        raise RuntimeError("The mail server refused the word saved for %s."
+                           % settings["from_address"]) from None
+    except (smtplib.SMTPException, OSError, ssl.SSLError, ValueError) as error:
+        raise RuntimeError("Email could not be sent through %s: %s"
+                           % (settings["host"], hide_secret(str(error)[:300], password))) from None
+    if refused:
+        raise RuntimeError("Email provider refused the recipient.")
+    return str(message["Message-ID"])
+
+
+def mark_email_account(account_id, error=""):
+    """Keep the provider's verdict on the mailbox row, so the counter can see which mailbox is the
+    problem without opening a job. Environment settings have no row to mark."""
+    if not account_id:
+        return
+    with _lock:
+        if error:
+            _db.execute("UPDATE email_accounts SET last_error=?,"
+                        " updated_at=datetime('now','localtime') WHERE id=?",
+                        (error[:400], account_id))
+        else:
+            _db.execute("UPDATE email_accounts SET last_error='',"
+                        " last_sent_at=datetime('now','localtime'),"
+                        " updated_at=datetime('now','localtime') WHERE id=?", (account_id,))
+        _db.commit()
+
+
+def save_email_account(body, account_id=None):
+    """Take a mailbox from the counter's own screen. A blank password on an existing mailbox keeps
+    the word already saved — the screen never shows it back, so it cannot send it back either."""
+    if not isinstance(body, dict):
+        raise ValueError("Send the mailbox as a JSON object")
+    label = text(body.get("label"), 40, True, "A name for the mailbox")
+    address = text(body.get("from_address"), 160, True, "The address clients reply to")
+    if not re.fullmatch(EMAIL_ADDRESS_PATTERN, address):
+        raise ValueError("The reply address has to be a real email address, like shop@crispprint.com.")
+    host = text(body.get("smtp_host"), 160, True, "The mail server")
+    if not re.fullmatch(r"[A-Za-z0-9.-]+", host):
+        raise ValueError("The mail server is a name, like smtp.zoho.com — no spaces or address.")
+    try:
+        port = int(body.get("smtp_port", 587))
+    except (TypeError, ValueError):
+        raise ValueError("The mail port is a number, like 587 or 465.") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("The mail port has to be between 1 and 65535.")
+    security = text(body.get("smtp_security"), 10, False, "The connection").strip().lower() or "starttls"
+    if security not in ("starttls", "ssl"):
+        raise ValueError("The connection is either starttls or ssl.")
+    from_name = text(body.get("from_name"), 60)
+    username = text(body.get("username"), 160)
+    password = str(body.get("password") or "").strip()[:200]
+    if account_id is None and not password:
+        raise ValueError("%s needs its mail password before it can send anything." % label)
+    with _lock:
+        if account_id is None:
+            first = one("SELECT id FROM email_accounts ORDER BY id LIMIT 1") is None
+            row = _db.execute(
+                "INSERT INTO email_accounts (label, from_address, from_name, smtp_host, smtp_port,"
+                " smtp_security, username, is_default) VALUES (?,?,?,?,?,?,?,?)",
+                (label, address, from_name, host, port, security, username, 1 if first else 0))
+            account_id = row.lastrowid
+        else:
+            if not one("SELECT id FROM email_accounts WHERE id=?", (account_id,)):
+                raise LookupError("That mailbox is no longer in the book.")
+            _db.execute(
+                "UPDATE email_accounts SET label=?, from_address=?, from_name=?, smtp_host=?,"
+                " smtp_port=?, smtp_security=?, username=?,"
+                " updated_at=datetime('now','localtime') WHERE id=?",
+                (label, address, from_name, host, port, security, username, account_id))
+        _db.commit()
+    if password and not set_email_secret(account_id, password):
+        raise RuntimeError("The mailbox was kept, but its password could not be written beside the"
+                           " book. Set it again on Shop & devices.")
+    return {"accounts": email_account_view(), "id": account_id}
+
+
+def delete_email_account(account_id):
+    """Forget a mailbox and its password. If it was the sender, the oldest one left takes over, so
+    the shop is never left with queued notices and nothing to send them through."""
+    row = one("SELECT * FROM email_accounts WHERE id=?", (account_id,))
+    if not row:
+        raise LookupError("That mailbox is no longer in the book.")
+    with _lock:
+        _db.execute("DELETE FROM email_accounts WHERE id=?", (account_id,))
+        if row["is_default"]:
+            _db.execute("UPDATE email_accounts SET is_default=1"
+                        " WHERE id=(SELECT MIN(id) FROM email_accounts)")
+        _db.commit()
+    set_email_secret(account_id, "")
+    return {"accounts": email_account_view(), "removed": account_id}
+
+
+def set_default_email_account(account_id):
+    row = one("SELECT id FROM email_accounts WHERE id=?", (account_id,))
+    if not row:
+        raise LookupError("That mailbox is no longer in the book.")
+    with _lock:
+        _db.execute("UPDATE email_accounts SET is_default=(id=?)", (account_id,))
+        _db.commit()
+    return {"accounts": email_account_view()}
+
+
+def test_email_account(account_id, to_address):
+    """Send one real message through this mailbox and report what the provider said, so the counter
+    knows the details are right before a client's job notice depends on them."""
+    row = one("SELECT * FROM email_accounts WHERE id=?", (account_id,))
+    if not row:
+        raise LookupError("That mailbox is no longer in the book.")
+    settings, why = email_settings(row)
+    if not settings:
+        raise ValueError(why)
+    to = text(to_address, 160).strip() or settings["from_address"]
+    if not re.fullmatch(EMAIL_ADDRESS_PATTERN, to):
+        raise ValueError("There is no valid address to test that mailbox with.")
+    subject = "%s test from Chrisphics Hub" % row["label"]
+    body = ("This is a test from the shop's book. If you can read this, %s (%s) can send clients"
+            " their job notices.\n" % (row["label"], settings["from_address"]))
+    try:
+        message_id = send_over_email(settings, to, subject, body)
+    except RuntimeError as error:
+        mark_email_account(row["id"], str(error))
+        raise
+    mark_email_account(row["id"])
+    return {"sent_to": to, "message_id": message_id, "accounts": email_account_view()}
+
+
 def refresh_pending_status_notification(job_id):
     job = one("SELECT kind,status FROM jobs WHERE id=?", (job_id,))
     if job and job["kind"] == "Job" and job["status"] in AUTO_NOTIFY_EVENTS:
@@ -1276,25 +1568,7 @@ def notification_config_error(channel):
             return "Configure " + ", ".join(missing) + " to enable WhatsApp delivery."
         return ""
     if channel == "Email":
-        missing = [name for name, value in (
-            ("CHRISPHICS_EMAIL_SMTP_HOST", EMAIL_SMTP_HOST),
-            ("CHRISPHICS_EMAIL_SMTP_USERNAME", EMAIL_SMTP_USERNAME),
-            ("CHRISPHICS_EMAIL_SMTP_PASSWORD", EMAIL_SMTP_PASSWORD),
-            ("CHRISPHICS_EMAIL_FROM", EMAIL_FROM),
-        ) if not value]
-        try:
-            port = int(EMAIL_SMTP_PORT)
-            if not 1 <= port <= 65535:
-                raise ValueError
-        except ValueError:
-            missing.append("a valid CHRISPHICS_EMAIL_SMTP_PORT")
-        if EMAIL_SMTP_SECURITY not in ("starttls", "ssl"):
-            missing.append("CHRISPHICS_EMAIL_SMTP_SECURITY=starttls or ssl")
-        if EMAIL_FROM and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", EMAIL_FROM):
-            return "CHRISPHICS_EMAIL_FROM must be a valid email address."
-        if missing:
-            return "Configure " + ", ".join(missing) + " to enable email delivery."
-        return ""
+        return email_settings()[1]
     return "Unknown notification channel."
 
 
@@ -1352,29 +1626,16 @@ def send_whatsapp_notification(row):
 
 
 def send_email_notification(row):
-    message = EmailMessage()
-    safe_name = EMAIL_FROM_NAME.replace("\r", " ").replace("\n", " ").strip()
-    message["From"] = formataddr((safe_name, EMAIL_FROM))
-    message["To"] = row["to_address"]
-    message["Subject"] = row["subject"]
-    message["Message-ID"] = make_msgid()
-    message.set_content(row["body"])
-    port = int(EMAIL_SMTP_PORT)
-    context = ssl.create_default_context()
-    if EMAIL_SMTP_SECURITY == "ssl":
-        with smtplib.SMTP_SSL(EMAIL_SMTP_HOST, port, timeout=20, context=context) as smtp:
-            smtp.login(EMAIL_SMTP_USERNAME, EMAIL_SMTP_PASSWORD)
-            refused = smtp.send_message(message)
-    else:
-        with smtplib.SMTP(EMAIL_SMTP_HOST, port, timeout=20) as smtp:
-            smtp.ehlo()
-            smtp.starttls(context=context)
-            smtp.ehlo()
-            smtp.login(EMAIL_SMTP_USERNAME, EMAIL_SMTP_PASSWORD)
-            refused = smtp.send_message(message)
-    if refused:
-        raise RuntimeError("Email provider refused the recipient.")
-    return str(message["Message-ID"])
+    settings, why = email_settings()
+    if not settings:
+        raise RuntimeError(why)
+    try:
+        message_id = send_over_email(settings, row["to_address"], row["subject"], row["body"])
+    except RuntimeError as error:
+        mark_email_account(settings["account_id"], str(error))
+        raise
+    mark_email_account(settings["account_id"])
+    return message_id
 
 
 def _claim_notification(note_id):
@@ -1643,13 +1904,59 @@ REF_RE = re.compile(r"\b(?:ref|reference|name|customer|by)\s*[:#\- ]\s*([A-Za-z]
 PAID_YOU_RE = re.compile(r"\b([A-Za-z][A-Za-z '\-]{2,29}?)\s+(?:paid|sent)\s+you\b", re.I)
 # A send names whoever received it after "to", which is the only way to tell where it went.
 PAYEE_RE = re.compile(r"\bto\s+([A-Za-z][A-Za-z .'\-]{2,29})(?!\w)", re.I)
-# Text that is money news but is plainly not a client settling a bill.
-MONEY_JUNK = ("won", "prize", "claim", "lottery", "congratul", "winner", "promo", "bonus offer")
+# Text that is money news but is plainly not a client settling a bill. The shop's own line spends
+# its airtime on MTN: bundles, top-up reminders and loyalty promos all carry a figure and the word
+# "received", and every one of them on the card buries the payment it is meant to be beside.
+MONEY_JUNK = ("won", "prize", "claim", "lottery", "congratul", "winner", "promo", "bonus offer",
+              "bundle", "xtracash", "non-expiry", "sme+", "momo hour", "data to boost")
 # What the words after a payer name actually describe, so the name stops there.
 PAYER_STOP = (" for ", " to ", " into ", " as ", " of ", " ref", " momo", " ghs", " payment",
               " order", " on ", " at ", " paid", " with", " using", " trans", " balance",
               " tel", " credited", " new", " excess")
 MESSAGES_DB = os.path.expanduser("~/Library/Messages/chat.db")
+# Two engines share this book — the Mac app and the Wi-Fi server that starts itself at boot — and
+# either one reading Messages is enough for the notices to arrive. macOS grants the door per
+# program, so one of them is usually still shut and stamps its refusal over the other's working
+# read. Ninety seconds of grace covers the twenty-second poll several times over.
+MOMO_READ_GRACE = 90
+
+
+def messages_door():
+    """The entry this engine needs in Full Disk Access before chat.db will open.
+
+    The app is answered for by its own bundle, which Finder shows as "Chrisphics Hub"; the boot
+    server runs from the command line tools' Python, whose real binary is buried under /Library.
+    Naming the wrong one is how an afternoon disappears inside System Settings."""
+    here = os.path.abspath(__file__)
+    if ".app/Contents" in here:
+        return here.split(".app/Contents")[0] + ".app"
+    return os.path.realpath(sys.executable)
+
+
+def _poll_was_recent(key):
+    """True when that timestamp moved within the grace. None when the book has no such line."""
+    try:
+        quiet = (dt.datetime.now()
+                 - dt.datetime.strptime(state_value(key), "%Y-%m-%d %H:%M:%S")).total_seconds()
+    except ValueError:
+        return None
+    return bool(quiet <= MOMO_READ_GRACE)
+
+
+def messages_are_being_read():
+    """True while any engine has got into Messages within the grace.
+
+    The shared `momo_read_ok` line only ever moves on a read that worked, so it is the book's own
+    proof that the notices are arriving — whichever program was granted the door, and whichever one
+    last wrote a refusal. An app built before that line exists leaves a fainter proof: a blank
+    refusal stamped by a poll no older than the grace, which is exactly what the shop's own signed
+    app leaves when it reads. Without reading that too the card says Messages is shut while the
+    alerts are coming in, because the boot server's refusal is the last line written."""
+    if _poll_was_recent("momo_read_ok"):
+        return True
+    if _poll_was_recent("momo_checked") is not True:
+        return False
+    return state_value("momo_status") == ""
 
 
 def state_value(key, default=""):
@@ -1757,6 +2064,230 @@ def session_days():
 
 def session_seconds():
     return session_days() * 24 * 60 * 60
+
+
+# ---------------------------------------------------------------- the shop's own hours
+#
+# Written into the book on the counter's word, 2026-10-12: three devices at a time, Monday to
+# Saturday, eight in the morning till seven at night. Four rows of app_state rather than a table,
+# because these are settings and not records. The important half of the design is what an absent
+# key means: unset is open around the clock with no cap, so a hosted book and any shop that has
+# never answered these questions keeps behaving exactly as it always has. A value that cannot be
+# read is ignored for the same reason — a shop must never lose its counter because of a typo.
+
+SHOP_DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+DEVICE_LIMIT_MAX = 20
+
+
+def open_days_list(raw=None):
+    """Which weekdays a new sign-in is allowed on, Python numbering: Monday is 0. Accepts
+    "0-5" and "0,1,2,3,4,5"; an empty or unreadable setting means every day. Passing the words in
+    directly is how the settings pane checks what it is about to save."""
+    if raw is None:
+        raw = state_value("open_days", "")
+    raw = (raw or "").replace(" ", "")
+    if not raw:
+        return None
+    days = set()
+    for part in raw.split(","):
+        if not part:
+            continue
+        bounds = part.split("-")
+        if len(bounds) == 1:
+            if bounds[0].isdigit() and 0 <= int(bounds[0]) <= 6:
+                days.add(int(bounds[0]))
+        elif len(bounds) == 2 and all(b.isdigit() for b in bounds):
+            low, high = sorted((int(bounds[0]), int(bounds[1])))
+            days.update(n for n in range(min(low, 6), min(high, 6) + 1))
+    return sorted(days) or None
+
+
+def open_minutes_pair():
+    """(opening, closing) as minutes past midnight, or None when no window is written down."""
+    low = _clock_minutes(state_value("open_from", ""))
+    high = _clock_minutes(state_value("open_to", ""))
+    if low is None or high is None or high <= low:
+        return None
+    return low, high
+
+
+def _clock_minutes(value):
+    """'08:00' is 480 minutes after midnight. Anything else earns nothing."""
+    match = re.match(r"^(\d{1,2}):(\d{2})$", (value or "").strip())
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return hour * 60 + minute
+
+
+def pretty_clock(minutes):
+    """How the counter says the time, not how the book stores it."""
+    if minutes is None:
+        return ""
+    hour, minute = divmod(int(minutes), 60)
+    if minute == 0 and hour == 0:
+        return "midnight"
+    if minute == 0 and hour == 12:
+        return "noon"
+    return "%d:%02d%s" % (hour % 12 or 12, minute, "am" if hour < 12 else "pm")
+
+
+def days_phrase(days):
+    """The open days in the fewest honest words: a run of three or more reads as a range, a
+    shorter one is named out, because 'Monday to Friday' is what a person means by it."""
+    if not days or len(days) == 7:
+        return "every day"
+    runs = []
+    for number in sorted(set(days)):
+        if runs and number == runs[-1][1] + 1:
+            runs[-1][1] = number
+        else:
+            runs.append([number, number])
+    parts = []
+    for start, end in runs:
+        if end - start >= 2:
+            parts.append("%s to %s" % (SHOP_DAY_NAMES[start], SHOP_DAY_NAMES[end]))
+        else:
+            parts.extend(SHOP_DAY_NAMES[n] for n in range(start, end + 1))
+    return ", ".join(parts)
+
+
+def device_limit():
+    """How many devices may hold a live sign-in at once. Blank, unreadable or 0 means the shop
+    caps nobody — the same fail-open reasoning as the hours above."""
+    try:
+        wanted = int((state_value("device_limit", "") or "0").strip())
+    except ValueError:
+        return 0
+    return max(0, min(DEVICE_LIMIT_MAX, wanted))
+
+
+def _opening_windows(days, window, first_day=None, horizon=8):
+    """Every open stretch from that day forward, earliest first, as (weekday, begin, end). A day
+    with no time-of-day window counts as the whole 24 hours, which is what a shop means when it
+    writes down the days and leaves the hours out."""
+    out = []
+    day = first_day or dt.date.today()
+    for _ in range(horizon + 1):
+        if not days or day.weekday() in days:
+            if window:
+                begin = dt.datetime.combine(day, dt.time(*divmod(window[0], 60)))
+                end = dt.datetime.combine(day, dt.time(*divmod(window[1], 60)))
+            else:
+                begin = dt.datetime.combine(day, dt.time(0, 0))
+                end = dt.datetime.combine(day, dt.time(23, 59, 59))
+            out.append((day.weekday(), begin, end))
+        day = day + dt.timedelta(days=1)
+    return out
+
+
+def shop_hours(with_devices=False, now=None):
+    """The shop's window as the book describes it, timed on this Mac's clock and re-read on every
+    call so a change lands without a restart. The countdown travels with it because a phone whose
+    own clock is wrong must not be able to open the book early, or make the dashboard say it is
+    shut at noon. `now` is here so a check can prove a Sunday at 3 in the morning on a Tuesday."""
+    days = open_days_list()
+    window = open_minutes_pair()
+    written = bool((state_value("open_days", "") or "").strip()
+                   or (state_value("open_from", "") or "").strip()
+                   or (state_value("open_to", "") or "").strip())
+    now = now or dt.datetime.now()
+    open_now, seconds, changes, change_at = True, None, "", None
+    if written:
+        stretches = _opening_windows(days, window, now.date())
+        current = next(((b, e) for _, b, e in stretches if b <= now < e), None)
+        if current:
+            seconds = int((current[1] - now).total_seconds())
+            changes, change_at = "close", current[1]
+        else:
+            ahead = [b for _, b, _ in stretches if b > now]
+            open_now = False
+            if ahead:
+                seconds = int((ahead[0] - now).total_seconds())
+                changes, change_at = "open", ahead[0]
+    low, high = window or (None, None)
+    if open_now:
+        state_text = "Open now" if written else "Always open"
+    elif change_at:
+        state_text = "Closed · opens %s at %s" % (change_at.strftime("%A"), pretty_clock(
+            change_at.hour * 60 + change_at.minute))
+    else:
+        state_text = "Closed"
+    if not written:
+        when_text = "around the clock"
+    elif window:
+        when_text = "%s, %s to %s" % (days_phrase(days), pretty_clock(low), pretty_clock(high))
+    else:
+        when_text = days_phrase(days)
+    out = {
+        "written": written,
+        "open": open_now,
+        "all_day": window is None,
+        "days": days or list(range(7)),
+        "days_text": days_phrase(days),
+        "from": "%02d:%02d" % divmod(low, 60) if low is not None else "",
+        "to": "%02d:%02d" % divmod(high, 60) if high is not None else "",
+        "from_text": pretty_clock(low),
+        "to_text": pretty_clock(high),
+        "seconds_to_change": seconds,
+        "changes": changes,
+        "change_at": change_at.strftime("%H:%M") if change_at else "",
+        "when_text": when_text,
+        "state_text": state_text,
+        "limit": device_limit(),
+    }
+    if with_devices:
+        live = signed_in_devices()
+        own = [row["shop_computer"] for row in live if row["shop_computer"]]
+        visiting = [row for row in live if not row["shop_computer"]]
+        # The shop's own machines are not one of the places: two iMacs the counter has named do
+        # not leave the shop with one place for the rest of the world.
+        out["devices"] = len(visiting)
+        out["device_names"] = [row["device"] for row in visiting][:max(out["limit"], 1)]
+        out["own_computers"] = own
+        out["own_devices"] = len(own)
+    return out
+
+
+def sign_in_refusal(is_shop_computer, already_signed_in):
+    """Why this fresh sign-in cannot be let in right now, as (code, message), or None to let it
+    through. Called only once the password has proved itself, so a stranger learns nothing about
+    these rules. The shop's own Mac is the counter standing at the counter, and a machine the
+    counter has named is a second of those the shop keeps on the Wi-Fi: neither is ever turned
+    away for the hour, and neither uses one of the places meant for visiting devices."""
+    if is_shop_computer or already_signed_in:
+        return None
+    hours = shop_hours(with_devices=True)
+    if not hours["open"]:
+        back = hours["when_text"]
+        return 403, {"error": "The shop lets new devices sign in %s. It is outside that window "
+                              "now (%s)." % (back, hours["state_text"]),
+                     "hours": public_hours(hours)}
+    limit = hours["limit"]
+    if limit and hours["devices"] >= limit:
+        taken = ", ".join(hours["device_names"]) or "another device"
+        return 403, {"error": "All %d places are taken (%s). Sign one out under Shop & devices,"
+                              " then this one can come in." % (limit, taken),
+                     "hours": public_hours(hours)}
+    return None
+
+
+def public_hours(hours, with_occupancy=False):
+    """The part of the window a device may see. Before sign-in that is the timetable alone — who
+    is currently inside the book stays private to the counter. A device that has already signed in
+    gets the occupancy too, so the dashboard timer can re-read it without a second call."""
+    out = {k: hours[k] for k in ("written", "open", "all_day", "days_text", "from_text", "to_text",
+                                 "seconds_to_change", "changes", "change_at", "when_text",
+                                 "state_text") if k in hours}
+    if with_occupancy:
+        out["limit"] = hours.get("limit", 0)
+        out["devices"] = hours.get("devices", 0)
+        out["device_names"] = hours.get("device_names", [])
+        out["own_devices"] = hours.get("own_devices", 0)
+        out["own_computers"] = hours.get("own_computers", [])
+    return out
 
 
 # The words people pick when they are asked for a password and want it over with. Not a
@@ -1889,6 +2420,8 @@ def security_view(trail_limit=40):
             "allowed_fails": LOGIN_ALLOWED_FAILS,
             "calls_per_minute": API_CALLS_PER_MINUTE,
             "devices": len(signed_in_devices()),
+            "shop_computers": shop_computer_view(),
+            "hours": shop_hours(with_devices=True),
             "trail": security_trail(trail_limit)}
 
 
@@ -1916,7 +2449,56 @@ def set_security_settings(patch, where=""):
         changed.append("shop_mac_signin")
         note_security("shop_mac_signin", where, detail="the shop's own Mac must now sign in" if want
                       else "the shop's own Mac is let through on its own")
+    changed += _set_hours_settings(patch, where)
     return security_view()
+
+
+def _set_hours_settings(patch, where=""):
+    """The opening window and the number of devices that may hold a sign-in at once. A field left
+    out of the request is left alone; an empty one is written out of the book, which puts that
+    rule back to its unset meaning — every day, all day, or nobody capped."""
+    changed = []
+    if "open_days" in patch:
+        raw = text(patch["open_days"], 40)
+        if raw and not open_days_list(raw):
+            raise ValueError("The days have to be weekday numbers, Monday being 0 — 0-5 for"
+                             " Monday to Saturday, or leave it empty for every day")
+        set_state("open_days", raw)
+        changed.append("open_days")
+    if "open_from" in patch or "open_to" in patch:
+        low = text(patch.get("open_from", state_value("open_from", "")), 5)
+        high = text(patch.get("open_to", state_value("open_to", "")), 5)
+        for value, which in ((low, "opening"), (high, "closing")):
+            if value and _clock_minutes(value) is None:
+                raise ValueError("The %s time wants hours and minutes on the 24-hour clock,"
+                                 " like 08:00 or 19:30." % which)
+        if bool(low) != bool(high):
+            raise ValueError("Write both times or neither — a shop that opens at 8 needs to say"
+                             " when it closes")
+        if low and high and _clock_minutes(low) >= _clock_minutes(high):
+            raise ValueError("The closing time has to come after the opening one")
+        set_state("open_from", low)
+        set_state("open_to", high)
+        changed += ["open_from", "open_to"]
+    if "device_limit" in patch:
+        raw = text(patch["device_limit"], 8)
+        try:
+            wanted = int(raw) if raw else 0
+        except ValueError:
+            raise ValueError("How many devices at once has to be a whole number — 3, or 0 to"
+                             " cap nobody")
+        if not 0 <= wanted <= DEVICE_LIMIT_MAX:
+            raise ValueError("Devices at one time can be 0 (nobody capped) through %d"
+                             % DEVICE_LIMIT_MAX)
+        set_state("device_limit", wanted)
+        changed.append("device_limit")
+    if changed:
+        hours = shop_hours(with_devices=True)
+        note_security("hours_changed", where,
+                      detail="%s · new window: %s · %d device%s signed in now"
+                             % (", ".join(changed), hours["when_text"], hours["devices"],
+                                "" if hours["devices"] == 1 else "s"))
+    return changed
 
 
 def token_digest(token):
@@ -1949,15 +2531,24 @@ def device_name(user_agent):
     return "%s · %s" % (machine, browser)
 
 
-def open_session(user_agent):
+def open_session(user_agent, forever=False):
+    """A visiting device is given the shop's countdown. A machine the counter named is given a date
+    no countdown reaches, so it stays inside the book until its name is taken off it."""
     token = secrets.token_urlsafe(32)
+    until = SESSION_NEVER if forever else time.time() + session_seconds()
     with _lock:
         _db.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
         _db.execute("INSERT INTO sessions (token_hash, device, expires_at) VALUES (?, ?, ?)",
-                    (token_digest(token), device_name(user_agent)[:60],
-                     time.time() + session_seconds()))
+                    (token_digest(token), device_name(user_agent)[:60], until))
         _db.commit()
     return token
+
+
+def session_is_forever(token):
+    """Whether a live sign-in belongs to a named machine, so its browser can be handed the same one
+    again before the browser forgets it."""
+    return bool(one("SELECT 1 AS ok FROM sessions WHERE token_hash = ? AND expires_at >= ?",
+                    (token_digest(token), SESSION_NEVER)))
 
 
 def touch_session(token):
@@ -1971,6 +2562,13 @@ def touch_session(token):
         if not row:
             return False
         now = time.time()
+        if row["expires_at"] >= SESSION_NEVER:
+            # One of the shop's own machines: the counter's name is what keeps it in, not a date,
+            # so the shop shortening its countdown for visitors cannot pull this one back.
+            _db.execute("UPDATE sessions SET last_seen = datetime('now','localtime') WHERE id = ?",
+                        (row["id"],))
+            _db.commit()
+            return True
         remaining = row["expires_at"] - now
         if remaining <= 0:
             _db.execute("DELETE FROM sessions WHERE id = ?", (row["id"],))
@@ -1998,8 +2596,144 @@ def close_session(token):
 
 
 def signed_in_devices():
-    return [dict(r) for r in q("SELECT id, device, created_at, last_seen FROM sessions"
-                               " WHERE expires_at > ? ORDER BY last_seen DESC", (time.time(),))]
+    """Every device holding a live sign-in, and the name of the shop computer it was named as —
+    blank for a visiting device. The counter's list and the number of places both read this."""
+    return [dict(r) for r in q("SELECT s.id, s.device, s.created_at, s.last_seen,"
+                               " c.name AS shop_computer,"
+                               " (s.expires_at >= ?) AS stays_forever FROM sessions s"
+                               " LEFT JOIN shop_computers c ON c.session_hash = s.token_hash"
+                               " WHERE s.expires_at > ? ORDER BY s.last_seen DESC",
+                               (SESSION_NEVER, time.time()))]
+
+
+# The shop's own machines, named by the counter. A password proves who is typing; it cannot say
+# which machine they are standing at, and the shop's own iMacs need the book before opening time
+# and after it. So the counter writes a machine's name down and is handed a short name plate,
+# good for one machine and a few days. The machine that redeems the plate alongside the shop's own
+# password is given a long key to keep in its own browser, and that key — never the plate, never
+# the key, only their digests — is what marks it as one of the shop's own from then on.
+SHOP_COMPUTER_PLATE_DAYS = 3
+SHOP_COMPUTER_PLATE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no O or 0, no I or 1
+SHOP_COMPUTER_KEY_AGE = 10 * 365 * 24 * 3600   # the key is meant to outlive the shop's patience
+
+
+def plate_words(code):
+    """A name plate as it should be read out across the counter: KR7P-M2XQ."""
+    raw = text(code, 24).upper()
+    return "-".join(raw[i:i + 4] for i in range(0, len(raw), 4))
+
+
+def shop_computer_rows():
+    return [dict(r) for r in q("SELECT id, name, code_hash, key_hash, session_hash, created_at,"
+                               " expires_at, used_at, last_seen FROM shop_computers"
+                               " ORDER BY used_at IS NULL DESC, id DESC")]
+
+
+def shop_computer_view():
+    """What the counter is shown about the machines it has named: names and dates, never a digest
+    and never a plate that is still waiting."""
+    out = []
+    for row in shop_computer_rows():
+        hold = one("SELECT expires_at FROM sessions WHERE token_hash = ? AND expires_at > ?",
+                   (row["session_hash"], time.time())) if row["session_hash"] else None
+        out.append({"id": row["id"], "name": row["name"], "added": row["created_at"],
+                    "waiting": not row["key_hash"],
+                    "plate_until": dt.datetime.fromtimestamp(row["expires_at"]).strftime(
+                        "%A %d %b, %H:%M"),
+                    "named": bool(row["key_hash"]),
+                    "seen": (dt.datetime.fromtimestamp(row["last_seen"]).strftime(
+                        "%d %b, %H:%M") if row["last_seen"] else "not yet used"),
+                    "signed_in": bool(hold),
+                    "stays_forever": bool(hold and hold["expires_at"] >= SESSION_NEVER)})
+    return out
+
+
+def name_shop_computer(name, where=""):
+    """Write a machine down as one of the shop's own and hand out its name plate. The plate is in
+    the answer and nowhere else in the book, so it can only be read off this screen."""
+    clean = text(name, 60).strip()
+    if not clean:
+        raise ValueError("Give the machine a name you will recognise, like CHRISPRINT's iMac")
+    plate = "".join(secrets.choice(SHOP_COMPUTER_PLATE_ALPHABET) for _ in range(8))
+    with _lock:
+        _db.execute("INSERT INTO shop_computers (name, code_hash, expires_at) VALUES (?, ?, ?)",
+                    (clean, token_digest(plate),
+                     time.time() + SHOP_COMPUTER_PLATE_DAYS * 86400))
+        number = _db.execute("SELECT last_insert_rowid()").fetchone()[0]
+        _db.commit()
+    note_security("computer_named", where, detail="%s was written down as one of the shop's own"
+                                                 % clean[:60])
+    return {"id": number, "name": clean, "plate": plate, "plate_words": plate_words(plate),
+            "plate_days": SHOP_COMPUTER_PLATE_DAYS, "computers": shop_computer_view()}
+
+
+def claim_shop_computer(code):
+    """The plate a machine typed at the door, matched to a name still waiting for it.
+    Returns (row, key) when it matches, or (None, why not) — the why is only ever said to someone
+    who has already proved the shop's password."""
+    plate = re.sub(r"[^A-Za-z0-9]", "", text(code, 24)).upper()
+    if not plate:
+        return None, ""
+    row = one("SELECT id, name, key_hash, expires_at FROM shop_computers WHERE code_hash = ?",
+              (token_digest(plate),))
+    if not row:
+        return None, "No name plate like that was written out here."
+    if row["key_hash"]:
+        return None, ("%s has already been taken up by a machine. If this one lost its place — a"
+                      " cleared browser, a rebuild — ask the counter to name it again."
+                      % row["name"])
+    if row["expires_at"] < time.time():
+        return None, ("That name plate went out of date after %d days. Ask the counter to write"
+                      " out a fresh one for %s." % (SHOP_COMPUTER_PLATE_DAYS, row["name"]))
+    key = secrets.token_urlsafe(32)
+    with _lock:
+        _db.execute("UPDATE shop_computers SET key_hash = ?,"
+                    " used_at = datetime('now','localtime'), last_seen = ? WHERE id = ?",
+                    (token_digest(key), time.time(), row["id"]))
+        _db.commit()
+    return {"id": row["id"], "name": row["name"]}, key
+
+
+def computer_by_key(key):
+    """The named machine this browser belongs to, by the key it keeps, or None."""
+    if not key:
+        return None
+    row = one("SELECT id, name FROM shop_computers WHERE key_hash = ?", (token_digest(key),))
+    return dict(row) if row else None
+
+
+def keep_shop_computer(number, token):
+    """A named machine that just signed in: remember which session is its own, so the counter can
+    un-name the machine and throw that session out with the name. The machine's earlier session
+    goes first — it is the same browser signing in again, not a second device taking a place."""
+    with _lock:
+        before = one("SELECT session_hash FROM shop_computers WHERE id = ?", (number,))
+        if before and before["session_hash"]:
+            _db.execute("DELETE FROM sessions WHERE token_hash = ?", (before["session_hash"],))
+        _db.execute("UPDATE shop_computers SET last_seen = ?, session_hash = ? WHERE id = ?",
+                    (time.time(), token_digest(token), number))
+        _db.commit()
+
+
+def revoke_shop_computer(number, where=""):
+    """Take a machine's name off it. Its session goes with the name, so a machine that was let in
+    at midnight cannot stay inside the book on a name the counter has already withdrawn."""
+    try:
+        wanted = int(number)
+    except (TypeError, ValueError):
+        raise ValueError("The machine is named by its number")
+    row = one("SELECT id, name, session_hash FROM shop_computers WHERE id = ?", (wanted,))
+    if not row:
+        raise LookupError("No machine by that number is named here")
+    with _lock:
+        if row["session_hash"]:
+            _db.execute("DELETE FROM sessions WHERE token_hash = ?", (row["session_hash"],))
+        _db.execute("DELETE FROM shop_computers WHERE id = ?", (wanted,))
+        _db.commit()
+    note_security("computer_revoked", where, detail="%s is not one of the shop's own machines"
+                                                   " any more, and was signed out" % row["name"][:60])
+    return {"unnamed": row["name"], "computers": shop_computer_view()}
+
 
 
 def sign_out_every_device(keep_token=""):
@@ -2068,6 +2802,19 @@ def clear_shop_password(current):
 
 TLS_DIR = os.path.expanduser("~/Library/Application Support/CRISPprint TLS")
 CA_DOWNLOAD = os.path.join(TLS_DIR, "device-download", "shop-root-ca.cer")
+CA_PEM_DOWNLOAD = os.path.join(TLS_DIR, "device-download", "shop-root-ca.pem")
+CA_VALID_FOR = os.path.join(TLS_DIR, "device-download", "valid-for.txt")
+# Android's certificate installer refuses a file unless its name ends in .0, .pem, .crt or
+# .cacert.cer, and a browser names the download after the address it came from. Same bytes as
+# shop-root-ca.cer, handed over under the name that device will accept.
+CA_ANDROID_NAME = "CRISPprint-Shop-Root-CA.cacert.cer"
+# One authority, three doors. The DER under two names because Android judges a certificate by its
+# file name, and a plain-text copy for anything that wants to read it rather than install it.
+CA_ROUTES = {"/shop-root-ca.cer": (CA_DOWNLOAD, "CRISPprint-Shop-Root-CA.cer",
+                                   "application/x-x509-ca-cert"),
+             "/" + CA_ANDROID_NAME: (CA_DOWNLOAD, CA_ANDROID_NAME, "application/x-x509-ca-cert"),
+             "/shop-root-ca.pem": (CA_PEM_DOWNLOAD, "CRISPprint-Shop-Root-CA.pem",
+                                   "application/x-x509-ca-cert")}
 QR_HELPER = os.path.join(SUPPORT, "qr-encode")
 
 
@@ -2077,6 +2824,21 @@ def private_address(host):
     except ValueError:
         return False
     return address.is_private or address.is_loopback
+
+
+def wifi_address():
+    """The number this machine holds on the network it is actually using. A UDP socket is opened
+    and pointed at an address but never written to — the operating system answers the route lookup
+    with the source address it would have used, and no packet leaves the building."""
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("10.255.255.255", 1))
+            return probe.getsockname()[0]
+        finally:
+            probe.close()
+    except OSError:
+        return ""
 
 
 def ip_address_of(host):
@@ -2110,6 +2872,32 @@ def ca_fingerprint():
     except OSError:
         return ""
     return ":".join("%02X" % b for b in hashlib.sha256(raw).digest())
+
+
+def ca_valid_for():
+    """The names and numbers the shop's certificate answers to, written down by tools/shop-server.sh
+    when it made the certificate. A phone that trusts the authority and still warns has nearly
+    always typed an address the certificate was never issued for — the Wi-Fi number moves."""
+    try:
+        with open(CA_VALID_FOR, encoding="utf-8") as fh:
+            return [line.strip() for line in fh if line.strip()]
+    except OSError:
+        return []
+
+
+def install_platform(user_agent):
+    """Which kind of device is reading the install page, so it gets its own steps and the file
+    shape its settings will accept. Unknown browsers get every kind listed below the general one."""
+    low = (user_agent or "").lower()
+    if "android" in low:
+        return "android"
+    if "iphone" in low or "ipad" in low or "ipod" in low:
+        return "ios"
+    if "windows" in low:
+        return "windows"
+    if "macintosh" in low and "safari" in low:
+        return "mac"
+    return "other"
 
 
 def shop_url(fallback_host=""):
@@ -2147,10 +2935,11 @@ def qr_png(words, pixels=560):
         return None
 
 
-def setup_html(request_host=""):
+def setup_html(request_host="", user_agent=""):
     url = shop_url(request_host)
     fingerprint = ca_fingerprint()
     secure = SERVE["tls"]
+    here = install_platform(user_agent)
 
     def esc(value):
         return (str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -2161,26 +2950,94 @@ def setup_html(request_host=""):
              ' not let it be installed as an app or keep it offline. Ask the shop to run'
              ' <code>tools/shop-server.sh certs</code> and <code>install</code> on the shop Mac,'
              ' then use the HTTPS address instead.</p>')
+    # Every device takes the same authority down in a different shape. Android's installer reads
+    # the file name and refuses anything that does not end the way it expects, so it gets a
+    # separate address carrying the same bytes under a name it will open.
+    files = {
+        "android": ("/" + CA_ANDROID_NAME, CA_ANDROID_NAME),
+        "ios": ("/shop-root-ca.cer", "CRISPprint-Shop-Root-CA.cer"),
+        "windows": ("/shop-root-ca.cer", "CRISPprint-Shop-Root-CA.cer"),
+        "mac": ("/shop-root-ca.pem", "CRISPprint-Shop-Root-CA.pem"),
+        "other": ("/shop-root-ca.cer", "CRISPprint-Shop-Root-CA.cer"),
+    }
+    steps = {
+        "android": ("Android phone or tablet", [
+            "Take the certificate down with Chrome, and keep the name it saves as — Android's"
+            " installer opens nothing that does not end in <code>.cacert.cer</code>,"
+            " <code>.pem</code>, <code>.crt</code> or <code>.0</code>.",
+            "Settings ▸ Security, or on a recent Android Security &amp; privacy ▸ More security"
+            " settings ▸ Cryptography &amp; certifications ▸ <b>Install a certificate</b> ▸"
+            " <b>CA certificate</b> ▸ choose the file ▸ <b>Install</b>.",
+            "Android warns that the file could harm the device. It is the shop's own authority —"
+            " read the fingerprint above out loud before trusting it.",
+            "Open the shop address in <b>Chrome</b>, then the browser menu ▸ <b>Install app</b>."]),
+        "ios": ("iPhone or iPad", [
+            "Open the downloaded certificate, then Settings ▸ General ▸ <b>VPN &amp; Device"
+            " Management</b> ▸ install the downloaded profile.",
+            "Settings ▸ General ▸ About ▸ <b>Certificate Trust Settings</b> and turn full trust on"
+            " for it — this is the step phones miss, and without it the warning stays.",
+            "Open the address in <b>Safari</b> and use <b>Share ▸ Add to Home Screen</b>."]),
+        "windows": ("Windows PC", [
+            "Open the downloaded <code>.cer</code> file ▸ <b>Install Certificate</b>.",
+            "Pick <b>Current User</b>. It needs no administrator password, and Edge and Chrome read"
+            " that store just as they read the machine's.",
+            "<b>Place all certificates in the following store</b> ▸ Browse ▸ <b>Trusted Root"
+            " Certification Authorities</b> ▸ OK ▸ Next ▸ Finish.",
+            "Quit the browser fully — it holds on to the answer it already gave — then open the"
+            " address and install it from the app icon in the address bar, or"
+            " <b>… ▸ Apps ▸ Install this site as an app</b>."]),
+        "mac": ("Another Mac", [
+            "Open the certificate so it lands in <b>Keychain Access</b>, then double-click it ▸"
+            " <b>Trust</b> ▸ <b>When using this certificate: Always Trust</b>.",
+            "Open the address in <b>Safari</b>. On the shop's own Mac the desktop app already holds"
+            " the same book."]),
+    }
+    order = ["android", "ios", "windows", "mac"]
+    names = ca_valid_for()
+    # A Host header is the address the device dialled, with the port glued on. Brackets go first,
+    # then the port, so an IPv6 address stays one address rather than splitting on its own colons.
+    host_in_use = (request_host or "").split("]")[0]
+    if host_in_use.startswith("["):
+        host_in_use = host_in_use[1:]
+    if host_in_use.count(":") == 1:
+        host_in_use = host_in_use.rsplit(":", 1)[0]
+    wrong_address = ""
+    if secure and names and host_in_use and host_in_use not in names:
+        alt = next((n for n in names if "." in n or re.match(r"^\d+\.", n)), names[0])
+        wrong_address = (
+            '<p class="warn">This page was opened as <code>%s</code>, but the shop\'s certificate'
+            ' only answers to <code>%s</code>. Trusting it will not clear the warning on this'
+            ' address — the shop\'s Wi-Fi number has moved. Use'
+            ' <a href="https://%s:%d/setup">https://%s:%d/setup</a> on this device instead, and'
+            ' ask the shop to run <code>tools/shop-server.sh certs</code> if that address is the'
+            ' one that has gone stale.</p>'
+            % (esc(host_in_use), esc(", ".join(names)), esc(alt), SERVE["port"],
+               esc(alt), SERVE["port"]))
     cert = ("" if not fingerprint else
             '<h2>One certificate to trust first</h2>'
             '<p>Phones and laptops will not open a shop address that they cannot check.'
             ' Download the shop\'s own certificate once per device, then trust it in that'
             ' device\'s settings.</p>'
-            '<p><a class="big" href="/shop-root-ca.cer">Download CRISPprint-Shop-Root-CA.cer</a></p>'
-            '<p class="fingerprint">It must read<br><code>%s</code></p>' % esc(fingerprint))
-    steps = [
-        ("iPhone or iPad", "Settings ▸ General ▸ VPN &amp; Device Management ▸ Download the"
-         " certificate, then Settings ▸ General ▸ About ▸ Certificate Trust Settings and turn"
-         " full trust on for it. Then open the address in Safari and use Share ▸ Add to Home Screen."),
-        ("Android", "Open the downloaded certificate in Settings ▸ Security ▸"
-         " Encryption &amp; credentials ▸ Install a certificate ▸ CA certificate. Then open the"
-         " address in Chrome and use the menu ▸ Install app."),
-        ("Windows", "Double-click the certificate ▸ Install Certificate ▸ Local Machine ▸ place"
-         " it in Trusted Root Certification Authorities. Then open the address in Edge and use the"
-         " install icon in the address bar."),
-        ("Another Mac", "Open the certificate and trust it in Keychain Access, then open the"
-         " address in Safari. On this Mac the desktop app already holds the same book."),
-    ]
+            '<p><a class="big" href="%s">Download the shop certificate</a></p>'
+            '<p class=note>Your device will save it as <code>%s</code>, and that is the file its'
+            ' settings screen has to be pointed at.</p>'
+            '<p class="fingerprint">It must read<br><code>%s</code></p>'
+            '<p class="note">It answers to: <code>%s</code></p>'
+            '%s'
+            % (esc(files[here][0]), esc(files[here][1]), esc(fingerprint),
+               esc(", ".join(names)) if names else "not recorded on this Mac",
+               wrong_address))
+    on_this = steps.get(here)
+    follow = ("" if not on_this else
+              '<h2>Trust it on this device</h2><ol>%s</ol>'
+              % "".join("<li>%s</li>" % line for line in on_this[1]))
+    others = "".join(
+        '<details><summary>%s</summary><ol>%s</ol><p class="note">The file for that device:'
+        ' <a href="%s">%s</a></p></details>'
+        % (esc(steps[key][0]), "".join("<li>%s</li>" % line for line in steps[key][1]),
+           esc(files[key][0]), esc(files[key][1]))
+        for key in order if key != here)
+    install_list = follow + ('<h2>On another kind of device</h2>' + others if others else "")
     return """<!doctype html><html lang=en><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=robots content="noindex">
@@ -2198,8 +3055,9 @@ border-radius:12px;padding:14px 16px}
 background:#fff;padding:8px;border:1px solid #e2d8d6}
 .big{display:inline-block;background:#c93a3f;color:#fff;padding:11px 16px;border-radius:10px;
 text-decoration:none;font-weight:600}
-ol{padding-left:22px}li{margin:14px 0}li b{display:block}
-code{font:13px ui-monospace,Menlo,Consolas,monospace}
+ol{padding-left:22px}li{margin:14px 0}
+details{margin:16px 0}summary{font-weight:600;cursor:pointer}
+code{font:13px ui-monospace,Menlo,Consolas,monospace;overflow-wrap:break-word}
 /* Only the fingerprint is one unbroken token that has to be allowed to split mid-run. */
 .fingerprint code{word-break:break-all}
 .fingerprint{background:#fff;border:1px solid #e2d8d6;border-radius:10px;padding:10px 14px;font-size:13px}
@@ -2217,8 +3075,7 @@ the book stays on the shop's own computer, and this is a window onto it.</p>
 <p>The shop keeps one password for its devices. Ask whoever runs the counter — it was chosen on
 the shop computer, and every device is signed out whenever it changes.</p>
 %(cert)s
-<h2>Install it</h2>
-<ol>%(steps)s</ol>
+%(install)s
 <p class=note><a href="%(url)s">Open the shop book now</a> · Setup for the person at the counter is
 in the README under “Open and install over HTTPS on the same Wi-Fi”.</p>
 </html>""" % {
@@ -2226,7 +3083,7 @@ in the README under “Open and install over HTTPS on the same Wi-Fi”.</p>
         "qr": ('<p class=qr><img src="/setup-qr.png" width="184" height="184" alt="QR code for'
                ' the shop address"><br><span class=note>Camera on this text, or type the address.</span></p>'
                if qr_png(url) else ""),
-        "steps": "".join("<li><b>%s</b>%s</li>" % (esc(t), d) for t, d in steps),
+        "install": install_list,
     }
 
 
@@ -2609,8 +3466,18 @@ def poll_messages(limit=60):
                 found += 1
         except Exception:  # noqa: BLE001 - one unreadable text must not stop the ledger
             continue
+    now = dt.datetime.now()
+    if problem and messages_are_being_read():
+        # Both engines write this one line into the one book, so the engine that was never given
+        # the door would otherwise stamp its refusal over the other's working reader every twenty
+        # seconds. A read that fresh is the shop's own answer — and the quiet engine leaves the
+        # working reader's own words and timestamp standing, or its silence would go on renewing
+        # the proof that somebody is reading long after that reader has gone home.
+        return found
+    if not problem:
+        set_state("momo_read_ok", now.strftime("%Y-%m-%d %H:%M:%S"))
     set_state("momo_status", problem)
-    set_state("momo_checked", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    set_state("momo_checked", now.strftime("%Y-%m-%d %H:%M:%S"))
     return found
 
 
@@ -2636,6 +3503,37 @@ def paste_alert(raw):
     return row
 
 
+def momo_ledger():
+    """What the book itself says was paid on the mobile money number, whoever sent it.
+
+    The message notices are a second pair of eyes and need a macOS permission the shop may never
+    grant; this figure comes only from the counter's own entries, so it cannot go dark."""
+    month_start = today()[:8] + "01"
+    signed = "CASE WHEN kind='Refund' THEN -amount ELSE amount END"
+    since = one("SELECT round(coalesce(sum(%s),0),2) AS total, count(*) AS n "
+                "FROM payments WHERE method='MoMo' AND paid_at >= ?" % signed, (month_start,))
+    all_time = one("SELECT round(coalesce(sum(%s),0),2) AS total, count(*) AS n, "
+                   "min(paid_at) AS first, max(paid_at) AS last "
+                   "FROM payments WHERE method='MoMo'" % signed)
+    payers = q("""SELECT c.id AS client_id, c.name AS client,
+                         round(sum(CASE WHEN p.kind='Refund' THEN -p.amount ELSE p.amount END),2) AS total,
+                         count(*) AS n, max(p.paid_at) AS last
+                  FROM payments p JOIN clients c ON c.id = p.client_id
+                  WHERE p.method='MoMo'
+                  GROUP BY c.id, c.name
+                  ORDER BY total DESC, last DESC LIMIT 12""")
+    return {
+        "month_start": month_start,
+        "month_total": (since or {}).get("total", 0),
+        "month_n": (since or {}).get("n", 0),
+        "total": (all_time or {}).get("total", 0),
+        "n": (all_time or {}).get("n", 0),
+        "first": (all_time or {}).get("first"),
+        "last": (all_time or {}).get("last"),
+        "payers": payers,
+    }
+
+
 def momo_payload():
     rows = q("""SELECT s.*, c.name AS client, j.ref AS job_ref,
                       e.category AS expense_category, e.payee AS expense_payee
@@ -2652,9 +3550,14 @@ def momo_payload():
         "signals": rows,
         "watching": momo_watching(),
         "auto": momo_auto(),
-        "status": state_value("momo_status"),
+        # Not state_value straight off: the Mac app runs its own bundled engine, and until that
+        # bundle is rebuilt it has no grace of its own and writes its refusal every twenty seconds
+        # even after the door is granted elsewhere. A working read is the truer answer.
+        "status": "" if messages_are_being_read() else state_value("momo_status"),
         "checked": state_value("momo_checked"),
         "number": MOMO_NUMBER,
+        # Which entry in Full Disk Access would open the door for the engine answering this.
+        "door": messages_door(),
         "waiting": len(waiting),
         "booked": len(booked),
         "booked_total": round(sum(r["amount"] or 0 for r in booked), 2),
@@ -2663,6 +3566,8 @@ def momo_payload():
         "waiting_out": len([r for r in out if r["state"] == "Unreviewed"]),
         "sent": len(sent),
         "sent_total": round(sum(r["amount"] or 0 for r in sent), 2),
+        # Money paid on the number, read straight off the book rather than off the alerts.
+        "ledger": momo_ledger(),
         # So the panel can ask "whose money is this?" without another round trip.
         "clients": q("SELECT id, name FROM clients WHERE archived = 0 ORDER BY name"),
     }
@@ -3330,6 +4235,15 @@ def accounts_view(params):
       FROM payments p JOIN clients c ON c.id = p.client_id
       WHERE p.job_id IS NULL GROUP BY c.id HAVING credit <> 0 ORDER BY credit DESC
     """)
+    # Money handed over and left on the account has already bought part of that client's work, even
+    # though no job row carries it. Set it against their jobs here, biggest balance first, so the
+    # list shows where the difference between its balances and the headline figure has gone.
+    held = {row["id"]: row["credit"] for row in credit if row["credit"] > 0}
+    for d in debtors:
+        avail = held.get(d["client_id"], 0.0)
+        d["covered_by_credit"] = round(min(avail, d["balance"]), 2)
+        d["still_owed"] = round(d["balance"] - d["covered_by_credit"], 2)
+        held[d["client_id"]] = round(avail - d["covered_by_credit"], 2)
     # The settled side of the book: billed work whose balance has been cleared, most recent first.
     settled = q("""
       SELECT ja.id, ja.ref, ja.client_id, ja.client, c.phone, ja.title, ja.category, ja.status,
@@ -3343,12 +4257,12 @@ def accounts_view(params):
     return {"ledger": ledger, "debtors": debtors, "credit": credit, "settled": settled,
             "spent": q("SELECT * FROM monthly_pnl LIMIT 13"),
             "totals": one("""
-              SELECT round(coalesce(sum(balance),0),2) AS receivable,
+              SELECT (%s) AS receivable,
                      round(coalesce(sum(CASE WHEN due_date IS NOT NULL AND due_date < ?
                                               AND status NOT IN ('Delivered','Cancelled')
                                               THEN balance ELSE 0 END),0),2) AS overdue_value
               FROM job_accounts WHERE kind='Job' AND status <> 'Cancelled' AND balance > 0
-            """, (today(),)),
+            """ % COLLECTABLE_SQL, (today(),)),
             "spent_total": one("""
               SELECT round(coalesce(sum(amount),0),2) AS all_time,
                      round(coalesce(sum(CASE WHEN spent_on >= ? THEN amount ELSE 0 END),0),2) AS this_month
@@ -3454,6 +4368,36 @@ def report(params):
 
 # --------------------------------------------------------------------- csv export
 
+# The columns each export adds up at the foot of the file. Only amounts that belong to a whole
+# row make the list: a column of unit prices has no shop-wide total, only the line it is on does.
+EXPORT_TOTAL_COLUMNS = {
+    "jobs": ("total", "cost", "profit", "paid", "balance"),
+    "items": ("line_total", "line_cost", "profit"),
+    "expenses": ("amount",),
+    "leads": ("value",),
+    "clients": ("billed", "received", "balance_due"),
+    "payments": ("amount",),
+    "accounts": ("total", "paid", "balance"),
+}
+
+
+def export_totals(name, rows):
+    def amount(row, key):
+        value = row.get(key)
+        if value is None:
+            return 0.0
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        # The shop's own "collected" figure counts a refund against what came in; so does this.
+        if name == "payments" and row.get("kind") == "Refund":
+            return -out
+        return out
+    return {key: round(sum(amount(row, key) for row in rows), 2)
+            for key in EXPORT_TOTAL_COLUMNS.get(name, ())}
+
+
 def export_rows(name, params):
     if name == "jobs":
         rows, cols = list_jobs(params), [
@@ -3515,6 +4459,15 @@ def export_rows(name, params):
     writer.writerow([label for _, label in cols])
     for row in rows:
         writer.writerow(["" if row.get(key) is None else row.get(key) for key, _ in cols])
+    keys = EXPORT_TOTAL_COLUMNS.get(name, ())
+    if keys:
+        totals = export_totals(name, rows)
+        tally = "%d row%s" % (len(rows), "" if len(rows) == 1 else "s")
+        if name == "payments" and any(row.get("kind") == "Refund" for row in rows):
+            # a refund stays money-out in its own row, so the foot does not add up to the column
+            tally += ", refunds counted off"
+        writer.writerow(["Total (%s)" % tally]
+                        + ["%.2f" % totals[key] if key in keys else "" for key, _ in cols[1:]])
     return buf.getvalue(), "%s-%s.csv" % (name, today()), len(rows)
 
 
@@ -3768,7 +4721,11 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("%s  %s\n" % (dt.datetime.now().strftime("%H:%M:%S"), fmt % args))
+        # The shop runs open on the Wi-Fi, so the address that knocks is the only way to tell which
+        # machine came calling after the fact. It is only an address — no machine key, no word,
+        # nothing that would let a reader of this log sign in as anyone.
+        sys.stderr.write("%s  %-15s %s\n" % (dt.datetime.now().strftime("%H:%M:%S"),
+                                             self.client_ip(), fmt % args))
 
     # helpers
     def drain_body(self):
@@ -3814,7 +4771,10 @@ class Handler(BaseHTTPRequestHandler):
             # silently does nothing; a hosted name gets it for six months.
             self.send_header("Strict-Transport-Security", "max-age=15552000")
         for k, v in (extra or {}).items():
-            self.send_header(k, v)
+            # A header may be more than one line — two cookies go down in one answer, and a
+            # browser reads each Set-Cookie on its own.
+            for line in (v if isinstance(v, list) else [v]):
+                self.send_header(k, line)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(data)
@@ -3974,12 +4934,12 @@ class Handler(BaseHTTPRequestHandler):
         return None
 
     def session_token(self):
-        cookies = self.headers.get("Cookie", "")
-        for item in cookies.split(";"):
-            key, _, value = item.strip().partition("=")
-            if key == "crispprint_session":
-                return value
-        return ""
+        return self.cookie_value("crispprint_session")
+
+    def named_computer(self):
+        """The shop computer this browser was named as, if it carries the key the counter's name
+        plate left behind. Nothing here is trusted without the shop's own password as well."""
+        return computer_by_key(self.cookie_value("crispprint_machine"))
 
     def client_ip(self):
         if THROUGH_PROXY:
@@ -3990,25 +4950,64 @@ class Handler(BaseHTTPRequestHandler):
         return self.client_address[0] if self.client_address else "?"
 
     def is_shop_computer(self):
-        """Loopback means this Mac — the counter's own screen, which the shop already controls.
-        Behind a proxy every visitor arrives from the proxy's address, so loopback proves nothing."""
+        """This Mac is the shop's own screen: the counter's machine, which the shop already
+        controls, and the only place a mailbox or a copy schedule may be settled.
+
+        Loopback says so. So does arriving on the very address this server is listening on: the
+        app and the browser on this Mac open the shop at its Wi-Fi number, so a call from
+        192.168.100.11 to 192.168.100.11 is still a call from this Mac — and a phone out on the
+        network arrives as its own address, which can never equal it. Behind a proxy every visitor
+        arrives from the proxy's address, so neither form proves anything."""
         if THROUGH_PROXY:
             return False
         ip = self.client_ip()
-        return ip.startswith("127.") or ip == "::1"
+        if ip.startswith("127.") or ip == "::1":
+            return True
+        try:
+            local = self.connection.getsockname()[0]
+        except OSError:
+            return False
+        return bool(local) and ip == local
 
     def authenticated(self):
         if not auth_required() or LAN_NO_LOGIN:
             return True
         if self.is_shop_computer() and not shop_mac_locks_itself():
             return True
-        return touch_session(self.session_token())
+        token = self.session_token()
+        if not touch_session(token):
+            return False
+        if session_is_forever(token):
+            # No browser keeps a cookie this long, so a machine the counter named is handed the same
+            # sign-in again on every visit. It stays inside the book without ever typing again.
+            self.cookie(token, SHOP_COMPUTER_KEY_AGE)
+        return True
+
+    def set_cookie(self, name, value, max_age):
+        secure = "; Secure" if getattr(self.server, "is_tls", False) else ""
+        held = self.response_headers.get("Set-Cookie") or []
+        if isinstance(held, str):
+            held = [held]
+        held.append("%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s"
+                    % (name, value, max_age, secure))
+        self.response_headers["Set-Cookie"] = held
 
     def cookie(self, token, max_age):
-        secure = "; Secure" if getattr(self.server, "is_tls", False) else ""
-        self.response_headers["Set-Cookie"] = (
-            "crispprint_session=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s"
-            % (token, max_age, secure))
+        self.set_cookie("crispprint_session", token, max_age)
+
+    def machine_cookie(self, key):
+        """The long key saying this browser is one of the machines the counter named. It is not a
+        sign-in and opens nothing by itself — it only says which device may ask for a fresh
+        sign-in at any hour and without using one of the visiting places. It stays where it is
+        when a device signs out, since it describes the machine, not the visit."""
+        self.set_cookie("crispprint_machine", key, SHOP_COMPUTER_KEY_AGE)
+
+    def cookie_value(self, name):
+        for item in (self.headers.get("Cookie") or "").split(";"):
+            key, _, value = item.strip().partition("=")
+            if key == name:
+                return value
+        return ""
 
     def emit(self, code, payload, path, params, headers=None):
         if isinstance(payload, tuple) and payload[0] == "csv":
@@ -4026,9 +5025,12 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {"ok": True}
         if method == "GET" and path == "/api/session":
             signed_in = self.authenticated()
+            named = self.named_computer() if signed_in else None
             return 200, {"required": auth_required(), "authenticated": signed_in,
                          "from_environment": bool(AUTH_PASSWORD),
-                         "this_is_the_shop_computer": self.is_shop_computer()}
+                         "this_is_the_shop_computer": self.is_shop_computer(),
+                         "shop_computer": named["name"] if named else "",
+                         "hours": public_hours(shop_hours(with_devices=signed_in), signed_in)}
         if path == "/api/login" and method == "POST":
             if not auth_required():
                 return 200, {"authenticated": True}
@@ -4038,7 +5040,8 @@ class Handler(BaseHTTPRequestHandler):
                 note_security("locked_out", self.client_ip(), self.headers.get("User-Agent", ""),
                               "%d seconds still to wait" % wait)
                 return 429, {"error": "Too many wrong passwords from here. Wait %d seconds." % wait}
-            if not password_matches(self.body().get("password", "")):
+            sent = self.body()
+            if not password_matches(sent.get("password", "")):
                 wait = note_bad_login(self.client_ip())
                 wrong = _login_tries.get(self.client_ip(), (0, 0))[0]
                 note_security("wrong_password" if not wait else "locked_out", self.client_ip(),
@@ -4050,11 +5053,53 @@ class Handler(BaseHTTPRequestHandler):
                                           " trying again." % wait}
                 return 401, {"error": "Password is incorrect"}
             _login_tries.pop(self.client_ip(), None)
+            # A machine the counter wrote down as one of the shop's own signs in whenever there is
+            # work to do: by the key it was given when it was first named, or by the name plate the
+            # counter has just handed across to it. Either way the shop's password is still asked
+            # for — being named says which machine this is, not who is standing at it.
+            computer = self.named_computer()
+            plate = text(sent.get("shop_code"), 24)
+            machine_key = ""
+            plate_note = ""
+            if plate and not computer:
+                claimed, answer = claim_shop_computer(plate)
+                if claimed:
+                    computer, machine_key = claimed, answer
+                else:
+                    plate_note = answer
+                    note_security("name_plate_refused", self.client_ip(),
+                                  self.headers.get("User-Agent", ""), text(answer, 200))
+            refused = sign_in_refusal(self.is_shop_computer() or bool(computer),
+                                      bool(touch_session(self.session_token())))
+            if refused:
+                code, payload = refused
+                if plate_note:
+                    payload = dict(payload, error=plate_note)
+                note_security("turned_away", self.client_ip(),
+                              self.headers.get("User-Agent", ""), text(payload.get("error"), 200))
+                return code, payload
             seconds = session_seconds()
-            self.cookie(open_session(self.headers.get("User-Agent", "")), seconds)
+            token = open_session(self.headers.get("User-Agent", ""), forever=bool(computer))
+            # A visiting device is given the shop's countdown; a machine the counter named is given
+            # the long one, and is handed it again on every visit from here.
+            self.cookie(token, SHOP_COMPUTER_KEY_AGE if computer else seconds)
+            answer = {"authenticated": True}
+            if computer:
+                if machine_key:
+                    self.machine_cookie(machine_key)
+                keep_shop_computer(computer["id"], token)
+                answer["shop_computer"] = computer["name"]
+                note_security("computer_admitted", self.client_ip(),
+                              self.headers.get("User-Agent", ""),
+                              "%s signed in as one of the shop's own machines"
+                              % computer["name"][:60])
+            if plate_note:
+                answer["shop_computer_note"] = plate_note
             note_security("signed_in", self.client_ip(), self.headers.get("User-Agent", ""),
-                          "signed in for %d day%s" % (session_days(), "" if session_days() == 1 else "s"))
-            return 200, {"authenticated": True}
+                          ("stays signed in while it is one of the shop's own" if computer else
+                           "signed in for %d day%s" % (session_days(),
+                                                       "" if session_days() == 1 else "s")))
+            return 200, answer
         if path == "/api/logout" and method == "POST":
             token = self.session_token()
             if token:
@@ -4065,30 +5110,67 @@ class Handler(BaseHTTPRequestHandler):
 
         return self.dispatch_api(method, path, params, seg)
 
+    def mailbox_writes(self, method, rest):
+        """The four things the counter's Email accounts screen asks of the book. Split out of
+        dispatch_api so one try/except can turn a mail server's refusal into a 400 with the
+        provider's own words, rather than a 500 that blames the shop's own Mac."""
+        if method == "POST" and len(rest) == 1:
+            answer = save_email_account(self.body())
+            note_security("mailbox_added", self.client_ip(),
+                          self.headers.get("User-Agent", ""), "mailbox %s added" % answer["id"])
+            return 201, answer
+        if len(rest) == 2 and method == "PUT":
+            return 200, save_email_account(self.body(), path_id(rest[1]))
+        if len(rest) == 2 and method == "DELETE":
+            answer = delete_email_account(path_id(rest[1]))
+            note_security("mailbox_forgotten", self.client_ip(),
+                          self.headers.get("User-Agent", ""),
+                          "mailbox %s removed, %d left" % (answer["removed"],
+                                                           len(answer["accounts"])))
+            return 200, answer
+        if len(rest) == 3 and rest[2] == "default" and method == "POST":
+            answer = set_default_email_account(path_id(rest[1]))
+            note_security("mailbox_chosen", self.client_ip(),
+                          self.headers.get("User-Agent", ""),
+                          "mailbox %s now sends client notices" % rest[1])
+            return 200, answer
+        if len(rest) == 3 and rest[2] == "test" and method == "POST":
+            answer = test_email_account(path_id(rest[1]), self.body().get("to"))
+            note_security("mailbox_tested", self.client_ip(),
+                          self.headers.get("User-Agent", ""),
+                          "test letter sent through mailbox %s" % rest[1])
+            return 200, answer
+        return 405, {"error": "Use GET for the shop's mailboxes, POST to add one,"
+                              " PUT or DELETE /api/email-accounts/<number> to change one,"
+                              " POST .../default to make it the sender,"
+                              " POST .../test to send a letter through it"}
+
     def dispatch_api(self, method, path, params, seg):
         if method == "GET" and (not seg or seg[0] != "api"):
             if path.startswith("/print/"):
                 return 200, ("raw", receipt_html(path_id(path.rsplit("/", 1)[1])), "text/html; charset=utf-8")
             if path == "/setup":
-                return 200, ("raw", setup_html(self.headers.get("Host", "")), "text/html; charset=utf-8")
+                return 200, ("raw", setup_html(self.headers.get("Host", ""),
+                                               self.headers.get("User-Agent", "")),
+                             "text/html; charset=utf-8")
             if path == "/setup-qr.png":
                 png = qr_png(shop_url(self.headers.get("Host", "")))
                 if not png:
                     self.send(404, "No QR helper on this Mac", "text/plain")
                     return None
                 return 200, ("raw", png, "image/png")
-            if path == "/shop-root-ca.cer":
+            if path in CA_ROUTES:
                 # The shop's root certificate, handed to a device standing on the same Wi-Fi. A
                 # hosted deployment has no business distributing a Mac's trust root.
+                source, saved_as, mime = CA_ROUTES[path]
                 if not private_address(self.client_ip()):
                     self.send(404, "The shop certificate is only handed out on the shop Wi-Fi",
                               "text/plain")
                     return None
-                if not os.path.isfile(CA_DOWNLOAD):
+                if not os.path.isfile(source):
                     self.send(404, "No certificate has been made for this shop", "text/plain")
                     return None
-                return 200, ("file", CA_DOWNLOAD, "CRISPprint-Shop-Root-CA.cer",
-                             "application/x-x509-ca-cert")
+                return 200, ("file", source, saved_as, mime)
             if not seg:
                 return 200, ("raw", open(os.path.join(PUBLIC, "index.html"), encoding="utf-8").read(),
                              "text/html; charset=utf-8")
@@ -4202,6 +5284,40 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, answer
             return 405, {"error": "Use DELETE /api/devices/<number> to sign one device out,"
                                   " or /api/devices to sign every other one out"}
+        if head == "shop-computers":
+            # Which machines are the shop's own is settled at the counter, over this Mac's own
+            # shoulder — it is the one decision in the book that cannot be made from a browser
+            # somewhere else on the Wi-Fi.
+            if not self.is_shop_computer():
+                return 403, {"error": "A machine is named as one of the shop's own on the shop's"
+                                      " own computer, where somebody can see it happen"}
+            if method == "GET":
+                return 200, {"computers": shop_computer_view()}
+            if method == "POST":
+                return 201, name_shop_computer(self.body().get("name"), self.client_ip())
+            if len(rest) >= 2 and method == "DELETE":
+                return 200, revoke_shop_computer(rest[1], self.client_ip())
+            return 405, {"error": "Use GET for the machines named here, POST to name one,"
+                                  " DELETE /api/shop-computers/<number> to take the name off"}
+        if head == "email-accounts":
+            # A mailbox comes with the keys to the shop's own mail, so it is registered where
+            # somebody can watch it happen — the same rule by which the shop's machines and the
+            # copies of the book are settled. Reading the list is open like any other screen; the
+            # list never carries a password.
+            if method == "GET":
+                return 200, {"accounts": email_account_view(),
+                             "sending": notification_config_error("Email")}
+            if not self.is_shop_computer():
+                return 403, {"error": "A mailbox and its password are added on the shop's own"
+                                      " computer, where somebody can see it happen"}
+            try:
+                return self.mailbox_writes(method, rest)
+            except RuntimeError as error:
+                # A mail server that says no, or a secret file the Mac would not take, is the shop's
+                # own details being wrong — not the counter's machine breaking down. A 500 here
+                # reads as a fault in the shop's own server, so it is answered as a 400 instead and
+                # the provider's own words go back to the screen that asked.
+                return 400, {"error": str(error)}
         if head == "backups":
             if method == "GET":
                 return 200, backup_report()
@@ -4359,7 +5475,11 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and len(rest) == 1:
                 payload = self.body()
                 if payload.get("check"):
-                    return 200, dict(momo_payload(), found=poll_messages())
+                    # The poll first. Built the other way round, the card would paint — and the toast
+                    # would speak — the status read before this press, so pressing Check Messages
+                    # straight after granting the door kept repeating the refusal it had just cured.
+                    found = poll_messages()
+                    return 200, dict(momo_payload(), found=found)
                 if "watch" in payload:
                     set_state("momo_watch", "1" if payload.get("watch") else "0")
                     return 200, momo_payload()
@@ -4946,7 +6066,18 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
     print("%s is running at %s" % (SHOP["name"], url))
     print("Data file: %s" % DB_PATH)
     if not local_only:
-        print("Devices on this Wi-Fi install from %ssetup" % url)
+        # `0.0.0.0` is where the server listens, not a number anyone can type. Without the Mac's own
+        # Wi-Fi address this line reads `…://127.0.0.1:8834/setup` — which every machine on the
+        # network other than this one fails to open, and the counter has nothing else to go by.
+        peer = display_host
+        named = ""
+        if host in ("0.0.0.0", "::", ""):
+            peer = wifi_address() or display_host
+            named = socket.gethostname()
+        print("Devices on this Wi-Fi install from %s://%s:%d/setup" % (scheme, peer, port))
+        if named.endswith(".local"):
+            print("  Apple devices can also use the name, which outlives a new number:"
+                  " %s://%s:%d/" % (scheme, named, port))
         print("Sign-in: %s" % ("one shop password" if auth_required() and not LAN_NO_LOGIN
                                else "not required (this run was told to skip it)"))
         if not KEEP_AWAKE:

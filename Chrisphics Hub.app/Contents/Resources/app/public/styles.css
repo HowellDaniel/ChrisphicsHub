@@ -1,7 +1,8 @@
 /* CRISPprint Ghana — counter-side UI.
    One typeface (Poppins), the two inks lifted from the shop's logo (crimson #AB1F23,
-   warm grey #808085), and three appearances: light, dark, or whatever the Mac is set to.
-   Every colour in this file goes through a token so both themes stay coherent. */
+   warm grey #808085), and two palettes the shop's clock picks between: light between
+   08:00 and 17:00, dark outside them. Every colour in this file goes through a token so
+   both stay coherent. */
 :root {
   color-scheme: light;
   /* paper and ink */
@@ -18,6 +19,9 @@
   --brand: #ab1f23;
   --brand-ink: #8c171b;
   --brand-soft: #fbeceb;
+  /* Crimson type sitting on a crimson wash. On the dark palette the ink would sink into the wash,
+     so this is the one pairing that takes the brightened brand instead. */
+  --on-brand-soft: var(--brand-ink);
   --on-brand: #ffffff;
   --link: #ab1f23;
   /* the logo's grey: money going out, and everything quiet */
@@ -32,6 +36,36 @@
   --bad-soft: #fbe9e8;
   --cool: #3d5b67;
   --cool-soft: #e3eef2;
+  /* the dashboard's glass: a panel the shop's day shows through, not a filter laid over the ink.
+     The wash is the shop's three colours as BRIGHT tints at high alpha, not dark pigment at a
+     whisper: a panel that is 72% white lets through only the lightness of what is under it, so a
+     crimson at .16 arrived as grey and nobody could see the material at all. These clear AA with
+     room because the hue rides on luminance rather than taking it away. */
+  --glass: rgba(255, 255, 255, .72);
+  --glass-hover: rgba(255, 255, 255, .86);
+  --glass-line: rgba(34, 29, 31, .10);
+  --glass-rim: rgba(255, 255, 255, .95);
+  --glass-spec: rgba(255, 255, 255, 1);
+  --glass-spec-2: rgba(255, 255, 255, .20);
+  --glass-spec-3: rgba(255, 255, 255, .82);
+  --glass-shadow: 0 2px 6px rgba(34, 29, 31, .07), 0 18px 46px rgba(34, 29, 31, .13);
+  --wash-brand: rgba(255, 150, 175, .72);
+  --wash-cool: rgba(136, 202, 255, .70);
+  --wash-warn: rgba(255, 206, 124, .66);
+  --r-glass: 18px;
+  /* the dashboard's calendar widget: the month on its own face, in the shop's own colours rather
+     than somebody else's red. Every pair is measured — today's roundel is white on crimson at 7.11:1
+     by day, the numerals 16.62:1 on the page, the quiet edge days 5.43:1 — and the month name is the
+     one ink that has to move with the palette, because the dark brand would fail on the dark face.
+     tools/check-daylight-theme.py re-measures all of them out of these tokens. */
+  --cal-mark: var(--brand);
+  --cal-mark-ink: #ffffff;
+  --cal-night-mark: var(--warn);
+  --cal-night-ink: #ffffff;
+  --cal-head: var(--brand);
+  --cal-face: var(--surface);
+  --cal-ink: var(--text);
+  --cal-soft: var(--muted);
   /* the counter's shadow — the sidebar stays dark in both appearances */
   --ink: #1c1517;
   --ink-2: #2b2023;
@@ -78,6 +112,7 @@
   --brand: #c93a3f;
   --brand-ink: #a8262c;
   --brand-soft: #33191b;
+  --on-brand-soft: #ef8a90;
   --on-brand: #ffffff;
   --link: #ef8a90;
   --grey: #8d8d93;
@@ -90,6 +125,30 @@
   --bad-soft: #3a1a1c;
   --cool: #7fb3c4;
   --cool-soft: #16292f;
+  --glass: rgba(26, 22, 23, .55);
+  --glass-hover: rgba(41, 34, 36, .78);
+  --glass-line: rgba(236, 231, 231, .12);
+  --glass-rim: rgba(255, 255, 255, .14);
+  --glass-spec: rgba(255, 255, 255, .40);
+  --glass-spec-2: rgba(255, 255, 255, .05);
+  --glass-spec-3: rgba(255, 255, 255, .22);
+  --glass-shadow: 0 2px 6px rgba(0, 0, 0, .34), 0 18px 46px rgba(0, 0, 0, .46);
+  --wash-brand: rgba(240, 92, 108, .46);
+  --wash-cool: rgba(96, 186, 236, .38);
+  --wash-warn: rgba(246, 186, 92, .32);
+  /* The widget on the dark palette: the roundel brightens with the rest of the brand and keeps white
+     type (5.05:1), but the evening mark is a light amber and white on it reads 2.46:1 — so the amber
+     keeps a dark ink instead, at 7.70:1. The month name cannot wear this palette's brand (3.22:1 on
+     the lifted face), so it takes the brightened link red at 6.74:1. The face lifts off black, not to
+     white, and the numerals ride on it at 13.26:1. */
+  --cal-mark: var(--brand);
+  --cal-mark-ink: #ffffff;
+  --cal-night-mark: var(--warn);
+  --cal-night-ink: #131011;
+  --cal-head: var(--link);
+  --cal-face: var(--surface-2);
+  --cal-ink: var(--text);
+  --cal-soft: var(--muted);
   --ink: #0d0b0c;
   --ink-2: #171214;
   --side-text: #e8e3e3;
@@ -162,8 +221,8 @@ code { font-family: var(--num); font-size: .88em; }
 .side-cta { display: flex; flex-direction: column; gap: 7px; padding: 0 var(--pad); }
 /* What the book holds, where it lives, and the quiet ways out of it. These belong under the
    screens rather than in the rail: the rail is the shop's commands, this strip is the book's
-   own state, read the same way from any screen. The appearance choice is not repeated here on a
-   wide screen — Settings ▸ Appearance owns it in the app, and a phone gets it in its More sheet. */
+   own state, read the same way from any screen. Nothing about the look is decided here — the
+   clock decides it, on every screen and on every machine. */
 .pagefoot {
   border-top: 1px solid var(--line); color: var(--muted); font-size: .82em;
   display: flex; flex-wrap: wrap; align-items: center; gap: 5px 18px;
@@ -182,15 +241,6 @@ code { font-family: var(--num); font-size: .88em; }
 .linkbtn { background: none; border: 0; padding: 0; text-align: left; color: var(--link);
   cursor: pointer; font-size: .92em; text-decoration: underline; text-underline-offset: 3px; }
 .linkbtn:hover { color: var(--text); }
-/* Light / dark / system. Out of the Mac app's screen entirely, because `Settings ▸ Appearance`
-   already owns it there; a browser tab on any other machine keeps it on this strip. */
-.themeseg { display: flex; gap: 3px; padding: 3px; border-radius: 9px; background: var(--surface-2); }
-[data-native="1"] .themeseg { display: none; }
-.themeseg button { flex: 1; border: 0; background: none; color: var(--muted); font-size: .78em; font-weight: 500;
-  padding: 5px 8px; border-radius: 6px; cursor: pointer; transition: background .16s ease, color .16s ease; }
-.themeseg button:hover { color: var(--text); }
-.themeseg button[aria-pressed="true"] { background: var(--surface); color: var(--text); font-weight: 600; }
-.themeseg button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
 .main { display: flex; flex-direction: column; min-width: 0; }
 .topbar {
   position: sticky; top: 0; z-index: 6; background: var(--topbar); backdrop-filter: blur(8px);
@@ -283,6 +333,198 @@ input::placeholder { color: var(--placeholder); }
   opacity: 0; transition: opacity .16s ease, border-color .16s ease; }
 .stat.go:hover .arrow { opacity: 1; border-color: var(--brand); }
 
+/* ---------- the shop's own hours ----------
+   One strip on the dashboard that answers "is the shop open, and how much of it is left"
+   without anybody having to ask, and the same words on the sign-in card so no one types the
+   shop password into a door that is shut. Tabular figures, so the seconds do not jog the line. */
+.card.hours { border-left: 4px solid var(--ok); }
+.card.hours.shut { border-left-color: var(--bad); background: var(--bad-soft); }
+.card.hours.shut .hint { color: inherit; }
+.hours-count { font-size: 1.06em; font-weight: 600; letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hours-note { margin-bottom: 12px; }
+
+/* ---------- the day, the time, and the look that follows them ----------
+   The counter asked for the dashboard to carry the shop's date and a running clock, and for the
+   screen itself to follow the hour: light between 08:00 and 17:00, dark after. He asked three times
+   for the iPhone's widgets and could not see the two quieter answers, then named the size: the
+   calendar is the medium type, "with all the days on it, not small" — the month's every day on one
+   face, today in a crimson roundel — beside a clock drawn at lock-screen size. In this shop's
+   colours, not somebody else's red, and every ink measured against AA. The whole date is still
+   written out underneath for anyone reading it aloud. */
+.card.today { border-left: 4px solid var(--cool); }
+.card.today.night { border-left-color: var(--warn); }
+.today-face { display: flex; align-items: center; gap: clamp(14px, 1.8vw, 26px); }
+/* Then he looked at the two of them and said: reduce the two widget and make them landscape
+   (2026-10-13, 21:00). They were two 340×275 blocks that filled the card and, in his own window,
+   stacked one over the other. Both are now short and wide — a month that reads across rather than
+   down, at roughly two of width to one of height — and small enough that the pair sits side by side
+   in the counter's window instead of pushing the clock off the screen. Every day of the month is
+   still on the face: what shrank is the row, not the month. */
+.today-cal {
+  flex: none; width: clamp(270px, 21vw, 320px);
+  background: var(--cal-face); color: var(--cal-ink);
+  border-radius: 22px; box-shadow: var(--shadow); padding: 10px 10px 7px;
+  font-variant-numeric: tabular-nums;
+}
+.card.today.night .today-cal { --cal-mark: var(--cal-night-mark); --cal-mark-ink: var(--cal-night-ink); }
+.cal-head { display: flex; align-items: baseline; gap: 6px; padding: 0 2px 4px; }
+.cal-mon { font-size: clamp(15px, .8vw + 9px, 18px); font-weight: 600; letter-spacing: -.015em;
+  color: var(--cal-head); }
+.cal-year { font-size: .78em; font-weight: 600; color: var(--cal-soft); }
+.cal-dows { display: grid; grid-template-columns: repeat(7, 1fr); padding-bottom: 1px; }
+.cal-dows span { text-align: center; font-size: 10.5px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--cal-soft); }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); }
+.cal-cell { display: flex; align-items: center; justify-content: center;
+  height: clamp(17px, .8vw + 9px, 20px); font-size: clamp(14px, .45vw + 9px, 15px);
+  font-weight: 500; color: var(--cal-ink); }
+/* The days belonging to the months on either side, so the rows read as a real month. Quieter by
+   token, not by opacity: opacity would make the contrast this shop measures a lie. */
+.cal-cell.edge { color: var(--cal-soft); font-weight: 400; }
+.cal-cell.is-today { background: var(--cal-mark); color: var(--cal-mark-ink); font-weight: 600;
+  border-radius: 50%; aspect-ratio: 1; width: auto; margin: 0 auto; }
+/* ---------- the weather, beside the month, the same size ----------
+   "Add the weather after the calendar widget in the same size like the calendar" (2026-10-13). The tile
+   is the calendar's twin by construction rather than by eye: the identical width clamp, the same
+   --cal-face/--cal-ink, the same 22px radius and counter shadow, and align-self: stretch so it grows to
+   the month's height and no taller. Because it borrows the calendar's tokens it cannot introduce an
+   unmeasured ink: the place name is the month name's ink, the temperature the numeral's, the quiet
+   lines --cal-soft — 5.43:1 by day, 5.80:1 by night on this very face. The glyph is the one colour
+   added, and it is --cool, the slate the day card's own border already wears — never a borrowed sky
+   blue. The condition rides on the glyph's SHAPE (sun, cloud, rain, storm), so a colour-blind machine
+   at the counter reads the same weather. The six-hour strip is pushed to the bottom with margin-top:
+   auto, which is also what makes the two faces end level. */
+.today-wx {
+  flex: none; align-self: stretch; width: clamp(270px, 21vw, 320px);
+  background: var(--cal-face); color: var(--cal-ink);
+  border-radius: 22px; box-shadow: var(--shadow); padding: 10px 10px 7px;
+  font-variant-numeric: tabular-nums;
+  display: flex; flex-direction: column;
+}
+.wx-head { display: flex; align-items: baseline; gap: 6px; padding: 0 2px 4px; }
+.wx-place { font-size: clamp(15px, .8vw + 9px, 18px); font-weight: 600; letter-spacing: -.015em;
+  color: var(--cal-head); }
+.wx-glyph { margin-left: auto; align-self: center; color: var(--cool); line-height: 0; }
+.wx-glyph svg { width: 20px; height: 20px; display: block; }
+.wx-glyph.wx-sun { color: var(--warn); }
+.wx-main { display: flex; align-items: flex-start; gap: 9px; }
+.wx-temp { font-family: var(--num); font-weight: 500; letter-spacing: -.04em; line-height: 1.02;
+  font-size: clamp(28px, 2.2vw + 12px, 40px); color: var(--cal-ink); }
+.wx-side { display: flex; flex-direction: column; gap: 2px; padding-top: 3px; min-width: 0; }
+.wx-cond { font-size: clamp(13px, .5vw + 9px, 15px); font-weight: 600; color: var(--cal-ink); }
+.wx-hilo { font-size: 11.5px; font-weight: 500; color: var(--cal-soft); }
+.wx-feels { font-size: 11.5px; color: var(--cal-soft); margin: 3px 0 0; }
+.wx-hours { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin-top: auto; padding-top: 5px; border-top: 1px solid var(--line); }
+.wx-hours span { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+.wx-hours b { font-size: 10px; font-weight: 600; letter-spacing: .04em; color: var(--cal-soft); }
+.wx-hours i { font-style: normal; font-size: clamp(12px, .4vw + 8px, 14px); font-weight: 600;
+  color: var(--cal-ink); }
+.wx-age { font-size: 10.5px; color: var(--cal-soft); margin: 4px 0 0; }
+.wx-none { font-size: 13px; color: var(--cal-soft); margin: 2px 0 0; }
+.today-when { flex: 1; min-width: 0; }
+.today-clock { font-family: var(--num); font-variant-numeric: tabular-nums; white-space: nowrap;
+  font-size: clamp(32px, 3vw + 14px, 56px); font-weight: 500; letter-spacing: -.035em;
+  line-height: 1.04; color: var(--text); margin: -3px 0 4px; }
+.today-clock i { font-style: normal; }
+/* The seconds and am/pm are the small print of a clock face: present, ticking, never competing
+   with the hour and minute. Their text still concatenates to "8:05:00 pm" for anything reading it. */
+.today-clock s { text-decoration: none; font-size: .42em; font-weight: 400; color: var(--muted);
+  letter-spacing: 0; }
+.today-clock u { text-decoration: none; font-size: .34em; font-weight: 500; color: var(--muted);
+  letter-spacing: .04em; }
+.today-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 7px; }
+.today-line .spacer { flex: 1; }
+.today-date { font-size: 1.22em; font-weight: 600; letter-spacing: -.01em; margin: 0 0 7px;
+  font-variant-numeric: tabular-nums; }
+
+/* ---------- liquid glass, on the dashboard and nowhere else ----------
+   The counter asked for Apple's liquid glass on the shop screen (2026-10-13), and the first ship of
+   it went unseen: "am not seeing the apple liquid effects". Measured, the reason is arithmetic rather
+   than taste. A panel that is 72% white lets through only 28% of what sits under it, and what sat
+   under it was the shop's crimson at .16 alpha — dark pigment, nearly grey, chroma 23 before the
+   panel and chroma 6 after. Nothing came through because there was nothing to come through.
+   So the material is built the way the compositing demands: the wash carries the shop's three colours
+   as bright tints at high alpha (a panel that keeps its lightness keeps its readability too), each
+   blob holds a flat core and then falls off, so the 20px blur has a real edge to smear under the
+   glass — that smeared edge moving past a tile is the read of liquid — and a second arrangement of
+   the same three colours crossfades over the first, so every tile on the screen changes hue slowly
+   underneath the figures. It is gated on `.view.glass`, a class only `viewDashboard()` puts on and
+   `render()` takes off, so the other seven screens, the sign-in door and the printed job sheet are
+   untouched. The two cards that are alarms — an open book and a shut shop — keep their solid washes:
+   an alarm should be the one opaque thing on the screen. Real refraction, the bending of the content
+   behind the glass, is not something any engine here will do from CSS, so this is the material
+   rather than the lens. */
+.view.glass { position: relative; isolation: isolate; }
+.view.glass::before, .view.glass::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+}
+.view.glass::before {
+  background:
+    radial-gradient(46% 34% at 15% 5%, var(--wash-brand) 0 42%, transparent 74%),
+    radial-gradient(42% 30% at 86% 13%, var(--wash-cool) 0 40%, transparent 72%),
+    radial-gradient(54% 38% at 56% 94%, var(--wash-warn) 0 44%, transparent 76%);
+}
+.view.glass::after {
+  background:
+    radial-gradient(50% 36% at 76% 64%, var(--wash-brand) 0 40%, transparent 78%),
+    radial-gradient(44% 32% at 9% 68%, var(--wash-warn) 0 38%, transparent 74%),
+    radial-gradient(38% 28% at 44% 16%, var(--wash-cool) 0 36%, transparent 70%);
+  animation: glass-flow 32s ease-in-out infinite alternate;
+}
+/* The drift is an opacity crossfade between two painted arrangements rather than a moving layer: a
+   wash that slid or scaled would widen the dashboard's own scroll area and leave a bare seam at one
+   edge, and opacity is the one property the engine can animate without repainting the screen. */
+@keyframes glass-flow { from { opacity: 0; } to { opacity: .92; } }
+.view.glass .card:not(.warn-card):not(.shut), .view.glass .stat {
+  position: relative; background: var(--glass); border-radius: var(--r-glass);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-rim);
+  transition: background .16s ease, box-shadow .16s ease, transform .16s ease;
+  -webkit-backdrop-filter: blur(20px) saturate(130%);
+  backdrop-filter: blur(20px) saturate(130%);
+}
+.view.glass .stat { border: 1px solid var(--glass-line); }
+/* The specular rim: light along the edge, brightest where it meets the top-left and picking up
+   again at the bottom-right. A one-pixel ring drawn from a gradient, with its own middle masked
+   out — both spellings of the mask, because WebKit and Blink name the composite differently. */
+.view.glass .card:not(.warn-card):not(.shut)::after, .view.glass .stat::after {
+  content: ""; position: absolute; inset: 0; padding: 1px; border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(150deg, var(--glass-spec), var(--glass-spec-2) 34%,
+              transparent 50%, var(--glass-spec-3) 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+}
+/* A tile that is also a way in gives under the finger, the way a droplet flattens. */
+.view.glass .stat.go:hover { background: var(--glass-hover); }
+.view.glass .stat.go:active { background: var(--glass); transform: scale(.985); }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .view.glass .card:not(.warn-card):not(.shut), .view.glass .stat { background: var(--surface); }
+}
+fieldset.hours-fields { border: 1px solid var(--line); border-radius: 8px; padding: 13px;
+  display: grid; gap: 11px; margin: 0;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); }
+fieldset.hours-fields legend { font-size: .78em; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); font-weight: 600; padding: 0 6px; }
+fieldset.hours-fields .wide, fieldset.hours-fields p { grid-column: 1 / -1; }
+.days { display: flex; flex-wrap: wrap; gap: 7px; }
+.days .day { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line);
+  border-radius: 7px; padding: 6px 10px; font-size: .85em; cursor: pointer; user-select: none; }
+.days .day:has(input:checked) { background: var(--brand-soft); border-color: var(--brand);
+  color: var(--on-brand-soft); font-weight: 600; }
+.days .day input { accent-color: var(--brand); margin: 0; width: auto; }
+.days .day:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* A name plate is read once, across a counter, and kept nowhere but on paper — so it is set big,
+   wide and selectable, and looks like a slip of paper rather than a value in a table. */
+.plate { font-size: 1.7em; font-weight: 700; letter-spacing: .16em; text-align: center;
+  font-variant-numeric: tabular-nums; background: var(--brand-soft); color: var(--on-brand-soft);
+  border: 1px dashed var(--brand); border-radius: 10px; padding: 11px 8px; margin: 10px 0 6px;
+  user-select: all; -webkit-user-select: all; }
+#plateOut { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 4px; }
+
 /* ---------- click-to-change cells ----------
    The shop adjusts a book all day: a date slips, a stage moves, a name was typed wrong.
    Those values carry their own editor so the change does not need the whole form. */
@@ -318,7 +560,11 @@ td .pill.stage { margin-top: 4px; }
 @keyframes settle { from { opacity: .55; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
   body, .side { transition: none; }
-  .stat.go, .stat.go .arrow, .qe, .qe::after, .themeseg button { transition: none; }
+  .stat.go, .stat.go .arrow, .qe, .qe::after { transition: none; }
+  .view.glass .card, .view.glass .stat { transition: none; }
+  /* The wash keeps its colour and stops moving: both arrangements sit half-shown, still, so the
+     glass is still glass for a counter who asked the system not to animate. */
+  .view.glass::after { animation: none; opacity: .5; }
   .qe.saved, .qe.bad, .view.settle { animation: none; }
 }
 
@@ -446,41 +692,10 @@ ul { margin: 0; padding: 0; }
 .stack { display: grid; gap: var(--gap); align-content: start; }
 .row-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 
-/* ---------- money in by MoMo ---------- */
-/* Only pairings already used elsewhere: the same -soft pills the message queue uses, and
-   link-on-paper for the notes. A new token mix here would be a fresh contrast risk. */
-.pill.in { background: var(--ok-soft); color: var(--ok); }
+/* Survivors of the MoMo panel: the job rows still use the red "owes" pill, and the message
+   drawer still uses the link-coloured note line. */
 .pill.out { background: var(--bad-soft); color: var(--bad); }
-.pill.maybe { background: var(--warn-soft); color: var(--warn); }
-.momo-ctl { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
-.card.momo .card-b { display: grid; gap: 11px; }
-.momo-sum { display: flex; gap: 4px 10px; flex-wrap: wrap; align-items: baseline; margin: 0; font-size: .86em; color: var(--muted); }
-.momo-sum b { color: var(--text); font-family: var(--num); font-weight: 600; }
-.sig { border: 1px solid var(--line-2); border-radius: 10px; background: var(--paper); padding: 11px 13px; display: grid; gap: 9px; }
-.sig-h { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-.sig-h .spacer, .sig.done .spacer { flex: 1; }
-.sig-h .money.big { font-size: 1.16em; font-weight: 600; }
-.sig-by { margin: 0; font-size: .86em; color: var(--muted); }
 .sig-note { margin: 0; font-size: .86em; line-height: 1.45; color: var(--link); }
-.sig-f { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); align-items: end; }
-.sig-f label { display: grid; gap: 4px; min-width: 0; }
-.sig-f label > span, .momo-paste label > span { font-size: .74em; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
-.sig-f input, .sig-f select { width: 100%; font-size: .92em; padding: 7px 9px; }
-/* A number box and a select full of long job names both carry a wide intrinsic min-content,
-   which used to push the whole shell past the window. Nothing here may set a floor. */
-.sig-f input, .sig-f select, .sig-f .btn, .momo-paste textarea, .card.momo, .card.momo .card-b { min-width: 0; }
-.sig-f .row-actions { align-self: end; }
-.sig-raw summary { cursor: pointer; list-style: none; font-size: .78em; color: var(--muted); text-decoration: underline dotted; }
-.sig-raw summary::-webkit-details-marker { display: none; }
-.sig-raw p { margin: 7px 0 0; white-space: pre-wrap; font-size: .84em; line-height: 1.5; color: var(--text); background: var(--surface); border: 1px dashed var(--line-2); border-radius: 8px; padding: 9px 11px; }
-.momo-paste { display: grid; gap: 9px; grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
-.momo-paste label { display: grid; gap: 4px; }
-.momo-paste textarea { width: 100%; resize: vertical; font-size: .88em; line-height: 1.45; }
-.momo-done { display: grid; gap: 6px; border-top: 1px dashed var(--line-2); padding-top: 10px; }
-.sig.done { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: .84em; padding: 7px 11px; }
-.sig.done b { font-weight: 600; }
-.sig.done time { font: 500 .74em/1 var(--num); color: var(--muted); white-space: nowrap; }
-.sig.done.aside { border-style: dashed; color: var(--muted); }
 
 /* ---------- collect at the counter ---------- */
 /* The one question the shop screens a hand-over on, so the number box is the biggest thing on
@@ -527,6 +742,12 @@ ul { margin: 0; padding: 0; }
 .items-t input, .items-t select { width: 100%; padding: 6px 7px; font-size: .9em; }
 .items-t td.num.it-line { font-size: .9em; }
 .items-t .iconbtn { width: 27px; height: 27px; font-size: .8em; }
+/* Money and quantity are said out loud at the counter — "twelve hundred", "two hundred and
+   fifty pieces" — so the boxes that take them are plain text read by the shop's own parser,
+   not a browser number field that erases anything it does not recognise. They sit on the
+   right in the figure face so a column of amounts lines up the way a till roll does. */
+input.money, input.qty { text-align: right; font-family: var(--num); font-variant-numeric: tabular-nums; }
+input.qty { max-width: 120px; }
 form { display: grid; gap: 13px; }
 .f-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); }
 label.field { display: grid; gap: 5px; }
@@ -566,6 +787,17 @@ label.field.wide { grid-column: 1 / -1; }
   .nav a { white-space: nowrap; }
   .side-cta { flex-direction: row; overflow-x: auto; }
   .side-cta .btn { width: auto; }
+}
+
+/* Between the phone and the desktop the rail has gone, so the day card lost the sidebar's width but
+   has not yet earned the phone's stacked column. Two month-sized tiles plus a lock-screen clock on one
+   line squeezed the clock under its own nowrap width, which is a horizontal scrollbar. So here the two
+   widgets keep the row between themselves — same size as each other — and the time and date take the
+   line underneath. Scoped above 720px on purpose: flex-wrap on the phone's column would wrap it
+   sideways into columns instead of down. */
+@media (max-width: 900px) and (min-width: 721px) {
+  .today-face { flex-wrap: wrap; }
+  .today-when { flex: 1 1 100%; }
 }
 
 /* ---------- phone ----------
@@ -613,10 +845,6 @@ label.field.wide { grid-column: 1 / -1; }
   }
   .moresheet .pagefoot .linkbtn:hover { color: var(--side-hi); }
   .moresheet .pagefoot .hint { color: var(--side-mid); }
-  .moresheet .themeseg { background: var(--side-active); max-width: 260px; }
-  .moresheet .themeseg button { color: var(--side-mid); padding: 11px 4px; }
-  .moresheet .themeseg button:hover { color: var(--side-hi); }
-  .moresheet .themeseg button[aria-pressed="true"] { background: var(--surface); color: var(--text); }
   .moresheet .hint { color: var(--side-mid); }
 
   /* Each destination carries the mark it uses on the desktop rail, drawn as a mask so it
@@ -668,6 +896,9 @@ label.field.wide { grid-column: 1 / -1; }
      thumb. A ledger row is already ~99px tall here, so nothing is lost by making them full. */
   .btn.sm { min-height: 44px; }
   input, select, textarea { min-height: 44px; font-size: 16px; }
+  /* A tick box is not a field: at 44px it drops below the line of its own label. The whole label
+     is the tap target, so the box itself only has to be readable. */
+  input[type="checkbox"], input[type="radio"] { min-height: 0; width: 20px; height: 20px; }
   .tab { min-height: 44px; }
   /* Click-to-change values stay text rather than becoming buttons, but a thumb still needs
      something to hit — so the tappable box grows without moving the line it sits in. */
@@ -692,6 +923,13 @@ label.field.wide { grid-column: 1 / -1; }
      whole day below the fold. */
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stat { padding: 12px; }
+  /* A month needs seven columns to stay legible, so on a phone it takes the whole row and the clock
+     drops underneath it — same two widgets, stacked rather than shrunk to unreadable cells. */
+  .today-face { flex-direction: column; align-items: stretch; }
+  .today-cal { width: 100%; }
+  /* The weather tile stacks the same way, and a strip of six hours at phone width has room to
+     breathe, so it stays the six cells the desktop shows rather than becoming a shorter list. */
+  .today-wx { width: 100%; }
   .stat .v { font-size: 20px; }
   .stat .n { font-size: .74em; }
   .f-grid { grid-template-columns: minmax(0, 1fr); }
@@ -704,6 +942,32 @@ label.field.wide { grid-column: 1 / -1; }
   th:first-child, td:first-child { position: sticky; left: 0; background: var(--surface); z-index: 1; }
   th:first-child { background: var(--surface-2); }
   tr[data-open]:hover td:first-child { background: var(--surface-hover); }
+
+  /* The order lines are the one table with eight columns, and a ticket is written on a phone
+     at the counter. Here it stops pretending to be a spreadsheet: each line becomes a small
+     card, its own field names printed above the boxes because there is no header row left to
+     read them from. */
+  .items-t thead { display: none; }
+  .items-t, .items-t tbody { display: block; }
+  .items-t tr.item-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 7px 8px;
+    padding: 10px 0 12px; border-bottom: 1px solid var(--line);
+  }
+  .items-t tr.item-row > td { padding: 0; border: 0; position: static; background: none; }
+  .items-t tr.item-row > td:nth-child(1), .items-t tr.item-row > td:nth-child(2) { grid-column: 1 / -1; }
+  .items-t tr.item-row > td[data-l]::before {
+    content: attr(data-l); display: block; font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 3px;
+  }
+  .items-t tr.item-row > td.it-line { display: flex; align-items: center; justify-content: flex-end; }
+  /* The remove button hangs 5px past its own box to keep a thumb-sized hit area (see above). Every
+     other table cell has 9px of padding to swallow that; here the cells have none, so the button
+     used to drag the whole order table 5px wider than the screen. */
+  .items-t tr.item-row > td:last-child { display: flex; align-items: center; justify-content: flex-end; padding-right: 5px; }
+  .items-t input.qty { max-width: none; }
+  /* A field under 16px makes a phone browser zoom the page in and lose the rest of the form
+     while you type — which is exactly what the item table used to do on this device. */
+  .items-t input, .items-t select { font-size: 16px; min-height: 44px; padding: 8px 9px; }
 
   .modal { padding: 0; align-items: end; justify-items: stretch; }
   .modal-card {
