@@ -3,7 +3,7 @@
    can still be handed off to WhatsApp or Mail for staff to send. */
 'use strict';
 
-const S = { boot: null, clients: [], route: null, timer: null, flash: null, settle: false, notify: { byId: {} }, momo: null, offlineQueuedToast: false, connected: navigator.onLine };
+const S = { boot: null, clients: [], route: null, timer: null, flash: null, settle: false, notify: { byId: {} }, offlineQueuedToast: false, connected: navigator.onLine };
 const OFFLINE_DB = 'crispprint-offline-v1';
 let offlineDbPromise = null;
 let syncingOfflineQueue = false;
@@ -401,7 +401,6 @@ function paintNav() {
     let text = badges[view];
     if (view === 'jobs' && b.open_quotes) text += ' · ' + pluralise(b.open_quotes, 'quote');
     if (view === 'jobs' && b.to_send) text += ' · ' + pluralise(b.to_send, 'message') + ' to send';
-    if (view === 'dashboard' && b.to_check) text += ' · ' + pluralise(b.to_check, 'MoMo payment') + ' to check';
     if (text) a.insertAdjacentHTML('beforeend', '<span>' + text + '</span>');
   });
 }
@@ -1169,10 +1168,6 @@ function watchToday() {
 /* --------------------------------------------------------------- dashboard */
 async function viewDashboard() {
   const d = await api('/api/dashboard');
-  let momo = { signals: [], waiting: 0, booked: 0, booked_total: 0, waiting_total: 0, sent: 0,
-    sent_total: 0, clients: [], number: '' };
-  try { momo = await loadMomo(); } catch (e) { /* the dashboard still draws without the notices */ }
-  watchMomoPanel();
   watchShopHours();
   watchToday();
   const k = d.kpi;
@@ -1222,7 +1217,6 @@ async function viewDashboard() {
     stat('Profit this month', money(k.profit_month), 'of ' + money(k.billed_month) + ' billed',
       'amt ' + (k.profit_month < 0 ? 'warn' : 'good'), '#/reports', 'Click for the full picture') +
     '</div>' +
-    momoCard(momo) +
     '<div class="grid split">' +
     '<div class="card"><h3>Money in — last 15 days</h3>' +
     '<div class="card-b"><div class="bars">' + bars + '</div>' +
@@ -1320,159 +1314,8 @@ function jobRows(rows) {
     '</tr>').join('');
 }
 
-/* ---------------------------------------------------------- money in by MoMo
-   Clients pay into the shop's MoMo number and the network texts that fact to the shop's own
-   phone. The app reads that text rather than asking someone to type the money in a second
-   time, but a figure pulled out of an SMS is a proposal, not a posting: the panel shows what
-   was read and who it matched, and the shop presses Book. Auto-booking removes the press, not
-   the check — the notice and its raw text stay in the book either way. */
-let momoDebtors = [];
-
-const momoPhone = (p) => {
-  const d = String(p || '').replace(/\D/g, '');
-  if (d.length === 12 && d.slice(0, 3) === '233') return '+233 ' + d.slice(3, 5) + ' ' + d.slice(5, 8) + ' ' + d.slice(8);
-  if (d.length === 10 && d.charAt(0) === '0') return '0' + d.slice(1, 3) + ' ' + d.slice(3, 6) + ' ' + d.slice(6);
-  return String(p || '');
-};
-const momoWay = (s) => (s.direction === 'Credit' ? '<span class="pill in">Money in</span>'
-  : s.direction === 'Out' ? '<span class="pill out">Money out</span>'
-    : '<span class="pill maybe">Which way unclear</span>');
-/* Mirror the server's guess on the client, so what the panel shows is what the press books. */
-function momoGuess(clientId, amount) {
-  const jobs = momoDebtors.filter((j) => String(j.client_id) === String(clientId) && j.balance > 0.005);
-  if (!jobs.length || !(amount > 0)) return null;
-  return jobs.map((j) => ({ id: j.id, gap: Math.abs(j.balance - amount) }))
-    .sort((a, b) => a.gap - b.gap)[0].id;
-}
-function momoJobOptions(clientId, picked, blank) {
-  const jobs = momoDebtors.filter((j) => String(j.client_id) === String(clientId) && j.balance > 0.005);
-  return '<option value="">' + esc(blank || 'Kept on their account (credit)') + '</option>' + jobs.map((j) =>
-    '<option value="' + j.id + '"' + (String(j.id) === String(picked || '') ? ' selected' : '') + '>' +
-    esc(j.ref) + ' · owes ' + esc(money(j.balance)) + '</option>').join('');
-}
-function momoSig(s) {
-  const clients = (S.momo && S.momo.clients) || [];
-  const cats = (S.boot && S.boot.expense_categories) || [];
-  const amt = (s.amount === null || s.amount === undefined) ? '' : n2(s.amount);
-  const payer = [s.payer, s.payer_phone ? momoPhone(s.payer_phone) : ''].filter(Boolean).join(' · ');
-  const meta = [s.source === 'Messages' ? 'read from Messages' : 'pasted in', fdatetime(s.seen_at)];
-  const out = s.direction === 'Out';
-  const unclear = s.direction !== 'Credit' && s.direction !== 'Out';
-  return '<div class="sig" data-sig="' + s.id + '"' + (out || unclear ? ' data-out="1">' : '>') +
-    '<div class="sig-h"><b class="money big">' +
-    (amt ? esc(money(Number(amt))) : '<span class="muted">no figure read</span>') + '</b>' + momoWay(s) +
-    '<span class="spacer"></span><span class="ref">' + esc(meta.join(' · ')) + '</span></div>' +
-    (payer ? '<p class="sig-by">' + (out ? 'Sent to <b>' : unclear ? 'A name in it: <b>' : 'Sent by <b>') +
-      esc(payer) + '</b></p>' : '') +
-    (s.reason ? '<p class="sig-note">' + esc(s.reason) + '</p>' : '') +
-    '<div class="sig-f">' +
-    '<label><span>Amount</span>' + moneyBox(null, amt, '0.00', 'momo-amt') + '</label>' +
-    '<label><span>' + (out || unclear ? 'Who this went to' : 'Whose money') + '</span><select class="momo-client"><option value="">' +
-    (out || unclear ? 'Nobody in the book — money out' : 'Choose a client…') + '</option>' +
-    clients.map((c) => '<option value="' + c.id + '"' + (String(c.id) === String(s.client_id || '') ? ' selected' : '') +
-      '>' + esc(c.name) + '</option>').join('') + '</select></label>' +
-    (out || unclear ? '<label><span>Money out for</span><select class="momo-cat">' +
-      cats.map((c) => '<option value="' + esc(c) + '"' + (c === 'Other' ? ' selected' : '') + '>' + esc(c) + '</option>').join('') +
-      '</select></label>' : '') +
-    '<label><span>' + (out ? 'Refund it against' : 'Put it against') + '</span><select class="momo-job">' +
-      momoJobOptions(s.client_id || '', s.job_id,
-        out ? 'Money back on their account' : (unclear ? 'No job of theirs' : '')) + '</select></label>' +
-    '<div class="row-actions">' +
-    (out ? '<button class="btn sm primary" data-momo-send>Record send</button>'
-      : '<button class="btn sm primary" data-momo-book>Book it</button>') +
-    (unclear ? '<button class="btn sm" data-momo-send>Record as a send</button>' : '') +
-    '<button class="btn sm" data-momo-ignore>Put aside</button></div>' +
-    '</div><details class="sig-raw"><summary>The alert as it arrived</summary><p>' + esc(s.raw) + '</p></details>' +
-    '</div>';
-}
-function momoDone(s) {
-  const figure = s.amount ? money(s.amount) : 'no figure';
-  const who = s.client_id ? '<a href="#/clients/' + s.client_id + '">' + esc(s.client || 'a client') + '</a>' : '';
-  let what;
-  if (s.state === 'Ignored') what = 'put aside by the shop';
-  else if (s.expense_id) what = 'money out · ' + esc(s.expense_category || 'Other') +
-    (s.expense_payee ? ' · to ' + esc(s.expense_payee) : '');
-  else if (s.direction === 'Out') what = 'refunded to ' + who +
-    ' · ' + esc(s.job_ref ? s.job_ref : 'their account');
-  else what = 'booked to ' + who + ' · reference ' + esc(s.client || '') + ' · ' +
-    esc(s.job_ref ? s.job_ref : 'account credit');
-  return '<div class="sig done' + (s.state === 'Ignored' ? ' aside' : '') + '">' +
-    '<b class="money">' + esc(figure) + '</b>' +
-    '<span>' + what + '</span>' +
-    '<span class="spacer"></span><time>' + esc(fdatetime(s.booked_at || s.seen_at)) + '</time></div>';
-}
-function momoInner(m) {
-  const waiting = m.signals.filter((s) => s.state === 'Unreviewed');
-  const sends = waiting.filter((s) => s.direction === 'Out');
-  const done = m.signals.filter((s) => s.state !== 'Unreviewed').slice(0, 6);
-  const toggle = (key, on, label, note) => '<button class="btn sm' + (on ? ' primary' : '') + '" data-momo-' + key +
-    ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + esc(note) + '">' + (on ? '✓ ' : '') + esc(label) + '</button>';
-  return '<h3>MoMo money in and out<span class="spacer"></span><span class="momo-ctl">' +
-    toggle('watch', m.watching, 'Watch Messages', 'Read Messages every twenty seconds for MoMo alerts, both ways.') +
-    toggle('auto', m.auto, 'Book without asking',
-      'Post a matched payment in on its own, the moment the alert arrives. A send out always waits for you, ' +
-      'because only you can say whether it was money back to a client or the shop paying for something.') +
-    '<button class="btn sm" data-momo-check>Check Messages now</button></span></h3><div class="card-b">' +
-    '<p class="momo-sum">' + (waiting.length
-      ? (m.waiting_total
-        ? '<b>' + esc(money(m.waiting_total)) + '</b> in ' + pluralise(waiting.length, 'notice') + ' to check' +
-          (sends.length ? ' · ' + pluralise(sends.length, 'send') + ' going out' : '')
-        : waiting.length + (waiting.length === 1 ? ' notice with no figure' : ' notices with no figure') + ' to check')
-      : '<b>Nothing is waiting.</b>') +
-    (m.booked ? '<span>· ' + m.booked + ' booked, ' + esc(money(m.booked_total)) + ' in</span>' : '') +
-    (m.sent ? '<span>· ' + m.sent + ' out, ' + esc(money(m.sent_total)) + '</span>' : '') +
-    '<span>· clients pay into <b>' + esc(m.number) + '</b></span>' +
-    (m.checked ? '<span>· last looked ' + esc(fdatetime(m.checked)) + '</span>' : '') + '</p>' +
-    (m.status ? '<p class="sig-note">' + esc(m.status) + '</p>' : '') +
-    waiting.map(momoSig).join('') +
-    '<div class="momo-paste"><label><span>Paste an alert instead — this needs no permission</span>' +
-    '<textarea id="momoPaste" rows="2" placeholder="MTN MoMo: GHS 750.00 received from KOFI MENSA …"></textarea></label>' +
-    '<button class="btn sm primary" data-momo-paste>Read it</button></div>' +
-    (done.length ? '<div class="momo-done">' + done.map(momoDone).join('') + '</div>' : '') +
-    '</div>';
-}
-const momoCard = (m) => '<div class="card momo" id="momoCard">' + momoInner(m) + '</div>';
-async function loadMomo() {
-  const res = await api('/api/momo');
-  S.momo = res;
-  momoDebtors = res.waiting
-    ? await api('/api/jobs?' + qs({ status: 'open', kind: 'Job', debtors: '1' })).catch(() => [])
-    : [];
-  return res;
-}
-function paintMomo(payload) {
-  if (payload) S.momo = payload;
-  const card = $('#momoCard');
-  if (!card) return;
-  card.innerHTML = momoInner(S.momo || { signals: [] });
-}
-function syncMomoRow(row) {
-  const clientId = row.querySelector('.momo-client').value;
-  const amount = shopNum(row.querySelector('.momo-amt').value);
-  const out = row.dataset.out === '1';
-  row.querySelector('.momo-job').innerHTML = momoJobOptions(clientId, momoGuess(clientId, amount),
-    out ? 'Money back on their account' : '');
-}
-/* The Messages watcher runs on the server, so a payment can arrive while this screen is open.
-   A repaint while the shop is typing into the panel would wipe the words, so focus stays safe. */
-let momoTick = null;
 let notifyTick = null;
 let notifyPollBusy = false;
-function watchMomoPanel() {
-  if (momoTick) return;
-  momoTick = setInterval(async () => {
-    if (!S.route || S.route.view !== 'dashboard' || !$('#momoCard')) return;
-    if ($('#momoCard').contains(document.activeElement)) return;
-    if (!$('#modal').hidden || !$('#drawer').hidden) return;
-    const before = S.momo || { signals: [] };
-    let res;
-    try { res = await loadMomo(); } catch (e) { return; }
-    const moved = res.waiting !== before.waiting || res.booked_total !== before.booked_total ||
-      res.sent_total !== before.sent_total;
-    if (!moved) return;
-    render();   /* a fresh notice or a fresh booking moves the KPI figures too */
-  }, 20000);
-}
 
 /* --------------------------------------------------------------------- jobs */
 async function viewJobs(r) {
@@ -2007,8 +1850,14 @@ function securityCard(guard, shopMac) {
    book at mode 600 instead, so this screen can say that a password is saved and never show it back. */
 let emailEditing = null;
 
+/* The shop's letters go out over its own Gmail, so a fresh form arrives already aimed at it and only
+   the app password is left to type — the one thing nobody but the counter may touch, and the one
+   thing that never goes into the book. */
+const GMAIL_MAILBOX = { label: 'Gmail', from_address: 'chriphicshubgh@gmail.com',
+  smtp_host: 'smtp.gmail.com', smtp_port: 587, smtp_security: 'starttls' };
+
 function emailForm(account, shopName) {
-  const a = account || {};
+  const a = account || GMAIL_MAILBOX;
   const editing = !!a.id;
   const sec = a.smtp_security === 'ssl' ? 'ssl' : 'starttls';
   return '<form id="emailAccountForm" class="stack">' +
@@ -4153,102 +4002,6 @@ const ACTIONS = {
     const l = await api('/api/leads/' + el.dataset.convertLead);
     convertLeadForm(l);
   },
-  async 'momo-check'() {
-    try {
-      const res = await api('/api/momo', { method: 'POST', body: JSON.stringify({ check: 1 }) });
-      S.momo = res;
-      if (res.found) { await afterMutation(true); toast('Took in ' + pluralise(res.found, 'payment notice') + ' from Messages', 'good'); return; }
-      paintMomo(res);
-      await refreshChrome();
-      if (res.status) toast(res.status, 'bad'); else toast('Messages held nothing new');
-    } catch (err) { fail(err); }
-  },
-  async 'momo-watch'() {
-    try {
-      const res = await api('/api/momo', { method: 'POST', body: JSON.stringify({ watch: !(S.momo && S.momo.watching) }) });
-      S.momo = res; paintMomo(res);
-      toast(res.watching ? 'Watching Messages every twenty seconds' : 'Stopped watching Messages', res.watching ? 'good' : '');
-    } catch (err) { fail(err); }
-  },
-  async 'momo-auto'() {
-    try {
-      const res = await api('/api/momo', { method: 'POST', body: JSON.stringify({ auto: !(S.momo && S.momo.auto) }) });
-      S.momo = res;
-      if (res.auto && !confirm('Book every matched alert on its own?\n\nA payment is then entered as soon as the text arrives, ' +
-        'with the client\'s name as the reference. You can still undo it in Accounts, but nothing will wait for your eye. ' +
-        'Turn it off again any time from this panel.')) {
-        const back = await api('/api/momo', { method: 'POST', body: JSON.stringify({ auto: 0 }) });
-        S.momo = back; paintMomo(back); return;
-      }
-      paintMomo(res);
-      toast(res.auto ? 'Alerts will book themselves when the payer matches a client' : 'Each notice will wait for you to press Book',
-        res.auto ? 'good' : '');
-    } catch (err) { fail(err); }
-  },
-  async 'momo-paste'() {
-    const box = $('#momoPaste');
-    const raw = box ? box.value.trim() : '';
-    if (!raw) { toast('Paste the alert text first', 'bad'); return; }
-    try {
-      const res = await api('/api/momo', { method: 'POST', body: JSON.stringify({ text: raw }) });
-      const n = res.notice;
-      if (!n) { toast('That notice was already in the list'); box.value = ''; paintMomo(res); return; }
-      if (n.state === 'Booked') toast('Booked ' + money(n.amount) + ' for ' + (n.client || 'the client'), 'good');
-      else if (n.direction === 'Out') toast('That reads as money going out — press Record send on it');
-      else toast('Read ' + (n.amount ? money(n.amount) : 'a notice') + ' from it' +
-        (n.client ? ' · ' + n.client : '') + ' — check it below', 'good');
-      box.value = '';
-      await afterMutation(true);
-    } catch (err) { fail(err); }
-  },
-  async 'momo-book'(el) {
-    const row = el.closest('.sig');
-    const clientId = row.querySelector('.momo-client').value;
-    const amount = n2(shopNum(row.querySelector('.momo-amt').value));
-    if (!clientId) { toast('Say whose money this is first', 'bad'); return; }
-    if (!(shopNum(amount) > 0)) { toast('Type the amount the client sent', 'bad'); return; }
-    try {
-      const res = await api('/api/momo/' + row.dataset.sig + '/book', {
-        method: 'POST', body: JSON.stringify({ amount: amount, client_id: clientId, job_id: row.querySelector('.momo-job').value }),
-      });
-      toast('Booked ' + money(res.payment.amount) + ' for ' + res.payment.client +
-        ' · ' + (res.payment.ref ? 'against ' + res.payment.ref : 'kept as account credit'), 'good');
-      await afterMutation(true);
-    } catch (err) { fail(err); }
-  },
-  async 'momo-send'(el) {
-    const row = el.closest('.sig');
-    const clientId = row.querySelector('.momo-client').value;
-    const amount = n2(shopNum(row.querySelector('.momo-amt').value));
-    const cat = row.querySelector('.momo-cat');
-    if (!(shopNum(amount) > 0)) { toast('Type the amount that went out', 'bad'); return; }
-    if (!clientId && !confirm('Nobody in the book is chosen, so this goes in as the shop paying out ' +
-      money(shopNum(amount)) + (cat ? ' for ' + cat.value.toLowerCase() : '') + '.\n\n' +
-      'Press Cancel instead if the money actually went back to one of your clients — then choose them ' +
-      'and it books as a refund on their account.')) return;
-    try {
-      const res = await api('/api/momo/' + row.dataset.sig + '/send', {
-        method: 'POST', body: JSON.stringify({
-          amount: amount, client_id: clientId, job_id: row.querySelector('.momo-job').value,
-          category: cat ? cat.value : '',
-        }),
-      });
-      const r = res.recorded;
-      toast(r.recorded_as === 'refund'
-        ? 'Refunded ' + money(r.amount) + ' to ' + r.client +
-          ' · ' + (r.ref ? 'against ' + r.ref : 'their account')
-        : 'Recorded ' + money(r.amount) + ' as money out · ' + r.category +
-          (r.payee ? ' · ' + r.payee : ''), 'good');
-      await afterMutation(true);
-    } catch (err) { fail(err); }
-  },
-  async 'momo-ignore'(el) {
-    try {
-      await api('/api/momo/' + el.closest('.sig').dataset.sig + '/ignore', { method: 'POST', body: JSON.stringify({}) });
-      toast('Put aside — it stays in the notices, out of the money');
-      await afterMutation(true);
-    } catch (err) { fail(err); }
-  },
 };
 
 function restoreFocus() {
@@ -4313,8 +4066,6 @@ document.addEventListener('click', (e) => {
   if (leadRow && !e.target.closest('a,button')) go('leads', {}, leadRow.dataset.openLead);
 });
 document.addEventListener('change', (e) => {
-  const momoCtl = e.target.closest('.momo-client, .momo-amt');
-  if (momoCtl) { syncMomoRow(momoCtl.closest('.sig')); return; }
   const ctl = e.target.closest('[data-filter]');
   if (ctl && (ctl.tagName === 'SELECT' || ctl.type === 'date')) setFilter(ctl.dataset.filter, ctl.value);
 });
