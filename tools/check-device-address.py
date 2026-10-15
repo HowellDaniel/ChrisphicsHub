@@ -148,8 +148,20 @@ if mac_name.endswith(".local"):
     code, by_name = page("https://localhost:%d/setup" % PORT, host_header=mac_name)
     check("/setup opened by name shows the name", code == 200 and ("://%s:%d/" % (mac_name, PORT)) in by_name,
           str(code))
+# This request comes from the shop's own Mac, which the counter had recognised by its Wi-Fi number,
+# so 200 here is that exemption and not an open LAN. Proving the door is still shut means asking the
+# same book to make this Mac sign in like every other device — then the very same request has to be
+# turned away, because nobody holds a session on this throwaway copy.
 code, _ = page("https://%s:%d/api/bootstrap" % (wifi, PORT))
-check("a stranger on the Wi-Fi is still asked to sign in", code == 401, str(code))
+check("this Mac is let in on its own Wi-Fi number without the word", code == 200, str(code))
+con = sqlite3.connect(CLONE)
+con.execute("INSERT INTO app_state (key, value) VALUES ('shop_mac_login', '1')"
+            " ON CONFLICT(key) DO UPDATE SET value = '1'")
+con.commit()
+con.close()
+code, _ = page("https://%s:%d/api/bootstrap" % (wifi, PORT))
+check("and the same request is asked for the word once this Mac signs in like a device",
+      code == 401, str(code))
 
 one.terminate()
 one.wait(timeout=10)
