@@ -1904,13 +1904,59 @@ REF_RE = re.compile(r"\b(?:ref|reference|name|customer|by)\s*[:#\- ]\s*([A-Za-z]
 PAID_YOU_RE = re.compile(r"\b([A-Za-z][A-Za-z '\-]{2,29}?)\s+(?:paid|sent)\s+you\b", re.I)
 # A send names whoever received it after "to", which is the only way to tell where it went.
 PAYEE_RE = re.compile(r"\bto\s+([A-Za-z][A-Za-z .'\-]{2,29})(?!\w)", re.I)
-# Text that is money news but is plainly not a client settling a bill.
-MONEY_JUNK = ("won", "prize", "claim", "lottery", "congratul", "winner", "promo", "bonus offer")
+# Text that is money news but is plainly not a client settling a bill. The shop's own line spends
+# its airtime on MTN: bundles, top-up reminders and loyalty promos all carry a figure and the word
+# "received", and every one of them on the card buries the payment it is meant to be beside.
+MONEY_JUNK = ("won", "prize", "claim", "lottery", "congratul", "winner", "promo", "bonus offer",
+              "bundle", "xtracash", "non-expiry", "sme+", "momo hour", "data to boost")
 # What the words after a payer name actually describe, so the name stops there.
 PAYER_STOP = (" for ", " to ", " into ", " as ", " of ", " ref", " momo", " ghs", " payment",
               " order", " on ", " at ", " paid", " with", " using", " trans", " balance",
               " tel", " credited", " new", " excess")
 MESSAGES_DB = os.path.expanduser("~/Library/Messages/chat.db")
+# Two engines share this book — the Mac app and the Wi-Fi server that starts itself at boot — and
+# either one reading Messages is enough for the notices to arrive. macOS grants the door per
+# program, so one of them is usually still shut and stamps its refusal over the other's working
+# read. Ninety seconds of grace covers the twenty-second poll several times over.
+MOMO_READ_GRACE = 90
+
+
+def messages_door():
+    """The entry this engine needs in Full Disk Access before chat.db will open.
+
+    The app is answered for by its own bundle, which Finder shows as "Chrisphics Hub"; the boot
+    server runs from the command line tools' Python, whose real binary is buried under /Library.
+    Naming the wrong one is how an afternoon disappears inside System Settings."""
+    here = os.path.abspath(__file__)
+    if ".app/Contents" in here:
+        return here.split(".app/Contents")[0] + ".app"
+    return os.path.realpath(sys.executable)
+
+
+def _poll_was_recent(key):
+    """True when that timestamp moved within the grace. None when the book has no such line."""
+    try:
+        quiet = (dt.datetime.now()
+                 - dt.datetime.strptime(state_value(key), "%Y-%m-%d %H:%M:%S")).total_seconds()
+    except ValueError:
+        return None
+    return bool(quiet <= MOMO_READ_GRACE)
+
+
+def messages_are_being_read():
+    """True while any engine has got into Messages within the grace.
+
+    The shared `momo_read_ok` line only ever moves on a read that worked, so it is the book's own
+    proof that the notices are arriving — whichever program was granted the door, and whichever one
+    last wrote a refusal. An app built before that line exists leaves a fainter proof: a blank
+    refusal stamped by a poll no older than the grace, which is exactly what the shop's own signed
+    app leaves when it reads. Without reading that too the card says Messages is shut while the
+    alerts are coming in, because the boot server's refusal is the last line written."""
+    if _poll_was_recent("momo_read_ok"):
+        return True
+    if _poll_was_recent("momo_checked") is not True:
+        return False
+    return state_value("momo_status") == ""
 
 
 def state_value(key, default=""):
@@ -3420,8 +3466,18 @@ def poll_messages(limit=60):
                 found += 1
         except Exception:  # noqa: BLE001 - one unreadable text must not stop the ledger
             continue
+    now = dt.datetime.now()
+    if problem and messages_are_being_read():
+        # Both engines write this one line into the one book, so the engine that was never given
+        # the door would otherwise stamp its refusal over the other's working reader every twenty
+        # seconds. A read that fresh is the shop's own answer — and the quiet engine leaves the
+        # working reader's own words and timestamp standing, or its silence would go on renewing
+        # the proof that somebody is reading long after that reader has gone home.
+        return found
+    if not problem:
+        set_state("momo_read_ok", now.strftime("%Y-%m-%d %H:%M:%S"))
     set_state("momo_status", problem)
-    set_state("momo_checked", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    set_state("momo_checked", now.strftime("%Y-%m-%d %H:%M:%S"))
     return found
 
 
@@ -3447,6 +3503,37 @@ def paste_alert(raw):
     return row
 
 
+def momo_ledger():
+    """What the book itself says was paid on the mobile money number, whoever sent it.
+
+    The message notices are a second pair of eyes and need a macOS permission the shop may never
+    grant; this figure comes only from the counter's own entries, so it cannot go dark."""
+    month_start = today()[:8] + "01"
+    signed = "CASE WHEN kind='Refund' THEN -amount ELSE amount END"
+    since = one("SELECT round(coalesce(sum(%s),0),2) AS total, count(*) AS n "
+                "FROM payments WHERE method='MoMo' AND paid_at >= ?" % signed, (month_start,))
+    all_time = one("SELECT round(coalesce(sum(%s),0),2) AS total, count(*) AS n, "
+                   "min(paid_at) AS first, max(paid_at) AS last "
+                   "FROM payments WHERE method='MoMo'" % signed)
+    payers = q("""SELECT c.id AS client_id, c.name AS client,
+                         round(sum(CASE WHEN p.kind='Refund' THEN -p.amount ELSE p.amount END),2) AS total,
+                         count(*) AS n, max(p.paid_at) AS last
+                  FROM payments p JOIN clients c ON c.id = p.client_id
+                  WHERE p.method='MoMo'
+                  GROUP BY c.id, c.name
+                  ORDER BY total DESC, last DESC LIMIT 12""")
+    return {
+        "month_start": month_start,
+        "month_total": (since or {}).get("total", 0),
+        "month_n": (since or {}).get("n", 0),
+        "total": (all_time or {}).get("total", 0),
+        "n": (all_time or {}).get("n", 0),
+        "first": (all_time or {}).get("first"),
+        "last": (all_time or {}).get("last"),
+        "payers": payers,
+    }
+
+
 def momo_payload():
     rows = q("""SELECT s.*, c.name AS client, j.ref AS job_ref,
                       e.category AS expense_category, e.payee AS expense_payee
@@ -3463,9 +3550,14 @@ def momo_payload():
         "signals": rows,
         "watching": momo_watching(),
         "auto": momo_auto(),
-        "status": state_value("momo_status"),
+        # Not state_value straight off: the Mac app runs its own bundled engine, and until that
+        # bundle is rebuilt it has no grace of its own and writes its refusal every twenty seconds
+        # even after the door is granted elsewhere. A working read is the truer answer.
+        "status": "" if messages_are_being_read() else state_value("momo_status"),
         "checked": state_value("momo_checked"),
         "number": MOMO_NUMBER,
+        # Which entry in Full Disk Access would open the door for the engine answering this.
+        "door": messages_door(),
         "waiting": len(waiting),
         "booked": len(booked),
         "booked_total": round(sum(r["amount"] or 0 for r in booked), 2),
@@ -3474,6 +3566,8 @@ def momo_payload():
         "waiting_out": len([r for r in out if r["state"] == "Unreviewed"]),
         "sent": len(sent),
         "sent_total": round(sum(r["amount"] or 0 for r in sent), 2),
+        # Money paid on the number, read straight off the book rather than off the alerts.
+        "ledger": momo_ledger(),
         # So the panel can ask "whose money is this?" without another round trip.
         "clients": q("SELECT id, name FROM clients WHERE archived = 0 ORDER BY name"),
     }
@@ -4627,7 +4721,11 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("%s  %s\n" % (dt.datetime.now().strftime("%H:%M:%S"), fmt % args))
+        # The shop runs open on the Wi-Fi, so the address that knocks is the only way to tell which
+        # machine came calling after the fact. It is only an address — no machine key, no word,
+        # nothing that would let a reader of this log sign in as anyone.
+        sys.stderr.write("%s  %-15s %s\n" % (dt.datetime.now().strftime("%H:%M:%S"),
+                                             self.client_ip(), fmt % args))
 
     # helpers
     def drain_body(self):
@@ -5377,7 +5475,11 @@ class Handler(BaseHTTPRequestHandler):
             if method == "POST" and len(rest) == 1:
                 payload = self.body()
                 if payload.get("check"):
-                    return 200, dict(momo_payload(), found=poll_messages())
+                    # The poll first. Built the other way round, the card would paint — and the toast
+                    # would speak — the status read before this press, so pressing Check Messages
+                    # straight after granting the door kept repeating the refusal it had just cured.
+                    found = poll_messages()
+                    return 200, dict(momo_payload(), found=found)
                 if "watch" in payload:
                     set_state("momo_watch", "1" if payload.get("watch") else "0")
                     return 200, momo_payload()
