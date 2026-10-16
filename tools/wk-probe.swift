@@ -22,6 +22,9 @@
 // so a handler added later would never be seen.
 // WKPROBE_FRESH_DATA=1 starts from a browser that remembers nothing, the way a machine that has
 // never met the shop does.
+// WKPROBE_ALLOW_BAD_CERTS=1 accepts a self-signed certificate on a shop-network address only, which
+// is how a check reads the DOM of the throwaway server it started itself. Never set it to look at
+// the shop's live address: there, a padlock that refuses is the finding, not the obstacle.
 import AppKit
 import WebKit
 
@@ -67,6 +70,25 @@ final class Hook: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDe
     func webView(_ webView: WKWebView, didFailProvisionalNavigation nav: WKNavigation!, withError e: Error) {
         loadFailed = true; loadFinished = true
         print("  NAV FAILED: " + e.localizedDescription)
+    }
+    // A check's throwaway shop server signs itself with a certificate made for that run, which no
+    // trust store on this Mac knows. WebKit refuses the page before the shop's own code ever runs, so
+    // a run that means to read the DOM of its own throwaway says so with WKPROBE_ALLOW_BAD_CERTS=1 —
+    // and only for an address no machine off the shop's own network could be pretending to be. Every
+    // other run keeps the default handling, including a probe of the shop's live address, where a
+    // padlock that does not close is the very thing being tested.
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let space = challenge.protectionSpace
+        let private_address = space.host == "127.0.0.1" || space.host == "localhost"
+            || space.host.hasSuffix(".local") || space.host.hasPrefix("192.168.") || space.host.hasPrefix("10.")
+        if ProcessInfo.processInfo.environment["WKPROBE_ALLOW_BAD_CERTS"] == "1",
+           space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           private_address, let trust = space.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
     }
 }
 

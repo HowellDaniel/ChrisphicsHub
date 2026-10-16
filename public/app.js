@@ -3,7 +3,7 @@
    can still be handed off to WhatsApp or Mail for staff to send. */
 'use strict';
 
-const S = { boot: null, clients: [], route: null, timer: null, flash: null, settle: false, notify: { byId: {} }, offlineQueuedToast: false, connected: navigator.onLine };
+const S = { boot: null, clients: [], route: null, timer: null, flash: null, settle: false, notify: { byId: {} }, offlineQueuedToast: false, connected: navigator.onLine, bookAge: 0, offlineCarried: null };
 const OFFLINE_DB = 'crispprint-offline-v1';
 let offlineDbPromise = null;
 let syncingOfflineQueue = false;
@@ -176,13 +176,54 @@ function makeOfflineResponse(path, payload, id) {
   }
   return { id, offlineQueued: true };
 }
+/* A Mac that is switched off does not refuse a call — nothing is there to refuse it, so the address
+   simply never answers and every read waits out the network's own timeout. Two things follow: the
+   first read that fails for no other reason than nobody answering marks the shop dark for a while,
+   and every read after that goes straight to the copy this device carries. And while the shop's
+   state is still unknown, a read that has a copy to fall back on is given a deadline rather than an
+   endless wait, so the counter paints a remembered screen in seconds instead of a blank one for
+   half a minute. A new knock happens when that window closes, or the moment the network changes. */
+const SHOP_DARK_MS = 45000;
+const SHOP_WAIT_MS = 7000;
+const NO_SAVED_COPY = 'No saved copy of this screen is available offline. Connect to the shop Wi-Fi and try again.';
+let shopDarkUntil = 0;
+function shopIsDark() { return Date.now() < shopDarkUntil; }
+function knock(path, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SHOP_WAIT_MS);
+  return fetch(path, Object.assign({}, options, { signal: controller.signal }))
+    .then((response) => { clearTimeout(timer); return response; },
+          (error) => { clearTimeout(timer); throw error; });
+}
+async function cachedAnswer(key) {
+  const cached = await offlineRead('responses', key);
+  if (!cached) {
+    if (WARM_NEWEST_ALONE.indexOf(key.split('?')[0]) < 0) return null;
+    const held = (await offlineAll('responses'))
+      .filter((row) => String(row.key).split('?')[0] === key.split('?')[0])
+      .sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0))[0];
+    return held || null;
+  }
+  return cached;
+}
 async function api(path, opts) {
   const options = opts || {};
   const method = String(options.method || 'GET').toUpperCase();
   const key = apiUrl(path);
   if (method === 'GET') {
+    const held = await cachedAnswer(key);
+    if (shopIsDark()) {
+      /* The shop is already known not to answer, so a second knock buys nothing: either this device
+         holds the screen or it says so at once instead of making the counter wait. */
+      S.connected = false;
+      paintNetworkStatus();
+      if (!held) throw new Error(NO_SAVED_COPY);
+      const at = held.savedAt || 0;
+      if (!S.bookAge || (at && at < S.bookAge)) S.bookAge = at;
+      return held.value;
+    }
     try {
-      const response = await fetch(path, options);
+      const response = await (held ? knock(path, options) : fetch(path, options));
       const ct = response.headers.get('Content-Type') || '';
       const body = ct.indexOf('json') >= 0 ? await response.json() : await response.text();
       if (!response.ok) {
@@ -194,16 +235,26 @@ async function api(path, opts) {
       if (ct.indexOf('json') >= 0 && !key.startsWith('/api/backup')) {
         await offlineWrite('responses', { key, value: body, etag: response.headers.get('ETag') || '', savedAt: Date.now() });
       }
+      S.bookAge = 0;
       S.connected = true;
+      shopDarkUntil = 0;
       paintNetworkStatus();
       return body;
     } catch (error) {
-      if (error instanceof TypeError || !navigator.onLine) {
+      const stopped = error instanceof TypeError || (error && error.name === 'AbortError');
+      if (stopped || !navigator.onLine) {
         S.connected = false;
+        shopDarkUntil = Date.now() + SHOP_DARK_MS;
+        if (held) {
+          // The oldest read on screen is the honest age of the whole screen: a figure remembered
+          // since the morning must not wear the timestamp of one remembered at noon.
+          const at = held.savedAt || 0;
+          if (!S.bookAge || (at && at < S.bookAge)) S.bookAge = at;
+          paintNetworkStatus();
+          return held.value;
+        }
         paintNetworkStatus();
-        const cached = await offlineRead('responses', key);
-        if (cached) return cached.value;
-        throw new Error('No saved copy of this screen is available offline. Connect to the shop Wi-Fi and try again.');
+        throw new Error(NO_SAVED_COPY);
       }
       throw error;
     }
@@ -219,6 +270,22 @@ async function api(path, opts) {
     const cached = await offlineRead('responses', resource);
     if (cached && cached.etag) headers['If-Match'] = cached.etag;
   }
+  const queue = async () => {
+    S.connected = false;
+    const tempId = nextOfflineId--;
+    const entry = {
+      operationId: headers['X-Operation-Id'], method, path: key,
+      body: payload, baseEtag: headers['If-Match'] || '',
+      tempId: method === 'POST' && /^\/api\/(clients|jobs|leads|expenses|payments|spoiled)$/.test(new URL(path, location.href).pathname)
+        ? tempId : null,
+      createdAt: new Date().toISOString(), sequence: nextOfflineSequence++, state: 'pending', error: '',
+    };
+    await offlineWrite('outbox', entry);
+    S.offlineQueuedToast = true;
+    paintNetworkStatus();
+    return makeOfflineResponse(new URL(path, location.href).pathname, payload, entry.tempId);
+  };
+  if (shopIsDark()) return queue();
   try {
     const response = await fetch(path, Object.assign({}, options, { headers }));
     const ct = response.headers.get('Content-Type') || '';
@@ -237,23 +304,13 @@ async function api(path, opts) {
       throw error;
     }
     S.connected = true;
+    shopDarkUntil = 0;
     paintNetworkStatus();
     return body;
   } catch (error) {
     if (!(error instanceof TypeError) && navigator.onLine) throw error;
-    S.connected = false;
-    const tempId = nextOfflineId--;
-    const entry = {
-      operationId: headers['X-Operation-Id'], method, path: key,
-      body: payload, baseEtag: headers['If-Match'] || '',
-      tempId: method === 'POST' && /^\/api\/(clients|jobs|leads|expenses|payments|spoiled)$/.test(new URL(path, location.href).pathname)
-        ? tempId : null,
-      createdAt: new Date().toISOString(), sequence: nextOfflineSequence++, state: 'pending', error: '',
-    };
-    await offlineWrite('outbox', entry);
-    S.offlineQueuedToast = true;
-    paintNetworkStatus();
-    return makeOfflineResponse(new URL(path, location.href).pathname, payload, entry.tempId);
+    shopDarkUntil = Date.now() + SHOP_DARK_MS;
+    return queue();
   }
 }
 async function paintNetworkStatus() {
@@ -262,9 +319,13 @@ async function paintNetworkStatus() {
   let pending = 0;
   try { pending = (await offlineAll('outbox')).filter((row) => row.state === 'pending' || row.state === 'conflict').length; }
   catch (_) {}
+  // A dark screen full of money figures has to wear its age. "Offline" alone says the wire is down;
+  // it does not tell the counter whether today's takings stopped being true at 9 am or at 5 pm, and
+  // that is exactly the difference between quoting a remembered figure and deciding on a live one.
+  const when = S.bookAge ? wxReadAt(S.bookAge) : 'this device';
   el.textContent = S.connected
     ? (pending ? 'Connected · ' + pending + ' changes waiting' : 'Connected to the book')
-    : 'Offline · saved changes: ' + pending;
+    : 'Offline · book as of ' + when + (pending ? ' · ' + pending + ' waiting' : '');
   el.classList.toggle('offline', !S.connected || pending > 0);
   const sync = $('.navlink[data-view="sync"]');
   if (sync) {
@@ -272,6 +333,69 @@ async function paintNetworkStatus() {
     if (old) old.remove();
     if (pending) sync.insertAdjacentHTML('beforeend', '<span>' + pending + ' waiting</span>');
   }
+}
+/* --------------------------------------------------- carrying the whole book */
+/* With the Mac switched off the counter's question is never "is this screen alive" but "what did he
+   order, and has he paid". So every read the rail can reach is copied onto the device while the shop
+   *is* answering, not only the screen somebody happened to open last. This list mirrors the rail: a
+   destination left out of it is a destination that goes blind on the night the machine does. */
+const WARM_OPEN_JOBS = '/api/jobs?' + qs({ status: 'open', kind: 'Job' });
+/* The first two are not destinations on the rail — they are what the page asks before it can show
+   any destination at all. Without them, a device whose memory was filled only by the screens it
+   happened to open still cannot open the door with the Mac off. */
+const WARM_SCREENS = [
+  '/api/bootstrap', '/api/session',
+  '/api/dashboard', WARM_OPEN_JOBS,
+  '/api/jobs?' + qs({ status: 'open', kind: 'Quote' }),
+  '/api/jobs?' + qs({ status: 'Ready', kind: 'Job' }),
+  '/api/handover', '/api/clients', '/api/leads?' + qs({ stage: 'open' }),
+  '/api/accounts', '/api/expenses', '/api/spoiled', '/api/shop',
+];
+/* One job's own sheet is its own read, and a client at the counter is answered from it. Only what
+   is live now is carried, or the copy would grow with the shop's whole history. */
+const WARM_JOB_SHEETS = 24;
+const WARM_EVERY = 20 * 60 * 1000;
+/* A screen whose address carries the date asks a new question every morning, so yesterday's copy is
+   a different key. For these, and only these, the newest copy the device holds wins over nothing. */
+const WARM_NEWEST_ALONE = ['/api/report'];
+let warmingBook = false;
+let warmBookAt = 0;
+async function warmOfflineBook() {
+  if (warmingBook || !navigator.onLine) return;
+  warmingBook = true;
+  try {
+    const monthStart = todayISO().slice(0, 8) + '01';
+    const paths = WARM_SCREENS.concat([
+      '/api/report?from=' + monthStart + '&to=' + todayISO() + '&period=day',
+    ]);
+    const open = await api(WARM_OPEN_JOBS).catch(() => []);
+    /* The walk only counts as a carry while the shop is truly answering. With the Mac off, every
+       read below is met from the copy the device already holds, and stamping that copy as if it
+       were fresh would make an old book look current on the Sync screen. */
+    if (!S.connected) return;
+    (Array.isArray(open) ? open : []).slice(0, WARM_JOB_SHEETS).forEach((j) => {
+      if (j && j.id) paths.push('/api/jobs/' + j.id);
+    });
+    let kept = 0;
+    for (const path of paths) {
+      if (!S.connected) return;
+      // One screen this device is not allowed to read must not cost it the rest of the book, so a
+      // refusal is stepped over rather than thrown out of the walk.
+      try { await api(path); kept += 1; } catch (e) { /* this one it cannot hold */ }
+      await new Promise((wait) => setTimeout(wait, 120));
+    }
+    warmBookAt = Date.now();
+    S.offlineCarried = { at: warmBookAt, screens: kept };
+  } catch (error) {
+    /* The shop stopped answering halfway through the walk. What the device already holds stays
+       usable, and the next connected pass picks up the rest. */
+  } finally {
+    warmingBook = false;
+  }
+}
+function watchOfflineBook() {
+  setTimeout(warmOfflineBook, 4000);
+  setInterval(() => { if (document.visibilityState !== 'hidden') warmOfflineBook(); }, WARM_EVERY);
 }
 function replaceTemporaryIds(value, map) {
   if (typeof value === 'number' && value < 0 && map[String(value)]) return map[String(value)];
@@ -614,7 +738,10 @@ async function render() {
   paintNetworkStatus();
   const v = $('#view');
   const r = S.route;
-  v.classList.remove('glass');
+  /* One class is the whole gate: every screen the counter works on gets the glass, and changing this
+     one word takes the pass back to the dashboard alone. Two things stay solid by rule, not by route —
+     the alarm cards, and the printed job sheet, which is its own document and never sees this class. */
+  v.classList.add('glass');
   try {
     if (r.view === 'jobs') await viewJobs(r);
     else if (r.view === 'spoiled') await viewSpoiled(r);
@@ -1185,9 +1312,6 @@ async function viewDashboard() {
   const maxSpend = Math.max.apply(null, d.spend.map((m) => m.amount).concat([1]));
 
   topbar('Dashboard', '', filtersBar('dashboard', []));
-  /* The glass is this screen's, and only this screen's: render() takes the class off every route
-     and nothing else puts it back on. */
-  $('#view').classList.add('glass');
   $('#view').innerHTML = '<p class="hint editable-hint">Anything underlined you can click: move a due date, change a status, ' +
     'reprice an enquiry — it saves as soon as you press Enter.</p>' +
     todayCard() +
@@ -1562,6 +1686,12 @@ async function viewShop() {
   try { mail = await api('/api/email-accounts'); } catch (e) { /* a device not asked to show them */ }
   const login = shop.login, copy = shop.backup;
   const address = shop.address;
+  const bare = (a) => a.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  // The book answers to two shapes of one door. Which one a device should keep is not a coin toss:
+  // the name outlives the router handing this Mac a new number, and Android cannot open a name.
+  const otherAddress = shop.address_other || '';
+  const named = shop.address_kind === 'name' ? address : otherAddress;
+  const numbered = shop.address_kind === 'name' ? otherAddress : address;
   const shopMac = !!(S.session || {}).this_is_the_shop_computer;
   topbar('Shop & devices',
     (shop.secure ? 'HTTPS' : 'plain HTTP') + ' · ' + devices.length + ' signed in · ' +
@@ -1572,7 +1702,7 @@ async function viewShop() {
          { label: '+ New job', action: 'new-job' }]);
   $('#view').innerHTML =
     '<div class="grid kpis">' +
-      stat('Shop address', '<span class="amt">' + esc(address.replace(/^https?:\/\//, '').replace(/\/$/, '')) + '</span>',
+      stat('Shop address', '<span class="addr">' + esc(bare(address)) + '</span>',
            shop.reachable_from_wifi ? 'devices on this Wi-Fi reach the book here'
                                     : 'only this Mac can reach it right now') +
       stat('Sign-in', login.required ? (login.from_environment ? 'Set by the service' : 'One shop password') : 'Not required',
@@ -1599,6 +1729,12 @@ async function viewShop() {
       'keeps the app on its home screen. The records stay on this Mac — the device only ever ' +
       'holds a window onto them.</p>' +
       '<p><a class="btn primary" data-action="setup-page" href="/setup">Open the install page</a></p>' +
+      (otherAddress
+        ? '<p class="hint">Two shapes open this same book. Hand a device the name — <b>' +
+          esc(bare(named)) + '</b> — because it still opens the night the router hands this Mac a ' +
+          'new number. <b>' + esc(bare(numbered)) + '</b> is that number, and it does move. An ' +
+          'Android phone is the one device that has to keep the number: it cannot look a name up.</p>'
+        : '') +
       (shop.secure
         ? '<p class="hint">This address is HTTPS, so a browser will allow it to be installed.' +
           (shop.certificate ? ' The shop certificate is on that page, with its fingerprint.' : ' No certificate file has been made yet; run <code>tools/shop-server.sh certs</code> on this Mac.')
@@ -1704,6 +1840,14 @@ function copiesCard(copy, shopMac) {
                          : ' — that folder is not there right now, so nothing is being mirrored.') + '</p>'
       : '<p class="hint">No second destination is set, so both the book and its copies live on this'
         + ' one Mac. An external disk plugged in now and then is the cheapest insurance there is.</p>') +
+    (copy.mail_set
+      ? '<p class="hint">Posted to <b>' + esc(copy.mail) + '</b> — ' +
+        (copy.mail_ready
+          ? 'each new copy goes out attached to that letter.'
+          : 'but nothing is going out yet: ' + esc(copy.mail_problem || 'that mailbox cannot send')
+            + '.') + '</p>'
+        + (copy.mail_note ? '<p class="hint">Last letter: ' + esc(copy.mail_note) + '.</p>' : '')
+      : '') +
     (shopMac
       ? '<form id="copiesForm" class="stack">' +
         '<label class="consent wide"><input type="checkbox" name="auto"' + (copy.auto ? ' checked' : '') + '>' +
@@ -1717,9 +1861,15 @@ function copiesCard(copy, shopMac) {
         '<label class="field wide"><span>A second folder (optional)</span>' +
         '<input name="mirror" type="text" maxlength="300" placeholder="/Volumes/Backup/Chrisphics"' +
         ' value="' + esc(copy.mirror || '') + '"></label>' +
+        '<label class="field wide"><span>Post each copy to this address (optional)</span>' +
+        '<input name="mail" type="email" maxlength="160"' +
+        ' placeholder="shop-backups@your-mailbox.com" value="' + esc(copy.mail || '') + '"></label>' +
         '<p class="hint">One copy for each month is kept for a year beyond those days, and the last' +
         ' twelve copies asked for by hand. Each one is opened and counted against the book before any' +
         ' older copy is cleared.</p>' +
+        '<p class="hint">A posted copy rides as one file, so wherever that letter is kept is where' +
+        ' every client, phone number and payment is kept too. A folder and an address can both be' +
+        ' settled — neither one replaces the other.</p>' +
         '<div class="err" id="copiesErr"></div>' +
         '<button class="btn primary">Save the copying</button></form>'
       : '<p class="hint">How often the book is copied, and where the copies go, is settled on the' +
@@ -1978,6 +2128,7 @@ function wireShopForms() {
           every_hours: f.every_hours.value,
           keep_days: f.keep_days.value,
           mirror: f.mirror.value.trim(),
+          mail: f.mail.value.trim(),
         }) });
         toast('The book will be copied that way from now on', 'good');
         await render();
@@ -2273,6 +2424,9 @@ async function viewSyncQueue() {
     '', [{ label: 'Sync now', action: 'sync-now', primary: true }]);
   $('#view').innerHTML = '<p class="hint">Changes saved while disconnected stay on this device until it can reach the shop book. ' +
     'Reconnect to the shop Wi-Fi to sync. The screens show the last saved copy until queued changes have synced.</p>' +
+    (S.offlineCarried ? '<p class="hint">This device keeps its own copy of ' + S.offlineCarried.screens +
+      ' of the shop\'s screens, carried at ' + wxReadAt(S.offlineCarried.at) +
+      ', which is what lets the counter be answered with the shop\'s Mac switched off.</p>' : '') +
     (rows.length ? rows.map((row) => {
       const conflict = row.state === 'conflict';
       const synced = row.state === 'synced';
@@ -4127,11 +4281,13 @@ function requestSubmit(form) {
 window.addEventListener('hashchange', () => { closeMore(); render(); });
 window.addEventListener('online', () => {
   S.connected = true;
+  shopDarkUntil = 0;
   paintNetworkStatus();
   syncOfflineQueue().then(() => render()).catch(fail);
 });
 window.addEventListener('offline', () => {
   S.connected = false;
+  shopDarkUntil = Date.now() + SHOP_DARK_MS;
   paintNetworkStatus();
 });
 
@@ -4167,6 +4323,7 @@ window.chrisphics = {
     if (navigator.onLine) await syncOfflineQueue();
     if (!location.hash) location.hash = '#/dashboard';
     await render();
+    watchOfflineBook();
     let remembered = '';
     try {
       remembered = sessionStorage.getItem('chrisphics-note') || '';
