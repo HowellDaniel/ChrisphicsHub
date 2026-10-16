@@ -346,6 +346,16 @@ SQLite book and backups. Render terminates public HTTPS; the app's `--trust-prox
 only for this trusted proxy deployment. A shop password is required at setup. Choose a strong
 password in Render's setup prompt and keep it private; the sign-in cookie is marked Secure.
 
+Two things about that machine are not like this Mac, and the blueprint handles both. Its clock is
+in a US timezone, while every figure the shop reads — today's takings, this month's profit, whether
+the counter is open right now — comes off the server's own time; `CHRISPHICS_TZ=GMT` puts the whole
+engine, SQLite's `datetime('now','localtime')` included, on Accra's clock, which has no daylight
+saving. And it faces the internet rather than the shop Wi-Fi, so a book with no sign-in word
+refuses to start at all instead of serving the accounts unsigned — the log says so in one line, not
+in a stack trace. `tools/check-hosted-book.py` runs the blueprint's own start command against
+throwaway books and proves both of those, along with the fact that behind a proxy loopback no
+longer identifies the shop's own Mac.
+
 To deploy, connect the GitHub repository containing this project to Render, then create a
 new Blueprint from that repository and review the paid service and disk before confirming.
 The source repository is public; use a private repository if you do not want the app source
@@ -837,7 +847,13 @@ never touches your records.
   rules that: **Copy the book by itself while the server is running** switches it on and off,
   **Every (hours)** sets 1–168 hours (24 by default), **Keep night copies for (days)** sets 3–120
   nights (14 by default), and **A second folder (optional)** mirrors every copy somewhere else —
-  an external disk, a network folder. Save the form and the clock is looked at again straight away;
+  an external disk, a network folder, or a folder inside iCloud Drive, which carries each copy off
+  the disk the book lives on without anyone remembering to plug something in. The same form can also
+  name a mailbox under **Post each copy to this address**: the copy then travels as one attached file
+  on a letter from the shop's own mailbox, so it leaves the Mac even when no folder is mounted. A
+  posted copy is the whole book readable by whoever holds that mailbox, so the address is only ever
+  typed on the shop's Mac, and the letter's verdict — sent, or the provider's own words for why it
+  was not — is written next to the copy on the card. Save the form and the clock is looked at again straight away;
   a book that was overdue a day gets its copy the moment you say so, not when the old gap ends.
   Retention is capped before a short cadence could fill the disk: inside the nights you keep, every
   copy except more than twelve from one day; past them, one copy for each of the last twelve

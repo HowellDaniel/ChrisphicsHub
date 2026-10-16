@@ -19,6 +19,16 @@ services:
         value: /var/data/chrisphics.db
       - key: CHRISPHICS_BACKUP_DIR
         value: /var/data/Backups
+      # Accra keeps GMT all year and has no daylight saving, so this is the shop's own clock. It has
+      # to be said out loud: Render's machines sit in a US zone, and every figure in the book —
+      # today's takings, this month's profit, whether the counter is open right now — is read off
+      # the server's clock. Left unset, the hosted book files Tuesday's sales under Monday and
+      # shuts the shop at noon.
+      - key: CHRISPHICS_TZ
+        value: GMT
+      # No default on purpose. Without a value here the engine refuses to start at all rather than
+      # face the internet with no sign-in, and the shop's own word is typed into Render's prompt by
+      # the shop — never by this file, and never into the repository.
       - key: CHRISPHICS_AUTH_PASSWORD
         sync: false
       - key: PYTHONUNBUFFERED
