@@ -40,6 +40,19 @@ from urllib.parse import urlparse, parse_qs, unquote, quote
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
+# Which clock the shop keeps. Every figure the counter relies on — today's takings, this month's
+# profit, whether the book says the shop is open right now — is read off the server's own clock,
+# through Python's `datetime.now()` and SQLite's `datetime('now','localtime')` alike. On the shop
+# Mac that clock is already Accra's; on a hosted box it is whatever zone the provider's machine
+# happens to sit in, and a container in US time would stamp Tuesday's sales into Monday's ledger
+# and close the shop at noon. Accra is GMT all year with no daylight saving, so naming the zone
+# here — before the first clock is read — moves the whole engine, SQLite included, onto it.
+TIMEZONE = (os.environ.get("CHRISPHICS_TZ") or "").strip()
+if TIMEZONE:
+    os.environ["TZ"] = TIMEZONE
+    time.tzset()
+else:
+    TIMEZONE = time.tzname[0]
 # One book wherever Chrisphics Hub is started from — the app, the .command or a bare
 # `python3 server.py` — so records never fork into two copies.
 SUPPORT = os.environ.get("CHRISPHICS_SUPPORT") or os.path.expanduser(
@@ -1396,8 +1409,16 @@ def hide_secret(spoken, password):
     return spoken
 
 
-def send_over_email(settings, to_address, subject, body):
-    """Hand one message to the mailbox's provider and return its Message-ID."""
+# Gmail's own ceiling is 25 MB for a whole message; the base64 a binary file travels in adds about
+# a third on top of its size, so the shop is stopped short of the provider's refusal, not after it.
+MAIL_ATTACHMENT_MAX = 14 * 1024 * 1024
+
+
+def send_over_email(settings, to_address, subject, body, attachment=None):
+    """Hand one message to the mailbox's provider and return its Message-ID. `attachment` is a
+    (filename, bytes) pair, and it is how a copy of the book travels: the records ride inside one
+    file rather than being written out into the message, where anybody reading the thread sees them
+    stripped of the database that makes them mean something."""
     message = EmailMessage()
     safe_name = settings["from_name"].replace("\r", " ").replace("\n", " ").strip()
     message["From"] = formataddr((safe_name, settings["from_address"]))
@@ -1405,27 +1426,47 @@ def send_over_email(settings, to_address, subject, body):
     message["Subject"] = subject
     message["Message-ID"] = make_msgid()
     message.set_content(body)
+    if attachment:
+        name, data = attachment
+        if len(data) > MAIL_ATTACHMENT_MAX:
+            # Refusing here is cheaper than a provider bouncing a letter the shop already spent
+            # its evening writing, and the words say what to use instead.
+            raise ValueError("The book is now %.1f MB — too big for a mailbox. Keep a copy on a "
+                             "disk or in a folder instead." % (len(data) / 1024.0 ** 2))
+        message.add_attachment(data, maintype="application", subtype="octet-stream", filename=name)
     context = ssl.create_default_context()
     password = settings["password"]
+    stage = "reaching"
     try:
         if settings["security"] == "ssl":
             with smtplib.SMTP_SSL(settings["host"], settings["port"], timeout=20,
                                   context=context) as smtp:
+                stage = "signing in"
                 smtp.login(settings["username"], password)
+                stage = "sending"
                 refused = smtp.send_message(message)
         else:
             with smtplib.SMTP(settings["host"], settings["port"], timeout=20) as smtp:
                 smtp.ehlo()
                 smtp.starttls(context=context)
                 smtp.ehlo()
+                stage = "signing in"
                 smtp.login(settings["username"], password)
+                stage = "sending"
                 refused = smtp.send_message(message)
     except smtplib.SMTPAuthenticationError:
         raise RuntimeError("The mail server refused the word saved for %s."
                            % settings["from_address"]) from None
     except (smtplib.SMTPException, OSError, ssl.SSLError, ValueError) as error:
+        words = hide_secret(str(error)[:300], password)
+        if stage == "signing in":
+            # A mailbox that dislikes the word it was handed sometimes ends the call instead of
+            # answering, which reads as a broken wire. The wire is not what the owner can fix.
+            raise RuntimeError("The %s mailbox would not take the word saved for it: %s. A Gmail "
+                               "mailbox needs a 16-character App Password, not the normal one."
+                               % (settings["from_address"], words)) from None
         raise RuntimeError("Email could not be sent through %s: %s"
-                           % (settings["host"], hide_secret(str(error)[:300], password))) from None
+                           % (settings["host"], words)) from None
     if refused:
         raise RuntimeError("Email provider refused the recipient.")
     return str(message["Message-ID"])
@@ -2800,7 +2841,11 @@ def clear_shop_password(current):
 # One page a device opens before it installs the app: the address, a QR to point a camera at,
 # the shop certificate to trust, and the steps for that particular kind of device.
 
-TLS_DIR = os.path.expanduser("~/Library/Application Support/CRISPprint TLS")
+# Where the shop keeps the certificate its devices trust, and the record of which names and numbers
+# that certificate answers to. The seam every other folder in this program has: a check that wants to
+# hand out an address points this at a temp folder rather than writing into the shop's own trust root.
+TLS_DIR = os.environ.get("CHRISPHICS_TLS_DIR") or os.path.expanduser(
+    "~/Library/Application Support/CRISPprint TLS")
 CA_DOWNLOAD = os.path.join(TLS_DIR, "device-download", "shop-root-ca.cer")
 CA_PEM_DOWNLOAD = os.path.join(TLS_DIR, "device-download", "shop-root-ca.pem")
 CA_VALID_FOR = os.path.join(TLS_DIR, "device-download", "valid-for.txt")
@@ -2895,13 +2940,21 @@ def install_platform(user_agent):
         return "ios"
     if "windows" in low:
         return "windows"
-    if "macintosh" in low and "safari" in low:
+    # A Mac browser is any one that says Macintosh, Safari or not: Chrome and Edge on a Mac, and the
+    # shop's own app window, all resolve the shop's name just as Safari does, and an iPad or iPhone
+    # asking a page for its desktop shape lands here too — which changes nothing about the address it
+    # is handed, because that is the same one the mobile browsers get.
+    if "macintosh" in low:
         return "mac"
     return "other"
 
 
+def shop_url_for(host, port=None):
+    return "%s://%s:%d/" % ("https" if SERVE["tls"] else "http", host,
+                            SERVE["port"] if port is None else port)
+
+
 def shop_url(fallback_host=""):
-    scheme = "https" if SERVE["tls"] else "http"
     host, port = SERVE["host"], SERVE["port"]
     if host in ("0.0.0.0", "::", ""):
         # Bound to every address, so this device's own Host header is the only thing that says
@@ -2912,7 +2965,53 @@ def shop_url(fallback_host=""):
             host = named.group(1)
             if named.group(2):
                 port = int(named.group(2))
-    return "%s://%s:%d/" % (scheme, host, port)
+    return shop_url_for(host, port)
+
+
+def shop_named_host():
+    """This Mac's own name on the shop Wi-Fi — the same door as its number, and the one the router
+    cannot move. Empty unless the shop's certificate already answers to it: a name a padlock refuses
+    is worse than a number that moves, and the counter has no way to tell the two apart."""
+    try:
+        named = socket.gethostname().strip(".")
+    except OSError:
+        return ""
+    return named if named.endswith(".local") and named in ca_valid_for() else ""
+
+
+def setup_addresses(request_host="", user_agent=""):
+    """The shop's door in the two shapes it can be dialled, lead first.
+
+    A phone that bookmarked the shop's number goes dark the night the router hands out a new one, and
+    nothing on this Mac can reach it to say so — the page that would tell it lives behind the number
+    that just died. So Apple devices and Windows PCs, which all resolve the shop's name, are led to
+    the name; Android has no Bonjour to ask, so it is led to the number and the page says so out loud
+    rather than handing it an address that never opens. The shape that is not the lead is never
+    hidden: a device that cannot open one always has the other printed under it.
+
+    Returns (lead, other, lead_is_the_name), with `other` empty when there is only one shape to
+    offer — a book kept on this Mac alone, or a device that already dialled the lead."""
+    named = shop_named_host()
+    by_name = shop_url_for(named) if (named and SERVE["tls"]) else ""
+    dialled = shop_url(request_host)
+    lead_is_the_name = bool(by_name) and install_platform(user_agent) in ("ios", "mac", "windows")
+    lead = by_name if lead_is_the_name else dialled
+    other = dialled if lead_is_the_name else by_name
+    return lead, (other if other != lead else ""), lead_is_the_name
+
+
+def setup_address(request_host="", user_agent=""):
+    """The one address a device is told to type, scan and bookmark."""
+    return setup_addresses(request_host, user_agent)[0]
+
+
+def address_keys(request_host="", user_agent=""):
+    """The two address fields a device-facing screen is handed, so it can show the shape the device
+    should keep and name the other one beside it. `address_kind` says which shape the lead is, because
+    the two are not equal: the name outlives the router's number, and only Android cannot open it."""
+    lead, other, lead_is_the_name = setup_addresses(request_host, user_agent)
+    return {"address": lead, "address_other": other,
+            "address_kind": "name" if lead_is_the_name else "number"}
 
 
 def qr_png(words, pixels=560):
@@ -2936,7 +3035,7 @@ def qr_png(words, pixels=560):
 
 
 def setup_html(request_host="", user_agent=""):
-    url = shop_url(request_host)
+    url, other, leads_with_name = setup_addresses(request_host, user_agent)
     fingerprint = ca_fingerprint()
     secure = SERVE["tls"]
     here = install_platform(user_agent)
@@ -3003,7 +3102,7 @@ def setup_html(request_host="", user_agent=""):
         host_in_use = host_in_use.rsplit(":", 1)[0]
     wrong_address = ""
     if secure and names and host_in_use and host_in_use not in names:
-        alt = next((n for n in names if "." in n or re.match(r"^\d+\.", n)), names[0])
+        other_name = next((n for n in names if "." in n or re.match(r"^\d+\.", n)), names[0])
         wrong_address = (
             '<p class="warn">This page was opened as <code>%s</code>, but the shop\'s certificate'
             ' only answers to <code>%s</code>. Trusting it will not clear the warning on this'
@@ -3011,8 +3110,8 @@ def setup_html(request_host="", user_agent=""):
             ' <a href="https://%s:%d/setup">https://%s:%d/setup</a> on this device instead, and'
             ' ask the shop to run <code>tools/shop-server.sh certs</code> if that address is the'
             ' one that has gone stale.</p>'
-            % (esc(host_in_use), esc(", ".join(names)), esc(alt), SERVE["port"],
-               esc(alt), SERVE["port"]))
+            % (esc(host_in_use), esc(", ".join(names)), esc(other_name), SERVE["port"],
+               esc(other_name), SERVE["port"]))
     cert = ("" if not fingerprint else
             '<h2>One certificate to trust first</h2>'
             '<p>Phones and laptops will not open a shop address that they cannot check.'
@@ -3038,6 +3137,21 @@ def setup_html(request_host="", user_agent=""):
            esc(files[key][0]), esc(files[key][1]))
         for key in order if key != here)
     install_list = follow + ('<h2>On another kind of device</h2>' + others if others else "")
+    # Whichever shape this device was led to, the other one always goes on the page underneath it.
+    caption = ("The shop address — this shape does not move" if leads_with_name
+               else "The shop address on this Wi-Fi")
+    alt = ""
+    if other:
+        if leads_with_name:
+            alt = ('<p class=note>If that name ever stops answering — this Mac left the network, or'
+                   ' its certificate went stale — the shop\'s current number opens the same book:'
+                   ' <a href="%s">%s</a>.</p>' % (esc(other), esc(other)))
+        else:
+            alt = ('<p class=note>This number opens on every device. The shop also answers to its'
+                   ' own name — <a href="%s">%s</a> — which keeps working the night the router'
+                   ' hands this Mac a new number. iPhones, iPads, Macs and Windows PCs can use'
+                   ' that name; Android browsers cannot, so keep the number on Android.</p>'
+                   % (esc(other), esc(other)))
     return """<!doctype html><html lang=en><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=robots content="noindex">
@@ -3069,8 +3183,8 @@ code{font:13px ui-monospace,Menlo,Consolas,monospace;overflow-wrap:break-word}
 <h1>Put %(shop)s on this device</h1>
 <p class=sub>Install the shop's records as an app. Nothing is copied to this device to keep:
 the book stays on the shop's own computer, and this is a window onto it.</p>
-<div class=url><span>The shop address</span><a href="%(url)s">%(url)s</a></div>
-%(qr)s%(trust)s
+<div class=url><span>%(caption)s</span><a href="%(url)s">%(url)s</a></div>
+%(alt)s%(qr)s%(trust)s
 <h2>Sign in</h2>
 <p>The shop keeps one password for its devices. Ask whoever runs the counter — it was chosen on
 the shop computer, and every device is signed out whenever it changes.</p>
@@ -3080,6 +3194,7 @@ the shop computer, and every device is signed out whenever it changes.</p>
 in the README under “Open and install over HTTPS on the same Wi-Fi”.</p>
 </html>""" % {
         "shop": esc(SHOP["name"]), "url": esc(url), "cert": cert, "trust": trust,
+        "caption": caption, "alt": alt,
         "qr": ('<p class=qr><img src="/setup-qr.png" width="184" height="184" alt="QR code for'
                ' the shop address"><br><span class=note>Camera on this text, or type the address.</span></p>'
                if qr_png(url) else ""),
@@ -5022,7 +5137,10 @@ class Handler(BaseHTTPRequestHandler):
     def dispatch(self, method, path, params):
         seg = [s for s in path.split("/") if s]
         if method == "GET" and path == "/healthz":
-            return 200, {"ok": True}
+            # The clock travels with the health answer because a hosted box that keeps the wrong zone
+            # is not merely odd-looking — it files the day's takings under another day.
+            return 200, {"ok": True, "timezone": TIMEZONE,
+                         "now": dt.datetime.now().isoformat(timespec="minutes")}
         if method == "GET" and path == "/api/session":
             signed_in = self.authenticated()
             named = self.named_computer() if signed_in else None
@@ -5154,7 +5272,10 @@ class Handler(BaseHTTPRequestHandler):
                                                self.headers.get("User-Agent", "")),
                              "text/html; charset=utf-8")
             if path == "/setup-qr.png":
-                png = qr_png(shop_url(self.headers.get("Host", "")))
+                # The same address the page above it leads with, or the camera and the typed line
+                # disagree and one of them is a dead end.
+                png = qr_png(setup_address(self.headers.get("Host", ""),
+                                           self.headers.get("User-Agent", "")))
                 if not png:
                     self.send(404, "No QR helper on this Mac", "text/plain")
                     return None
@@ -5205,14 +5326,16 @@ class Handler(BaseHTTPRequestHandler):
                          # the address devices install from, and the book's own copies.
                          "login": {"required": auth_required(), "from_environment": bool(AUTH_PASSWORD),
                                    "chosen": bool(book_password())},
-                         "address": shop_url(self.headers.get("Host", "")),
+                         **address_keys(self.headers.get("Host", ""),
+                                        self.headers.get("User-Agent", "")),
                          "secure": bool(getattr(self.server, "is_tls", False)),
                          "backup": backup_report()}
         if method == "GET" and head == "dashboard":
             return 200, dashboard()
         if method == "GET" and head == "shop":
             return 200, {"shop": SHOP,
-                         "address": shop_url(self.headers.get("Host", "")),
+                         **address_keys(self.headers.get("Host", ""),
+                                        self.headers.get("User-Agent", "")),
                          "setup": "/setup",
                          "momo_number": MOMO_NUMBER,
                          "kept_in_book": {field: bool(state_value(key))
@@ -5645,6 +5768,13 @@ def backup_mirror():
     return state_value("backup_mirror")
 
 
+def backup_mail():
+    """The address each copy is posted to. A mailbox is a second home that survives a dead disk,
+    an unplugged drive and a Mac that does not come back — which is worth what it costs, but it
+    does cost: whoever holds that login then holds every client and every payment."""
+    return state_value("backup_mail")
+
+
 def check_backup(path):
     """Read the new copy back: is it a database, and does it hold the same records as the book
     it came from? Returns a short note, or raises when the copy is not trustworthy."""
@@ -5729,6 +5859,38 @@ def mirror_copy(source):
     return True, dest
 
 
+def mail_copy(source):
+    """Post the newest copy to the address the shop named, as one attachment. Returns None when no
+    address is set, (False, why) when the letter could not go, (True, where) when the provider took
+    it. A mailbox that is refusing is written on the card and stops there: the copy already sits on
+    this Mac's disk, so a night the letter failed must never read as a night the book went
+    uncopied — the shop keeps trading either way."""
+    to = backup_mail()
+    if not to:
+        return None
+    settings, why = email_settings()
+    if not settings:
+        return False, why
+    try:
+        with open(source, "rb") as fh:
+            data = fh.read()
+    except OSError as err:
+        return False, "the new copy could not be read (%s)" % type(err).__name__
+    name = os.path.basename(source)
+    body = ("The shop's book is attached as one file, %s. It is a complete copy: open it in any "
+            "SQLite tool and every job, client, payment and expense is there exactly as the counter "
+            "sees it. Nothing about the shop's records is written in the letter itself.\n"
+            "\n"
+            "To bring the book back from this file: close Chrisphics Hub, move the old book aside, "
+            "put this file where it was, and open the app again.\n" % name)
+    try:
+        send_over_email(settings, to, "%s book copy %s" % (SHOP["name"], name), body, (name, data))
+    except (RuntimeError, ValueError) as error:
+        return False, str(error)
+    mark_email_account(settings.get("account_id"))
+    return True, to
+
+
 def short_path(path):
     return (path or "").replace(os.path.expanduser("~"), "~")
 
@@ -5740,14 +5902,20 @@ def run_backup(kind="backup"):
     counts = check_backup(path)
     tidy = tend_backup_folder()
     mirrored = mirror_copy(path)
+    mailed = mail_copy(path)
     note = "checked, %d jobs · kept %d, cleared %d" % (counts["jobs"], tidy["kept"], tidy["gone"])
     if mirrored is not None:
         note += " · mirror " + ("done" if mirrored[0] else "missing: %s" % mirrored[1])
+    if mailed is not None:
+        note += " · mailed to " + mailed[1] if mailed[0] else " · mail failed: " + mailed[1]
     set_state("last_backup_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     set_state("last_backup_file", os.path.basename(path))
     set_state("last_backup_note", note)
     set_state("last_backup_error", "")
     set_state("last_backup_kind", kind)
+    if mailed is not None:
+        set_state("last_backup_mail", ("sent to %s" % mailed[1]) if mailed[0]
+                                           else "failed: %s" % mailed[1])
     return path, counts, tidy
 
 
@@ -5839,6 +6007,10 @@ def backup_report():
     auto = backup_auto()
     overdue, next_in = backup_due()
     mirror = backup_mirror()
+    mail = backup_mail()
+    # A shop that named an address but has no working mailbox would otherwise see a silent
+    # nothing-happening each night, so the reason the letter cannot leave is read out here.
+    mail_problem = email_settings()[1] if mail else ""
     try:
         free = os.statvfs(BACKUP_DIR)
     except OSError:
@@ -5854,6 +6026,9 @@ def backup_report():
             "due": bool(overdue and auto), "next_in_hours": round(next_in, 1) if auto else None,
             "mirror": short_path(mirror), "mirror_set": bool(mirror),
             "mirror_dir": bool(mirror) and os.path.isdir(mirror),
+            "mail": mail, "mail_set": bool(mail),
+            "mail_ready": bool(mail) and not mail_problem, "mail_problem": mail_problem,
+            "mail_note": state_value("last_backup_mail"),
             "error": state_value("last_backup_error"),
             "error_at": state_value("last_backup_error_at"),
             "free_gb": free_gb, "recent": recent_backups()}
@@ -5861,7 +6036,8 @@ def backup_report():
 
 def set_backup_settings(patch, where=""):
     """The shop's own Mac decides how often the book is copied, how long the copies are kept and
-    whether a second one goes somewhere else. Only the schedule and the folders are reachable."""
+    whether a second one goes somewhere else. Only the schedule, the places and the address are
+    reachable here; the mailbox's own details live on the Email accounts card."""
     if not isinstance(patch, dict):
         raise ValueError("Nothing to change was sent")
     changed = []
@@ -5904,6 +6080,12 @@ def set_backup_settings(patch, where=""):
         else:
             set_state("backup_mirror", "")
         changed.append("mirror")
+    if "mail" in patch:
+        raw = text(patch.get("mail"), 160).strip().lower()
+        if raw and not re.fullmatch(EMAIL_ADDRESS_PATTERN, raw):
+            raise ValueError("That is not an address a letter could be sent to")
+        set_state("backup_mail", raw)
+        changed.append("mail")
     note_security("backup_settings", where,
                   detail="changed: " + ", ".join(changed) if changed else "nothing changed")
     if changed:
@@ -6024,7 +6206,10 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
         except ValueError as err:
             raise ValueError("--allow-unauthenticated-lan requires a private IPv4 address.") from err
         if (address.version != 4 or not address.is_private or address.is_loopback
-                or address.is_link_local):
+                or address.is_link_local or address.is_unspecified):
+            # 0.0.0.0 counts as `is_private` to Python because it means "this network", but binding to
+            # it means every interface — so the flag that opens the shop's Wi-Fi to phones would have
+            # opened the whole internet with no sign-in at all.
             raise ValueError("--allow-unauthenticated-lan requires a private Wi-Fi IPv4 address.")
         if trust_proxy:
             raise ValueError("--allow-unauthenticated-lan cannot be combined with a proxy.")
@@ -6118,10 +6303,18 @@ def main():
         print("Backup written to %s" % path)
         print("Checked: %s" % ", ".join("%s %d" % kv for kv in sorted(counts.items())))
         print("Backups folder: kept %d, cleared %d older copies" % (tidy["kept"], tidy["gone"]))
+        print("Mailed copy: %s" % (state_value("last_backup_mail") or
+                                   "nothing mailed — no address is set on Shop & devices"))
         return
     serve(args.port, not args.no_browser, args.seed, args.host, args.tls_cert, args.tls_key,
           args.trust_proxy, args.allow_unauthenticated_lan, args.keep_awake)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (RuntimeError, ValueError) as err:
+        # Refusing to start is a decision, not a crash. On a hosted box this log is the only thing a
+        # person sees, and a traceback buries the one line that says what to do about it.
+        print("%s" % err, file=sys.stderr)
+        raise SystemExit(1)
