@@ -11,6 +11,7 @@ use the shop's configured WhatsApp Business and email providers.
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import datetime as dt
 from email.message import EmailMessage
@@ -5891,8 +5892,261 @@ def mail_copy(source):
     return True, to
 
 
+# A copy that lives on the same disk as the book is not a second copy. The shop can name one
+# private GitHub repository as its off-site home: every checked copy is posted there, and a book
+# that starts with nothing in it — a fresh hosted instance whose disk was wiped on the last
+# redeploy, a Mac that came back from a rebuild — is filled back from that copy before the counter
+# is shown an empty dashboard. Nothing about it is required: with no repository named, both legs
+# stay as silent as the mirror and the mail legs are.
+# The repository's own name is the only thing the commit says about the shop; no job, client or
+# payment ever appears in a commit message. And because this project's source repository is public,
+# the private flag is read back from the provider before a single byte of the ledger is sent, and a
+# repository that is not private is refused.
+OFFSITE_API = (os.environ.get("CHRISPHICS_OFFSITE_API") or "https://api.github.com").rstrip("/")
+OFFSITE_REPO = (os.environ.get("CHRISPHICS_OFFSITE_REPO") or "").strip()
+OFFSITE_NAME = (os.environ.get("CHRISPHICS_OFFSITE_PATH") or "chrisphics-book.db").strip("/")
+OFFSITE_TOKEN_ENV = os.environ.get("CHRISPHICS_OFFSITE_TOKEN") or ""
+# The token is kept beside the book at mode 600, never inside it: the book is copied every night to
+# a mirror folder and posted as mail, and a token that rode along with the ledger would be a token
+# handed to whoever holds that copy.
+OFFSITE_SECRETS_PATH = os.path.join(SUPPORT, "offsite-secrets.json")
+OFFSITE_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+# The Contents route refuses past 100 MB; the shop's whole book is measured in hundreds of KB.
+OFFSITE_MAX_BYTES = 90 * 1024 * 1024
+OFFSITE_RECORD_TABLES = ("jobs", "clients", "payments", "expenses")
+
+
 def short_path(path):
     return (path or "").replace(os.path.expanduser("~"), "~")
+
+
+def offsite_token():
+    """The fine-grained personal access token — from the environment for a hosted box, or from the
+    mode-600 file beside the book for this Mac. Whichever way it came, it is never written into the
+    book and never handed back out to a screen."""
+    if OFFSITE_TOKEN_ENV:
+        return OFFSITE_TOKEN_ENV
+    try:
+        with open(OFFSITE_SECRETS_PATH, "r", encoding="utf-8") as handle:
+            stored = json.load(handle)
+    except (OSError, ValueError):
+        return ""
+    return (stored.get("token") or "") if isinstance(stored, dict) else ""
+
+
+def offsite_is_httpsish():
+    """Plain HTTP only ever carries this token between this machine and itself — which is what a
+    check needs, and nothing else. Anywhere further, the base must be HTTPS or the leg refuses to
+    start rather than send a repository token across a network in the clear."""
+    parsed = urlparse(OFFSITE_API)
+    if parsed.scheme == "https":
+        return True
+    return parsed.scheme == "http" and parsed.hostname in ("127.0.0.1", "localhost", "::1")
+
+
+def offsite_settings():
+    """(where to sync, why not) — the same contract as email_settings, so a half-set-up shop is
+    told what is missing rather than watched to fail. Only an empty repository name means the shop
+    never asked for an off-site home; a name with no token is a leg that is broken, and is reported
+    as one."""
+    if not OFFSITE_REPO_PATTERN.match(OFFSITE_REPO or ""):
+        return None, "no off-site repository is named (CHRISPHICS_OFFSITE_REPO reads owner/name)"
+    if not OFFSITE_NAME:
+        return None, "the off-site copy needs a file name inside the repository"
+    if not offsite_is_httpsish():
+        return None, ("the off-site address %s would carry the token in plain text; it must be"
+                      " HTTPS, or loopback for a check" % OFFSITE_API)
+    token = offsite_token()
+    if not token:
+        return None, ("the repository is named but no token is saved — set CHRISPHICS_OFFSITE_TOKEN"
+                      " or write it to %s" % short_path(OFFSITE_SECRETS_PATH))
+    return {"api": OFFSITE_API, "repo": OFFSITE_REPO, "path": OFFSITE_NAME, "token": token}, ""
+
+
+def _offsite_error_text(error):
+    """The provider's own one-line reason, or the body's first characters when it did not answer in
+    its usual shape. Never anything the token could be part of."""
+    try:
+        body = error.read(4096).decode("utf-8", "replace")
+    except (OSError, ValueError):
+        body = ""
+    try:
+        return str(json.loads(body).get("message") or "")[:200]
+    except ValueError:
+        return (body or "HTTP %s" % error.code)[:200]
+
+
+def _offsite_clean(settings, words):
+    """A token that somehow appears in a provider's message must not go on the shelf of a log or
+    onto a screen, so it is struck out wherever it turns up."""
+    token = settings.get("token") or ""
+    return words.replace(token, "•token•") if token else words
+
+
+def _offsite_call(settings, method, url, payload=None, accept="application/vnd.github+json"):
+    """One call to the repository, with the token in a header and nowhere else. Returns the bytes
+    the provider sent, or None for a 404 — which on this route honestly means 'not there yet'."""
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=body, method=method,
+        headers={"Authorization": "Bearer " + settings["token"], "Accept": accept,
+                 "X-GitHub-Api-Version": "2022-03-10", "User-Agent": SHOP["name"],
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read(OFFSITE_MAX_BYTES + 1)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise RuntimeError(_offsite_clean(settings, _offsite_error_text(error)) or
+                           "the repository refused (%s)" % error.code) from None
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError) as error:
+        raise RuntimeError(_offsite_clean(
+            settings, "could not reach %s (%s)" % (settings["api"], type(error).__name__))) from None
+    if len(raw) > OFFSITE_MAX_BYTES:
+        raise RuntimeError("the repository sent more than a book can hold")
+    return raw
+
+
+def _offsite_json(settings, method, url, payload=None):
+    raw = _offsite_call(settings, method, url, payload)
+    if raw is None:
+        return None
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError:
+        raise RuntimeError(_offsite_clean(settings, "the repository answered in a shape this "
+                                                   "build does not read")) from None
+
+
+def offsite_is_private(settings):
+    """(is it private, its name as the provider spells it). The flag is read back rather than taken
+    on trust: this project's own repository is public, and a book posted there would put every
+    client, every payment and every debt of the shop onto the open web."""
+    info = _offsite_json(settings, "GET", "%s/repos/%s" % (settings["api"], settings["repo"]))
+    if info is None:
+        raise RuntimeError("the repository %s is not there, or this token cannot see it"
+                           % settings["repo"])
+    return info.get("private") is True, (info.get("full_name") or settings["repo"])
+
+
+def push_offsite(source):
+    """Post the newest copy into the private repository, replacing the copy that was there. None
+    when the shop named no repository, (False, why) when it could not go, (True, where) when the
+    provider took it. A refused leg reads on the copy card and stops there — the book still sits on
+    this Mac's disk, and the shop keeps trading."""
+    if not OFFSITE_REPO:
+        return None
+    settings, why = offsite_settings()
+    if not settings:
+        return False, why
+    try:
+        private, full_name = offsite_is_private(settings)
+    except RuntimeError as error:
+        return False, str(error)
+    if not private:
+        return False, ("%s is not a private repository, and the book never"
+                       " goes to a public one" % full_name)
+    try:
+        with open(source, "rb") as fh:
+            data = fh.read()
+    except OSError as err:
+        return False, "the new copy could not be read (%s)" % type(err).__name__
+    if len(data) > OFFSITE_MAX_BYTES:
+        return False, "the copy is %d MB, past what this route can carry" % (len(data) // 1048576)
+    url = "%s/repos/%s/contents/%s" % (settings["api"], settings["repo"],
+                                       quote(settings["path"], safe="/"))
+    try:
+        current = _offsite_json(settings, "GET", url)
+        payload = {"message": "%s book copy %s" % (SHOP["name"], os.path.basename(source)),
+                   "content": base64.b64encode(data).decode("ascii")}
+        if current and current.get("sha"):
+            payload["sha"] = current["sha"]
+        taken = _offsite_json(settings, "PUT", url, payload)
+    except RuntimeError as error:
+        return False, str(error)
+    if not isinstance(taken, dict):
+        return False, "the repository gave no receipt for the copy"
+    return True, "%s · %s" % (full_name, settings["path"])
+
+
+def offsite_book_empty():
+    """True when this machine's book holds nothing a person put in it. Half a book is enough to
+    refuse over: a job typed at the counter a minute before the pull lands would be erased by it."""
+    for table in OFFSITE_RECORD_TABLES:
+        if q("SELECT count(*) c FROM %s" % table)[0]["c"]:
+            return False
+    return not state_value("shop_password")
+
+
+def restore_offsite():
+    """Bring the book back from the private repository when — and only when — this machine's own
+    book is empty. That is the whole point of the leg: a hosted instance redeployed onto a wiped
+    disk would otherwise open to a dashboard showing a shop with no jobs and no debt. Returns None
+    when nothing was asked for, (True, note) when records came back, (False, why) when they
+    did not. A refusal here never stops the shop starting."""
+    if not OFFSITE_REPO:
+        return None
+    settings, why = offsite_settings()
+    if not settings:
+        return False, why
+    if not offsite_book_empty():
+        return False, "this book already holds records, so the copy was not poured over it"
+    try:
+        private, full_name = offsite_is_private(settings)
+    except RuntimeError as error:
+        return False, str(error)
+    if not private:
+        return False, "%s is not a private repository, so nothing is taken from it" % full_name
+    url = "%s/repos/%s/contents/%s" % (settings["api"], settings["repo"],
+                                       quote(settings["path"], safe="/"))
+    try:
+        raw = _offsite_call(settings, "GET", url,
+                            accept="application/vnd.github.raw")
+    except RuntimeError as error:
+        return False, str(error)
+    if raw is None:
+        return False, "no copy of the book is in %s yet" % full_name
+    if len(raw) < 8 or raw[:16] != b"SQLite format 3\x00":
+        return False, "what the repository holds is not a SQLite book"
+    staging = os.path.join(os.path.dirname(DB_PATH) or ".", "offsite-restore.db")
+    try:
+        with open(staging, "wb") as fh:
+            fh.write(raw)
+        check = sqlite3.connect("file:%s?mode=ro" % staging, uri=True)
+        try:
+            verdict = check.execute("PRAGMA integrity_check").fetchone()[0]
+            if verdict != "ok":
+                raise RuntimeError("the copy from the repository does not pass its own check: %s"
+                                   % verdict)
+            missing = [table for table in OFFSITE_RECORD_TABLES
+                       if not check.execute("SELECT 1 FROM sqlite_master WHERE type='table'"
+                                            " AND name = ?", (table,)).fetchone()]
+            if missing:
+                raise RuntimeError("the copy has no %s table, so it is not this shop's book"
+                                   % ", ".join(missing))
+            counts = {table: check.execute("SELECT count(*) FROM %s" % table).fetchone()[0]
+                      for table in OFFSITE_RECORD_TABLES}
+            with _lock:
+                check.backup(_db)
+                _db.commit()
+        finally:
+            check.close()
+    except (RuntimeError, ValueError, sqlite3.Error, OSError) as error:
+        return False, "%s: %s" % (type(error).__name__, str(error)[:180])
+    finally:
+        for extra in ("", "-wal", "-shm"):
+            try:
+                os.remove(staging + extra)
+            except OSError:
+                pass
+    note = "%s jobs · %s clients, from %s" % (counts["jobs"], counts["clients"], full_name)
+    set_state("offsite_restore_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    set_state("offsite_restore_note", note)
+    note_security("offsite_restore", detail=note[:200])
+    return True, note
 
 
 def run_backup(kind="backup"):
@@ -5903,11 +6157,14 @@ def run_backup(kind="backup"):
     tidy = tend_backup_folder()
     mirrored = mirror_copy(path)
     mailed = mail_copy(path)
+    posted = push_offsite(path)
     note = "checked, %d jobs · kept %d, cleared %d" % (counts["jobs"], tidy["kept"], tidy["gone"])
     if mirrored is not None:
         note += " · mirror " + ("done" if mirrored[0] else "missing: %s" % mirrored[1])
     if mailed is not None:
         note += " · mailed to " + mailed[1] if mailed[0] else " · mail failed: " + mailed[1]
+    if posted is not None:
+        note += (" · off-site " + posted[1]) if posted[0] else (" · off-site failed: %s" % posted[1])
     set_state("last_backup_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     set_state("last_backup_file", os.path.basename(path))
     set_state("last_backup_note", note)
@@ -5916,6 +6173,11 @@ def run_backup(kind="backup"):
     if mailed is not None:
         set_state("last_backup_mail", ("sent to %s" % mailed[1]) if mailed[0]
                                            else "failed: %s" % mailed[1])
+    if posted is not None:
+        where = ("sent to %s" % posted[1]) if posted[0] else "failed: %s" % posted[1]
+        set_state("last_backup_offsite", where)
+        if posted[0]:
+            set_state("last_offsite_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     return path, counts, tidy
 
 
@@ -6029,6 +6291,12 @@ def backup_report():
             "mail": mail, "mail_set": bool(mail),
             "mail_ready": bool(mail) and not mail_problem, "mail_problem": mail_problem,
             "mail_note": state_value("last_backup_mail"),
+            "offsite": OFFSITE_REPO, "offsite_set": bool(OFFSITE_REPO),
+            "offsite_api": OFFSITE_API,
+            "offsite_note": state_value("last_backup_offsite"),
+            "offsite_at": state_value("last_offsite_at"),
+            "offsite_restore": state_value("offsite_restore_note"),
+            "offsite_restore_at": state_value("offsite_restore_at"),
             "error": state_value("last_backup_error"),
             "error_at": state_value("last_backup_error_at"),
             "free_gb": free_gb, "recent": recent_backups()}
@@ -6305,7 +6573,15 @@ def main():
         print("Backups folder: kept %d, cleared %d older copies" % (tidy["kept"], tidy["gone"]))
         print("Mailed copy: %s" % (state_value("last_backup_mail") or
                                    "nothing mailed — no address is set on Shop & devices"))
+        print("Off-site copy: %s" % (state_value("last_backup_offsite") or
+                                     "nothing sent — no repository is named"))
         return
+    restored = restore_offsite()
+    if restored is not None:
+        # On a hosted box this log line is the only place a person learns whether the records came
+        # back, so it is written whether the answer is good news or a refusal.
+        print("Book restored from the off-site repository: %s" % restored[1] if restored[0]
+              else "The off-site copy was not taken up: %s" % restored[1])
     serve(args.port, not args.no_browser, args.seed, args.host, args.tls_cert, args.tls_key,
           args.trust_proxy, args.allow_unauthenticated_lan, args.keep_awake)
 
