@@ -280,12 +280,15 @@ Icons are drawn, not photographed: `tools/make-web-icons.swift` renders the shop
 mark at 192px, 512px, a 512px maskable version with the mark pulled inside the safe circle,
 and a 180px `apple-touch-icon`, all on the same ink plate as the Dock icon.
 
-The app shell and screens already opened are cached on each device. While offline, new
-changes are saved in that device's **Pending sync** queue. Reconnect to the shop Wi-Fi to
-send them to the shared book; the queue retries safely if a connection drops. If another
-device changed the same record first, the app pauses and shows both the saved local change
-and current shared record for review. Data stays on the server and on devices' browser
-storage; protect each device with its own screen lock. Offline copies may be stale, and a
+The app shell and the shop's whole rail are cached on each device: every screen the counter can open
+is copied onto it while the shop is answering — on a twenty-minute clock, or at once from
+**Pending sync ▸ Copy the book onto this device**, which is the one to press before the Mac is
+switched off. With nothing answering, the dashboard still paints out of that copy and says at what
+hour its figures stopped being live. Changes typed meanwhile are saved in that device's **Pending
+sync** queue. Reconnect to the shop Wi-Fi to send them to the shared book; the queue retries safely
+if a connection drops. If another device changed the same record first, the app pauses and shows both
+the saved local change and current shared record for review. Data stays on the server and on devices'
+browser storage; protect each device with its own screen lock. Offline copies may be stale, and a
 device must reconnect to the shop server to see updates entered elsewhere.
 
 The native Mac desktop app is a separate single-computer mode, not a client for the shared
@@ -488,7 +491,10 @@ work** there opens the form with the job already chosen — so a batch that goes
 recorded against the job, never against the client's price.
 
 **Pending sync** — shows offline changes saved on this device, whether they are waiting,
-synced or need conflict review.
+synced or need conflict review, and how much of the shop this machine holds as its own copy of
+the screens plus the hour it took it. **Copy the book onto this device** takes that copy on the
+spot instead of waiting for the twenty-minute clock — the one to press at close, while the Mac is
+still answering, so the counter can be answered from this machine after it goes off.
 
 **Reports** — billed, what it cost, profit, collected, still owed and delivered for any
 date range, grouped by day, week or month; broken down by service, by payment method, by
@@ -839,6 +845,11 @@ never touches your records.
   (so you can put one on a USB stick or in Drive), and that is written into the book's security
   trail as a copy that left the Mac. `python3 server.py --backup` from a terminal is the same act
   named `backup-<day>-<time>.db`.
+  Neither in-page button is kept for the Mac alone: a cashier at the counter can press **Copy it
+  now** from the machine they are sitting at, and the book writes down which address asked. What
+  that press cannot do is answer with the Mac switched off — the copy is made by the server, so the
+  button belongs to the day, not to the outage. For a copy that survives the Mac dying, press **Take
+  a copy out** on the same card, which saves every record as one file on that machine.
 - **Copied by itself, while the server runs**: the always-on server keeps its own clock. Every
   five minutes it looks at the schedule and, when a copy is due, makes one, opens it again, puts it
   through `PRAGMA integrity_check`, counts it against the book table by table (jobs, clients,
@@ -863,6 +874,22 @@ never touches your records.
   folder actually took it. `CHRISPHICS_BACKUP_CHECK` (seconds) sets how often the clock is looked
   at; `CHRISPHICS_BACKUP_DIR` moves the folder, which is how the Render box puts copies on its
   persistent disk.
+- **Kept in a private repository too**: four settings beside the start command turn each checked
+  copy into a commit pushed to one **private** GitHub repository —
+  `CHRISPHICS_OFFSITE_REPO=owner/name` and `CHRISPHICS_OFFSITE_TOKEN` (or that token in
+  `offsite-secrets.json` beside the book, at mode `600`), with `CHRISPHICS_OFFSITE_API` and
+  `CHRISPHICS_OFFSITE_PATH` for the rare box that needs them. The copy replaces the file that was
+  there, so the repository holds the newest book and, in its own history, every book before it — for
+  a shop's ledger that is roughly 190 KB a night, free on GitHub, and it is why a deleted record
+  stays recoverable in that history long after it is gone from the book. Coming back the other way:
+  a server that starts onto a book with nothing in it — which is exactly what a free Render instance
+  is after a redeploy wipes its disk — pulls that file down, puts it through the same
+  `integrity_check` and table counts a copy is put through, and pours it in before the counter is
+  shown an empty dashboard. A book that already holds records is never written over. And the leg
+  refuses before a single byte leaves if the repository's own `private` flag is not true — this
+  project's source repository is public, so that check is not decoration — or if the address it was
+  given would carry the token in the clear. Nothing about it is typed on a screen: it is settled
+  where the server is started, and its verdict reads on the same card as the mirror and the mail.
 - **Backed up by the calendar too**: with the always-on server installed, `tools/nightly-backup.sh`
   still runs at 22:30 every night and does the same thing through the same checks. It is the second
   way a copy happens, so a server that was never running in the daytime still gets its night copy —
@@ -1077,6 +1104,8 @@ The dev checks live in `tools/`, and none of them needs anything installed:
 | `python3 tools/js-check.py` | does `public/app.js` still parse? (one stray bracket empties every screen) |
 | `python3 tools/check-profile-settings.py` | can the shop's own details be saved and read back out of the book, do bad ones get refused, and does a cleared one fall back to its default? Runs against a **copy** of the book on a throwaway port. |
 | `python3 tools/check-backups-security.py` | does the book get copied by itself, checked, mirrored, retained and reported; and is it guarded — password rules, salted 600,000-round hash, session length, devices thrown out, wrong-password waits, the per-minute ceiling, cross-origin refusals, the security trail, HTTPS headers? Runs four throwaway servers on ports 8897–8899 against a **copy** of the book, in its own backup folders, and closes by proving no job, client, payment, expense or message moved and that the shop's own file was not written to. |
+| `python3 tools/check-mac-offline.py` | what does an installed device do when the shop's own Mac stops answering? A throwaway engine is booted against a **copy** of the book, a real WebKit view warms its memory from it, and that engine is then killed — the same thing a powered-off Mac does to the shop Wi-Fi. The screen is then read the way a cashier reads it: the dashboard still paints, its figures are the ones that device saw last (a payment made into the book *after* it looked must not appear), the chip says at what hour the numbers stopped being live, and a screen nobody on that device ever opened still answers out of the copy carried while the shop was up. It presses the two buttons the counter actually has rather than calling the code behind them — **Copy the book onto this device** on Pending sync, which has to fill and stamp the device's own memory on the spot instead of waiting on a twenty-minute clock, and **Copy it now** on Shop & devices, which has to leave a checked `manual-…db` in the shop's folder with the security trail naming who asked. A carry asked for with nobody home stamps nothing, so a remembered book can never report itself as freshly copied. A figure typed in the dark has to reach the book by itself once the Mac answers again. Closes by proving the shop's own file is the bytes it started with. |
+| `python3 tools/check-offsite-book.py` | is the off-site leg honest — a copy posted to a private repository and never to a public one, a redeployed blank disk filled back before the counter sees it, a book that already holds records never written over, a file that is not a SQLite book refused, a refused token survivable, and the token in no URL, no commit message, no log and no book? Runs throwaway books on port 8896 against a local stand-in for `api.github.com`, so nothing is created in anyone's account, and the shop's own file is never opened. Proves this build's half: the same routes, headers and refusals are what GitHub answers. |
 | `python3 tools/check-daylight-theme.py` | does the dashboard carry the shop's date and a clock that runs, and does the look follow the hour — light 8:00am–5:00pm, dark outside, turning over by itself with nobody touching it, and that no surface offering a hand-picked look survives — the page carries no appearance buttons, and a `crispprint-theme` word left in a browser by an older build is proved ignored? It also measures the two widgets as painted: that the calendar is the **medium** type with **all forty-two cells of the month on it, in order**, today marked exactly once and in the right row and column, the grid seven columns wide, the numerals and the month name large enough to be seen from the counter, and all five inks (roundel, month name, numerals, neighbouring months, weekday initials) re-measured against AA out of the palette the page is actually wearing. It walks one page held open across a midnight and across the last minute of a month, and closes by proving nothing hangs off a 390px screen and the shop's own file was not written to. Every page is run in the same WebKit the app uses with its clock frozen by an injected script, so the hour under test is the hour the page believes from its pre-paint script onwards. |
 | `python3 tools/check-app-daylight.py` | does the Mac app's own **By clock** keep the same day as the page? `desktop/src/Theme.swift` is compiled on its own into a throwaway command that answers for all twenty-four hours, so the window chrome's rule is run rather than read; it also fails if the shell's 8/17 ever disagrees with the page's, and refuses any appearance mode, menu or Settings pane coming back. |
 | `python3 tools/check-flexible-entry.py` | can the counter take an order and its money without fighting the screen? A real WebKit view drives the shipped page against a **copy** of the book: the caret landing in a box, `1,200` and `₵0.25` booking ₵ 300.00, Enter stepping through the lines instead of half-booking, a pasted list laying itself out, cash on the order screen recorded as a Payment so the balance reads zero, money taken on a job the book already calls settled, one press repeating yesterday's ticket, a refused figure coming back typed, and the whole ticket readable at 390px. Runs one at a time — the view's browser data is per address, so a second concurrent run wipes the first one's mid-scenario. |

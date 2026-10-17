@@ -1848,6 +1848,13 @@ function copiesCard(copy, shopMac) {
             + '.') + '</p>'
         + (copy.mail_note ? '<p class="hint">Last letter: ' + esc(copy.mail_note) + '.</p>' : '')
       : '') +
+    (copy.offsite_set
+      ? '<p class="hint">Kept in <b>' + esc(copy.offsite) + '</b> — a private repository, so a'
+        + ' server that starts onto a blank disk takes its records back from there.</p>'
+        + (copy.offsite_note ? '<p class="hint">Last copy: ' + esc(copy.offsite_note) + '.</p>' : '')
+        + (copy.offsite_restore
+          ? '<p class="hint">Brought back from it: ' + esc(copy.offsite_restore) + '.</p>' : '')
+      : '') +
     (shopMac
       ? '<form id="copiesForm" class="stack">' +
         '<label class="consent wide"><input type="checkbox" name="auto"' + (copy.auto ? ' checked' : '') + '>' +
@@ -2421,12 +2428,26 @@ async function viewSyncQueue() {
   topbar('Pending sync',
     pending.length + ' waiting · ' + conflicts.length + ' need review · ' +
       rows.filter((row) => row.state === 'synced').length + ' synced on this device',
-    '', [{ label: 'Sync now', action: 'sync-now', primary: true }]);
+    '', [{ label: 'Sync now', action: 'sync-now', primary: true },
+         { label: 'Copy the book onto this device', action: 'carry-now' }]);
+  /* Read the device's own memory, not this page's memory: the copy a phone carries at noon is still
+     what it will answer from at midnight, long after the walk that took it has been forgotten. */
+  const held = await offlineAll('responses').catch(() => []);
+  const lastTaken = held.reduce((max, row) => Math.max(max, row.savedAt || 0), 0);
+  const since = (S.offlineCarried || {}).at || lastTaken;
   $('#view').innerHTML = '<p class="hint">Changes saved while disconnected stay on this device until it can reach the shop book. ' +
     'Reconnect to the shop Wi-Fi to sync. The screens show the last saved copy until queued changes have synced.</p>' +
-    (S.offlineCarried ? '<p class="hint">This device keeps its own copy of ' + S.offlineCarried.screens +
-      ' of the shop\'s screens, carried at ' + wxReadAt(S.offlineCarried.at) +
-      ', which is what lets the counter be answered with the shop\'s Mac switched off.</p>' : '') +
+    (held.length
+      ? '<p class="hint">This device holds its own copy of ' + plural(held.length, 'screen') +
+        ' of the shop’s' + (since ? ', last taken at ' + wxReadAt(since) : '') +
+        ', which is what lets the counter be answered with the shop’s Mac switched off.</p>'
+      : '<p class="hint">This device holds no copy of the shop’s screens yet. Press “Copy the book' +
+        ' onto this device” while the Mac is answering; after that, the counter keeps answering from' +
+        ' this machine with the Mac switched off.</p>') +
+    '<p class="hint">Two copies are asked for by hand on <a href="#/shop">Shop &amp; devices</a>:' +
+    ' “Copy it now” writes one into the shop’s own folder and wherever else the book is sent, and' +
+    ' “Take a copy out” saves every record as one file on the machine you are sitting at. The file on' +
+    ' this machine is the copy that survives the Mac dying.</p>' +
     (rows.length ? rows.map((row) => {
       const conflict = row.state === 'conflict';
       const synced = row.state === 'synced';
@@ -2444,7 +2465,8 @@ async function viewSyncQueue() {
           '</div>' : '') +
         '</div></div>';
     }).join('') : emptyState('Nothing waiting to sync',
-      'This device has no offline changes. It will keep a local copy of screens you have opened for offline viewing.'));
+      'This device has no offline changes. Anything typed while the shop was out of reach is kept' +
+      ' here until the Mac answers again.'));
   restoreFocus();
 }
 function expenseForm(expense, presetJob, jobs) {
@@ -3841,6 +3863,34 @@ const ACTIONS = {
       toast('The book was copied and counted against itself', 'good');
       await render();
     } catch (err) { fail(err); }
+  },
+  /* The other half of a hand-asked copy: "Copy it now" writes onto the shop's own disk, which is
+     worth nothing to the machine you are sitting at once that Mac is switched off. This walk is what
+     puts the shop's screens into this device's own memory. It otherwise runs on a twenty-minute
+     clock, so pressing it is how the copy is taken deliberately — at close, before the Mac goes dark.
+     With nobody answering there is nothing to copy, and the device would be re-reading its own
+     memory, so it says so instead of stamping a carry it did not make. */
+  async 'carry-now'() {
+    if (warmingBook) {
+      toast('A copy is being taken onto this device right now — press again in a moment to see how' +
+            ' much of the shop it holds.', 'good');
+      return;
+    }
+    if (!navigator.onLine || !S.connected) {
+      toast('Nothing to copy: the book is only read from the shop while its Mac is answering. Take' +
+            ' this copy before switching the Mac off.', 'bad');
+      return;
+    }
+    toast('Copying the shop’s screens onto this device…', 'good');
+    await warmOfflineBook();
+    const carried = S.offlineCarried || {};
+    if (carried.screens) {
+      toast(plural(carried.screens, 'screen') + ' copied onto this device at ' + wxReadAt(carried.at),
+            'good');
+    } else {
+      toast('The shop stopped answering partway — this device keeps the copy it already held.', 'bad');
+    }
+    await render();
   },
   async 'sign-out-all-devices'() {
     try {

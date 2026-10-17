@@ -27,7 +27,10 @@ What is watched for, in order:
   * the device carries the whole rail while the shop is answering, not only the screen somebody
     happened to open last — and a screen it never opened still paints once the Mac is off;
   * a carry asked for while nobody is answering stamps nothing, so a remembered book can never
-    report itself as freshly copied on the Sync screen.
+    report itself as freshly copied on the Sync screen;
+  * the two buttons a cashier presses do what they say on the tin — one writes a checked copy into
+    the shop's own folder, the other fills this machine's own memory on the spot instead of leaving
+    it to wait on a twenty-minute clock.
 
 Everything is written to a copy of the book in a temp folder; the shop's own file is opened read-only
 and compared byte for byte at the end. Loopback is the shop, so no password is needed or used.
@@ -86,6 +89,11 @@ setup = sqlite3.connect(CLONE)
 for table in ("clients", "jobs", "job_items", "payments", "expenses", "leads", "spoiled_work"):
     setup.execute("DELETE FROM %s" % table)
 setup.execute("UPDATE app_state SET value='0' WHERE key='shop_mac_login'")
+# The live book mirrors every copy into the shop's own iCloud folder. A throwaway book that pressed a
+# copy button would file a fake ledger in there among the real ones, so the second destinations are
+# taken out of the clone: every copy this check asks for stays inside its own temp folder.
+setup.execute("DELETE FROM app_state WHERE key IN ('backup_mirror', 'backup_mail',"
+              " 'last_backup_mail', 'last_backup_offsite')")
 cid = setup.execute("INSERT INTO clients (name, phone) VALUES ('Dark Room Films', '0535583460')"
                     ).lastrowid
 jid = setup.execute("INSERT INTO jobs (ref, client_id, title, category, quantity, unit_price,"
@@ -226,6 +234,11 @@ try:
                  "poll|!!document.querySelector('[data-action=\"new-job\"]')",
                  "poll|(document.getElementById('networkStatus')||{}).textContent"
                  ".indexOf('onnect')>=0",
+                 # Read the screen only once it has actually drawn a figure. The rail paints in
+                 # stages after boot resolves, so a read taken between them shows a dashboard with
+                 # no money on it at all — which this file would otherwise report as the device
+                 # having forgotten the shop's figures.
+                 "poll|(document.body.innerText||'').indexOf('\\u20B5')>=0",
                  "say|" + READ], fresh=True, tag="warming")
     check("the device opened the shop's dashboard", warm.get("ready") is True, warm.get("status"))
     check("and it was the live book it read", "Offline" not in (warm.get("status") or ""),
@@ -258,6 +271,21 @@ try:
           carried.get("carry") != 0 and carried.get("screens") >= len(want),
           "%s screens at %s" % (carried.get("screens"), carried.get("carry")))
 
+    # A walk the code calls is not what happens at the counter. The cashier presses a button on the
+    # Pending sync screen, and that press has to take the copy on the spot rather than leave the
+    # machine waiting on the twenty-minute clock for one more hour of shop answers.
+    pressed = view(["open|/#/sync",
+                    "poll|!!document.querySelector('[data-action=\"carry-now\"]')",
+                    "eval|S.offlineCarried = null;"
+                    " document.querySelector('[data-action=\"carry-now\"]').click();",
+                    "poll|(S.offlineCarried||{}).screens >= 12",
+                    "say|" + READ], tag="pressing the copy button")
+    check("pressing the copy button takes the copy without waiting on the clock",
+          pressed.get("screens", 0) >= len(want) and pressed.get("carry", 0) != 0,
+          "%s screens at %s" % (pressed.get("screens"), pressed.get("carry")))
+    check("and the button is on the screen a cashier already opens to see what is waiting",
+          "Pending sync" in str(pressed.get("words") or ""), str(pressed.get("words") or "")[:60])
+
     # ── 3. the book moves while the device is not looking ───────────────────────────────────────
     book("INSERT INTO payments (client_id, job_id, amount, kind, method, note)"
          " VALUES (?,?,?, 'Payment', 'Cash', 'after the device looked')", (cid, jid, LATER))
@@ -269,6 +297,12 @@ try:
     check("the shop's address stopped answering", hush(proc))
     dark = view(["open|/#/",
                  "poll|!!document.querySelector('[data-action=\"new-job\"]')",
+                 # A load starts believing the shop is there and corrects itself once the knock comes
+                 # back empty. Reading the screen in between is how a dark dashboard gets reported as
+                 # "still claiming to be connected, with no figures drawn at all".
+                 "poll|(document.getElementById('networkStatus')||{}).textContent"
+                 ".indexOf('Connected')<0",
+                 "poll|(document.body.innerText||'').indexOf('\\u20B5')>=0",
                  "say|" + READ], tag="dark")
     check("with nothing answering, the dashboard still paints", dark.get("ready") is True,
           str(dark.get("words") or "")[:80])
@@ -289,6 +323,10 @@ try:
     # carries the date, so the copy has to be found by screen, not by string.
     blind = view(["open|#/reports",
                   "poll|(document.body.innerText||'').indexOf('Reports')>=0",
+                  # The word "Reports" is in the navigation on every screen, so waiting for it proves
+                  # nothing about this one having rendered. Wait for its own cards and a drawn figure.
+                  "poll|(document.body.innerText||'').indexOf('Billed')>=0",
+                  "poll|(document.body.innerText||'').indexOf('\\u20B5')>=0",
                   "say|" + READ], tag="a screen never opened")
     shown2 = figures(blind)
     check("a screen this device never opened still paints with the Mac off",
@@ -311,6 +349,24 @@ try:
     check("and it claims no fresh carry over the copy it was only re-reading",
           darkwalk.get("carry") == 0 and darkwalk.get("screens") == 0,
           "%s screens at %s" % (darkwalk.get("screens"), darkwalk.get("carry")))
+
+    # The copy is only worth pressing if the counter can see that it is there. The screen reads this
+    # machine's own memory rather than this page's, so a reload with the Mac off still says how much
+    # of the shop the device holds — and pressing the button with nobody home still stamps nothing.
+    darksync = view(["open|/#/sync",
+                     "poll|(document.body.innerText||'').indexOf('holds its own copy')>=0",
+                     "eval|S.offlineCarried = null;"
+                     " var b = document.querySelector('[data-action=\"carry-now\"]');"
+                     " if (b) b.click();",
+                     "eval|window.__W='wait'; setTimeout(function(){window.__W='ready';}, 3000);",
+                     "poll|window.__W === 'ready'",
+                     "say|" + READ], tag="the copy button in the dark")
+    held_words = str(darksync.get("words") or "")
+    check("with the Mac off, the sync screen still says what this machine holds",
+          "holds its own copy" in held_words, held_words[:70])
+    check("and pressing the copy button with nobody home stamps no fresh carry",
+          darksync.get("carry") == 0 and darksync.get("screens") == 0,
+          "%s screens at %s" % (darksync.get("screens"), darksync.get("carry")))
 
     # ── 6. the counter keeps working through the outage ──────────────────────────────────────────
     wrote = view(["open|/#/",
@@ -352,6 +408,33 @@ try:
     # this screen would draw.
     check("and the payment made during the outage is counted on it", TAKEN + LATER in figures(back),
           back.get("money"))
+
+    # ---------------------------------------------------------------- the cashier's two own presses
+    # "Copy it now" is the manual backup the counter asks for: a checked copy on the shop's own disk
+    # — and whatever second destination, mailbox or off-site repository the shop settled — rather
+    # than a screen that merely claims it copied. Pressed from a machine on the Wi-Fi, not from the
+    # Mac's own loopback, because that is where a cashier sits.
+    copied = view(["open|#/shop",
+                   "poll|!!document.querySelector('[data-action=\"book-copy\"]')",
+                   "eval|document.querySelector('[data-action=\"book-copy\"]').click()",
+                   "poll|/manual-\\d{8}-\\d{6}\\.db/.test(document.body.innerText)",
+                   "say|JSON.stringify({names: (document.body.innerText.match("
+                   "/(manual|backup)-\\d{8}-\\d{6}\\.db/g)||[]).slice(0,8)})"],
+                  tag="pressing copy it now")
+    folder = os.path.join(work, "Backups")
+    by_hand = sorted(n for n in os.listdir(folder) if n.startswith("manual-")) if os.path.isdir(folder) else []
+    on_card = copied.get("names") or []
+    check("pressing the button wrote a copy asked for by hand into the shop's folder",
+          bool(by_hand) and by_hand[-1] in on_card,
+          "%s · %d kB · card reads %s" % (by_hand[-1] if by_hand else "nothing",
+                                          os.path.getsize(os.path.join(folder, by_hand[-1])) // 1024
+                                          if by_hand else 0, on_card[:2]))
+    check("and that copy was opened and counted, not just written",
+          "checked" in str((scalar("SELECT value FROM app_state WHERE key='last_backup_note'") or "")),
+          scalar("SELECT value FROM app_state WHERE key='last_backup_note'"))
+    check("and the book wrote down who asked for it",
+          scalar("SELECT count(*) FROM security_log WHERE kind='book_copied'") >= 1,
+          "%d copy asked for" % scalar("SELECT count(*) FROM security_log WHERE kind='book_copied'"))
 finally:
     try:
         proc.terminate()
