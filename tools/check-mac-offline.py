@@ -24,6 +24,10 @@ What is watched for, in order:
     decides on "today's takings" and has to tell a live figure from a remembered one at a glance;
   * a figure typed while the Mac is dark is kept on the device and lands in the book by itself when
     the Mac answers again, so nothing said at the counter is lost to a power cut;
+  * and — because a queue nobody can look at is not a book — that same figure is on the counter's own
+    screens the rest of the day, priced the way the shop will price it, wearing a mark that says the
+    shop has not seen it yet; while a screen the device did not write to still shows only what the
+    shop sent, and the remembered copy is never rewritten by the showing;
   * the device carries the whole rail while the shop is answering, not only the screen somebody
     happened to open last — and a screen it never opened still paints once the Mac is off;
   * a carry asked for while nobody is answering stamps nothing, so a remembered book can never
@@ -210,12 +214,56 @@ def view(cmds, fresh=False, tag=""):
 
 
 # The page reads its own screen out, so every claim below is a number a person would have seen.
-READ = ("JSON.stringify({ready: !!document.querySelector('[data-action=\"new-job\"]'),"
-        " status: (document.getElementById('networkStatus')||{}).textContent || \"\","
-        " money: (document.body.innerText.match(/[\\u20B5][\\d,]+\\.?\\d*/g)||[]).slice(0,8),"
-        " walk: window.__W || '', keys: window.__K || [],"
-        " carry: (S.offlineCarried||{}).at || 0, screens: (S.offlineCarried||{}).screens || 0,"
-        " words: document.body.innerText.replace(/\\s+/g,' ').slice(0,900)})")
+# read() builds that one expression; extra named JS expressions are appended so a single WebKit load
+# can answer several questions about the same painted screen.
+def read(*extra):
+    body = [
+        "ready: !!document.querySelector('[data-action=\"new-job\"]')",
+        "status: (document.getElementById('networkStatus')||{}).textContent || \"\"",
+        "money: (document.body.innerText.match(/[\\u20B5][\\d,]+\\.?\\d*/g)||[]).slice(0,8)",
+        "walk: window.__W || ''", "keys: window.__K || []",
+        "carry: (S.offlineCarried||{}).at || 0", "screens: (S.offlineCarried||{}).screens || 0",
+        # The dashboard and accounts figures by their own card labels, so a claim about today's
+        # takings quotes the number under that name rather than a ₵ string found somewhere on the page.
+        "kpi: [].slice.call(document.querySelectorAll('.stat')).reduce(function(a, s) {"
+        " a[(s.querySelector('.k')||{}).textContent] = (s.querySelector('.v')||{}).textContent;"
+        " return a; }, {})",
+        "words: document.body.innerText.replace(/\\s+/g,' ').slice(0,900)",
+    ]
+    return "say|JSON.stringify({" + ",".join(body + list(extra)) + "})"
+
+
+def row_of(text, name="row"):
+    """The first table row whose own text mentions TEXT, read as the screen shows it — the mark and
+    every money cell on that one line, with nothing from a neighbouring row mixed in."""
+    return ("%s: (function(){ var r = [].slice.call(document.querySelectorAll('tbody tr'))"
+            ".filter(function(x){ return (x.innerText || '').indexOf('%s') >= 0; })[0];"
+            " return r ? r.innerText.replace(/\\s+/g, ' ') : 'no such row on this screen'; })()"
+            % (name, text.replace("'", "\\'")))
+
+
+def shows(text, name="shows"):
+    """Whether the words appear anywhere on the painted page — absence is the honest form of a
+    negative check, and the 900-character preview is too short to prove one."""
+    return ("%s: (document.body.innerText || '').indexOf('%s') >= 0"
+            % (name, text.replace("'", "\\'")))
+
+
+
+def amount(shown):
+    """'₵ 350.00' as 350.0 — and None when the card did not draw a figure at all."""
+    try:
+        return round(float(str(shown).replace("₵", "").replace(",", "").strip()), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def cash(value):
+    """The page's own money shape — symbol, a space, two decimals — so a test of a figure drawn on
+    screen asks for the string the screen actually paints."""
+    return "₵ %s" % format(float(value), ",.2f")
+
+
 
 built = subprocess.run(["swiftc", "-O", os.path.join(REPO, "tools/wk-probe.swift"),
                         "-o", PROBE_PATH], capture_output=True, text=True, timeout=600)
@@ -239,7 +287,7 @@ try:
                  # no money on it at all — which this file would otherwise report as the device
                  # having forgotten the shop's figures.
                  "poll|(document.body.innerText||'').indexOf('\\u20B5')>=0",
-                 "say|" + READ], fresh=True, tag="warming")
+                 read()], fresh=True, tag="warming")
     check("the device opened the shop's dashboard", warm.get("ready") is True, warm.get("status"))
     check("and it was the live book it read", "Offline" not in (warm.get("status") or ""),
           warm.get("status"))
@@ -255,7 +303,7 @@ try:
                     "eval|(async function(){ const rows = await offlineAll('responses');"
                     " window.__K = rows.map(function(r){ return r.key; }); })();",
                     "poll|Array.isArray(window.__K)",
-                    "say|" + READ], tag="carrying")
+                    read()], tag="carrying")
     check("while the shop answered, the device copied every screen it can reach",
           carried.get("ready") is True and carried.get("walk") == "done", carried.get("walk"))
     held = carried.get("keys") or []
@@ -279,7 +327,7 @@ try:
                     "eval|S.offlineCarried = null;"
                     " document.querySelector('[data-action=\"carry-now\"]').click();",
                     "poll|(S.offlineCarried||{}).screens >= 12",
-                    "say|" + READ], tag="pressing the copy button")
+                    read()], tag="pressing the copy button")
     check("pressing the copy button takes the copy without waiting on the clock",
           pressed.get("screens", 0) >= len(want) and pressed.get("carry", 0) != 0,
           "%s screens at %s" % (pressed.get("screens"), pressed.get("carry")))
@@ -303,7 +351,7 @@ try:
                  "poll|(document.getElementById('networkStatus')||{}).textContent"
                  ".indexOf('Connected')<0",
                  "poll|(document.body.innerText||'').indexOf('\\u20B5')>=0",
-                 "say|" + READ], tag="dark")
+                 read()], tag="dark")
     check("with nothing answering, the dashboard still paints", dark.get("ready") is True,
           str(dark.get("words") or "")[:80])
     check("and the page knows it is not reaching the shop",
@@ -327,7 +375,7 @@ try:
                   # nothing about this one having rendered. Wait for its own cards and a drawn figure.
                   "poll|(document.body.innerText||'').indexOf('Billed')>=0",
                   "poll|(document.body.innerText||'').indexOf('\\u20B5')>=0",
-                  "say|" + READ], tag="a screen never opened")
+                  read()], tag="a screen never opened")
     shown2 = figures(blind)
     check("a screen this device never opened still paints with the Mac off",
           blind.get("ready") is True and "Reports" in str(blind.get("words") or ""),
@@ -341,7 +389,7 @@ try:
                      "eval|window.__W='pending'; warmOfflineBook().then(function(){window.__W='done';},"
                      " function(){window.__W='threw';});",
                      "poll|window.__W !== 'pending'",
-                     "say|" + READ], tag="carrying in the dark")
+                     read()], tag="carrying in the dark")
     check("the walk with nobody home finishes instead of hanging on a dead address",
           darkwalk.get("walk") == "done", darkwalk.get("walk"))
     # Nothing was actually read from the shop, so the device must not claim a carry it did not do:
@@ -360,7 +408,7 @@ try:
                      " if (b) b.click();",
                      "eval|window.__W='wait'; setTimeout(function(){window.__W='ready';}, 3000);",
                      "poll|window.__W === 'ready'",
-                     "say|" + READ], tag="the copy button in the dark")
+                     read()], tag="the copy button in the dark")
     held_words = str(darksync.get("words") or "")
     check("with the Mac off, the sync screen still says what this machine holds",
           "holds its own copy" in held_words, held_words[:70])
@@ -378,12 +426,166 @@ try:
                   "poll|window.__D !== 'pending'",
                   "poll|(document.getElementById('networkStatus')||{}).textContent"
                   ".indexOf('waiting')>=0",
-                  "say|" + READ], tag="writing in the dark")
+                  read()], tag="writing in the dark")
     check("a figure typed with the Mac off was accepted at the counter",
           wrote.get("ready") is True and "waiting" in (wrote.get("status") or ""),
           wrote.get("status"))
     check("and nothing reached the book while it was cut off",
           scalar("SELECT count(*) FROM expenses") == 0, scalar("SELECT count(*) FROM expenses"))
+
+    # ── 6b. the dark counter can see what it has itself written ──────────────────────────────────
+    # A queue nobody can look at is not a book. The ask is a shop that keeps trading with the Mac off
+    # and no cable anywhere in it, and a cashier who takes money and then cannot find it on any screen
+    # has not traded, whatever the machine says about the change being safely kept. So each remembered
+    # screen is folded together with this device's own pending writes — folded at read time, line by
+    # line, with every borrowed line saying where it came from, and only into lists this device can
+    # honestly judge. The ₵12 expense queued above is folded in too, so the day's spending moves as
+    # well as its takings.
+    DARK_TITLE = "Funeral programmes"
+    DARK_QTY, DARK_RATE, DARKPAY = 20, 9.0, 100.0
+    DARK_TOTAL = round(DARK_QTY * DARK_RATE, 2)              # ₵180.00, priced the way the shop prices
+    DARK_BALANCE = round(DARK_TOTAL - DARKPAY, 2)            # ₵80.00 still owed once the deposit is in
+
+    dark_write = view(["open|/#/",
+                       "poll|!!document.querySelector('[data-action=\"new-job\"]')",
+                       "eval|window.__D='pending'; (async function(){ try {"
+                       " var c = await api('/api/clients'); var t = await api('/api/jobs', {method:'POST',"
+                       " body: JSON.stringify({title: '" + DARK_TITLE + "', category: 'Other',"
+                       " quantity: " + str(DARK_QTY) + ", unit_price: " + repr(DARK_RATE) + ","
+                       " status: 'Pending', client_id: c[0].id})});"
+                       " await api('/api/payments', {method:'POST', body: JSON.stringify({"
+                       " job_id: t.id, amount: " + repr(DARKPAY) + ", kind: 'Deposit', method: 'Cash'})});"
+                       " window.__D = 'queued:' + t.id;"
+                       " } catch (e) { window.__D = 'threw:' + (e && e.message); } })();",
+                       "poll|window.__D !== 'pending'",
+                       read("wrote: window.__D || ''")], tag="booking an order in the dark")
+    check("an order taken with the Mac off was put on this device's own queue",
+          str(dark_write.get("wrote") or "").startswith("queued:"), dark_write.get("wrote"))
+    check("and the shop's book still holds nothing of it",
+          scalar("SELECT count(*) FROM jobs WHERE title=?", (DARK_TITLE,)) == 0
+          and scalar("SELECT count(*) FROM payments") == 2,
+          "%d jobs, %d payments in the book" % (scalar("SELECT count(*) FROM jobs WHERE title=?",
+                                                      (DARK_TITLE,)),
+                                                scalar("SELECT count(*) FROM payments")))
+
+    dark_jobs = view(["open|#/jobs",
+                      "poll|(document.getElementById('networkStatus')||{}).textContent"
+                      ".indexOf('Connect')<0",
+                      "poll|(document.body.innerText||'').indexOf('\\u20B5')>=0",
+                      "eval|window.__G=[listIsPaintable(new URLSearchParams('status=open&kind=Job')),"
+                      " listIsPaintable(new URLSearchParams('status=open&kind=Job&q=vinyl')),"
+                      " listIsPaintable(new URLSearchParams('status=open&kind=Job&sort=due')),"
+                      " listIsPaintable(new URLSearchParams('status=open&kind=Job&paid=due'))];",
+                      "poll|Array.isArray(window.__G)",
+                      read(row_of(DARK_TITLE), shows(DARK_TITLE),
+                           "guard: window.__G")], tag="the jobs screen with the Mac off")
+    line = str(dark_jobs.get("row") or "")
+    check("the order booked in the dark is on the jobs screen",
+          dark_jobs.get("shows") is True and "no such row" not in line, line[:70])
+    check("and the line says the shop has not seen it yet", "Held on this device" in line, line[:70])
+    check("priced as the shop will price it — %d at %s" % (DARK_QTY, cash(DARK_RATE)),
+          cash(DARK_TOTAL) in line, line)
+    check("with the money handed over in the dark against it",
+          cash(DARKPAY) in line and cash(DARK_BALANCE) in line, line)
+    # A search, a sort or a money filter is the shop's own SQL over records that do not exist there
+    # yet, so a queued line is never dropped into a list this device cannot judge for it.
+    check("and only an unfiltered list is open to a line from this machine",
+          dark_jobs.get("guard") == [True, False, False, False], dark_jobs.get("guard"))
+
+    dark_dash = view(["open|/#/",
+                      "poll|(document.getElementById('networkStatus')||{}).textContent"
+                      ".indexOf('Connect')<0",
+                      "poll|(document.body.innerText||'').indexOf('\\u20B5')>=0",
+                      read(shows(DARK_TITLE), shows("Held on this device", "mark"))],
+                     tag="the dashboard with the Mac off")
+    was = amount((dark.get("kpi") or {}).get("Collected today"))
+    now = amount((dark_dash.get("kpi") or {}).get("Collected today"))
+    check("today's takings moved by exactly the money this device took",
+          was is not None and now == round(was + DARKPAY, 2), "%s → %s" % (was, now))
+    check("this month's spending by exactly the figure typed at the dark counter",
+          amount((dark_dash.get("kpi") or {}).get("Spent this month")) == DARK,
+          (dark_dash.get("kpi") or {}).get("Spent this month"))
+    check("and the shop is shown as owed the balance of the order booked in the dark",
+          amount((dark_dash.get("kpi") or {}).get("Owed to the shop")) == DARK_BALANCE,
+          (dark_dash.get("kpi") or {}).get("Owed to the shop"))
+    check("the order also shows on the dashboard itself, marked as this device's own",
+          dark_dash.get("shows") is True and dark_dash.get("mark") is True,
+          str(dark_dash.get("words") or "")[:70])
+
+    dark_accounts = view(["open|#/accounts",
+                          "poll|(document.getElementById('networkStatus')||{}).textContent"
+                          ".indexOf('Connect')<0",
+                          "poll|(document.body.innerText||'').indexOf('Payment ledger')>=0",
+                          read(row_of("Deposit", "payrow"), shows(DARK_TITLE))],
+                         tag="the accounts book with the Mac off")
+    accounts_kpi = dark_accounts.get("kpi") or {}
+    check("the accounts book counts the deposit taken in the dark",
+          amount(accounts_kpi.get("Received (this filter)")) == round(TAKEN + DARKPAY, 2),
+          accounts_kpi.get("Received (this filter)"))
+    check("and its ledger carries the money as this device's own, against the job it was taken for",
+          "Held on this device" in str(dark_accounts.get("payrow") or "")
+          and cash(DARKPAY) in str(dark_accounts.get("payrow") or "")
+          and dark_accounts.get("shows") is True,
+          str(dark_accounts.get("payrow") or "")[:80])
+
+    # A screen this device has nothing to add to must stay exactly as the shop sent it: the fold is
+    # one machine's own writes, not a licence to invent rows. Quotes and Ready are the two tabs the
+    # warm walk carries, and the order booked in the dark is neither.
+    for tab, label in (("?kind=Quote", "a quote list"), ("?status=Ready", "a ready-for-pickup list")):
+        offtab = view(["open|#/jobs" + tab,
+                       "poll|(document.getElementById('networkStatus')||{}).textContent"
+                       ".indexOf('Connect')<0",
+                       read(shows(DARK_TITLE))], tag=label + " with the Mac off")
+        check("%s is not given the device's job because it does not belong there" % label,
+              offtab.get("shows") is False, "%s on %s" % (offtab.get("shows"), tab))
+
+    # The fold happens as the screen is read. The copy the shop itself sent stays byte for byte what
+    # the shop sent, or the next outage would be guessing which figures were ever the shop's.
+    dark_raw = view(["open|/#/",
+                     "poll|!!document.querySelector('[data-action=\"new-job\"]')",
+                     "eval|window.__K='wait'; (async function(){ var rows = await offlineAll('responses');"
+                     " window.__K = rows.filter(function(r){ return String(r.key).indexOf('/api/jobs')===0;"
+                     " }).map(function(r){ return JSON.stringify(r.value).indexOf('" + DARK_TITLE +
+                     "') >= 0; }); })();",
+                     "poll|Array.isArray(window.__K)", read()], tag="the copy the shop sent")
+    check("and the showing never rewrote the copy the shop itself sent",
+          bool(dark_raw.get("keys")) and not any(dark_raw.get("keys")), dark_raw.get("keys"))
+
+    # A cashier who books an order in the dark will want to open it: read the lines back, take more
+    # money, move the due date. The shop's copy has no page for an order that only exists on this
+    # machine, so the sheet is built here — the same figures the list shows, and the money counted
+    # once, not once on the list and once again on the sheet.
+    drawer = view(["open|#/jobs",
+                   "poll|(document.body.innerText||'').indexOf('" + DARK_TITLE + "')>=0",
+                   "eval|window.__E=[]; window.addEventListener('error', function(e){ window.__E"
+                   ".push('err:' + (e.message||'?')); });"
+                   " window.addEventListener('unhandledrejection', function(e){ window.__E"
+                   ".push('rej:' + String(e && e.reason)); });"
+                   " var r=[].slice.call(document.querySelectorAll('tbody tr')).filter("
+                   "function(x){ return (x.innerText||'').indexOf('" + DARK_TITLE + "')>=0; })[0];"
+                   " window.__R = r ? (r.getAttribute('data-open')||'row without data-open') : 'no such row';"
+                   " if (r) r.click();",
+                   "eval|window.__O='wait'; setTimeout(function(){ var d = document.getElementById('drawer');"
+                   # Ten seconds, not one: with nobody home, opening a sheet first has to wait out
+                   # the bounded knock (SHOP_WAIT_MS) before the page falls back to this machine's
+                   # own copy. A cashier sees the sheet a few seconds late, not never.
+                   " window.__O = (d && !d.hidden) ? (d.innerText || '').replace(/\\s+/g, ' ') : 'no drawer'; }, 10000);",
+                   "poll|window.__O !== 'wait'",
+                   read("sheet: window.__O || ''",
+                        "diag: [window.__R, location.hash,"
+                        " (document.getElementById('drawer')||{hidden:'no #drawer'}).hidden,"
+                        " [].slice.call(document.querySelectorAll('#toasts .toast')).map(function(t){ return t.textContent; }),"
+                        " window.__E].join(' | ')")],
+                  tag="opening the order booked in the dark")
+    sheet = str(drawer.get("sheet") or "")
+    print("      the device's own sheet: %s" % (drawer.get("diag") or "nothing"))
+    check("the order booked in the dark opens as a job sheet on this device",
+          DARK_TITLE in sheet and "Held on this device" in sheet,
+          "%s · %s" % (sheet[:70], drawer.get("diag")))
+    check("priced once, with the money against it counted once",
+          cash(DARK_TOTAL) in sheet and cash(DARKPAY) in sheet
+          and cash(round(DARK_TOTAL + DARKPAY, 2)) not in sheet
+          and cash(DARK_BALANCE) in sheet, "%s · %s" % (sheet[:90], drawer.get("diag")))
 
     # ── 7. the Mac comes back ───────────────────────────────────────────────────────────────────
     proc = boot()
@@ -393,7 +595,7 @@ try:
                      "poll|!!document.querySelector('[data-action=\"new-job\"]')",
                      "poll|(document.getElementById('networkStatus')||{}).textContent"
                      ".indexOf('waiting')<0",
-                     "say|" + READ], tag="recovered")
+                     read()], tag="recovered")
         if back.get("ready") and scalar("SELECT count(*) FROM expenses") >= 1:
             break
         time.sleep(1.0)
@@ -405,36 +607,79 @@ try:
           back.get("status"))
     # The dashboard totals money rather than listing every payment, so the proof that the outage
     # payment is now on the screen is the combined takings appearing — a lone ₵90 was never a figure
-    # this screen would draw.
-    check("and the payment made during the outage is counted on it", TAKEN + LATER in figures(back),
-          back.get("money"))
+    # this screen would draw. The ₵100 this device took in the dark was replayed in the same pass, so
+    # the day's figure is the shop's two payments plus it.
+    check("and the payment made during the outage is counted on it",
+          TAKEN + LATER + DARKPAY in figures(back), back.get("money"))
+
+    # And the folded line has to hand over to the shop's own row without leaving both behind. Once the
+    # queue is empty there is nothing to fold, so the mark goes and the order appears exactly once —
+    # the counter must not see its own booking twice, or the day's takings read double.
+    check("the order booked in the dark is now in the shop's own book",
+          scalar("SELECT count(*) FROM jobs WHERE title=?", (DARK_TITLE,)) == 1,
+          "%d rows named %s" % (scalar("SELECT count(*) FROM jobs WHERE title=?", (DARK_TITLE,)),
+                                DARK_TITLE))
+    merged = view(["open|#/jobs",
+                   "poll|!!document.querySelector('[data-action=\"new-job\"]')",
+                   "poll|(document.getElementById('networkStatus')||{}).textContent"
+                   ".indexOf('Connect')>=0",
+                   "poll|(document.body.innerText||'').indexOf('\\u20B5')>=0",
+                   read(row_of(DARK_TITLE),
+                        "times: (document.body.innerText || '').split('" + DARK_TITLE +
+                        "').length - 1",
+                        "mark: (document.body.innerText || '').indexOf('Held on this device') >= 0")],
+                  tag="the jobs screen once the shop answers")
+    check("it shows once on the jobs screen — the device's line and the shop's row are not both there",
+          merged.get("times") == 1, merged.get("times"))
+    check("and the mark is off it now that the shop has seen the order",
+          merged.get("mark") is False, str(merged.get("row") or "")[:70])
+    check("the money taken in the dark is on the same line, as the shop's own",
+          cash(DARK_TOTAL) in str(merged.get("row") or "")
+          and cash(DARKPAY) in str(merged.get("row") or ""),
+          str(merged.get("row") or "")[:90])
 
     # ---------------------------------------------------------------- the cashier's two own presses
     # "Copy it now" is the manual backup the counter asks for: a checked copy on the shop's own disk
     # — and whatever second destination, mailbox or off-site repository the shop settled — rather
     # than a screen that merely claims it copied. Pressed from a machine on the Wi-Fi, not from the
     # Mac's own loopback, because that is where a cashier sits.
+    # The card may already name copies taken before this device ever looked at the shop — the clone
+    # starts life as a copy of the live book, history and all — so the wait is for a name that was
+    # not on the card a moment ago, and the note has to have changed to say so.
+    NAMES = "(document.body.innerText.match(/manual-\\d{8}-\\d{6}\\.db/g)||[])"
+    asked_before = scalar("SELECT count(*) FROM security_log WHERE kind='book_copied'")
+    note_before = scalar("SELECT value FROM app_state WHERE key='last_backup_note'")
     copied = view(["open|#/shop",
                    "poll|!!document.querySelector('[data-action=\"book-copy\"]')",
+                   "eval|window.__N0=" + NAMES + ".slice();",
+                   "poll|Array.isArray(window.__N0)",
                    "eval|document.querySelector('[data-action=\"book-copy\"]').click()",
-                   "poll|/manual-\\d{8}-\\d{6}\\.db/.test(document.body.innerText)",
-                   "say|JSON.stringify({names: (document.body.innerText.match("
-                   "/(manual|backup)-\\d{8}-\\d{6}\\.db/g)||[]).slice(0,8)})"],
+                   "poll|" + NAMES + ".filter(function(n){ return window.__N0.indexOf(n) < 0; }).length > 0",
+                   "say|JSON.stringify({fresh: " + NAMES +
+                   ".filter(function(n){ return window.__N0.indexOf(n) < 0; }).slice(0,3),"
+                   " already: window.__N0.slice(0,3)})"],
                   tag="pressing copy it now")
     folder = os.path.join(work, "Backups")
-    by_hand = sorted(n for n in os.listdir(folder) if n.startswith("manual-")) if os.path.isdir(folder) else []
-    on_card = copied.get("names") or []
+    # The stamped copy file itself, and nothing else that happens to be in the folder: a SQLite
+    # journal left lying there for a moment is not a copy of the book, and the shop's own listing
+    # says so with the same anchored name (STAMPED_BACKUP in server.py).
+    by_hand = sorted(n for n in os.listdir(folder)
+                     if re.match(r"^manual-\d{8}-\d{6}\.db$", n)) if os.path.isdir(folder) else []
+    on_card = copied.get("fresh") or []
     check("pressing the button wrote a copy asked for by hand into the shop's folder",
-          bool(by_hand) and by_hand[-1] in on_card,
-          "%s · %d kB · card reads %s" % (by_hand[-1] if by_hand else "nothing",
-                                          os.path.getsize(os.path.join(folder, by_hand[-1])) // 1024
-                                          if by_hand else 0, on_card[:2]))
+          bool(on_card) and bool(by_hand) and on_card[0] in by_hand,
+          "%s · %d kB · card's new name %s · %d already listed" % (
+              by_hand[-1] if by_hand else "nothing",
+              os.path.getsize(os.path.join(folder, by_hand[-1])) // 1024 if by_hand else 0,
+              on_card[:1], len(copied.get("already") or [])))
+    note_now = scalar("SELECT value FROM app_state WHERE key='last_backup_note'")
     check("and that copy was opened and counted, not just written",
-          "checked" in str((scalar("SELECT value FROM app_state WHERE key='last_backup_note'") or "")),
-          scalar("SELECT value FROM app_state WHERE key='last_backup_note'"))
+          "checked" in str(note_now or "") and str(note_now) != str(note_before),
+          note_now)
     check("and the book wrote down who asked for it",
-          scalar("SELECT count(*) FROM security_log WHERE kind='book_copied'") >= 1,
-          "%d copy asked for" % scalar("SELECT count(*) FROM security_log WHERE kind='book_copied'"))
+          scalar("SELECT count(*) FROM security_log WHERE kind='book_copied'") > asked_before,
+          "%d asked for, %d before the press" % (
+              scalar("SELECT count(*) FROM security_log WHERE kind='book_copied'"), asked_before))
 finally:
     try:
         proc.terminate()

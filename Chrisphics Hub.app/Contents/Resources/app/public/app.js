@@ -217,10 +217,10 @@ async function api(path, opts) {
          holds the screen or it says so at once instead of making the counter wait. */
       S.connected = false;
       paintNetworkStatus();
-      if (!held) throw new Error(NO_SAVED_COPY);
+      if (!held) return await heldOrGhost(key);
       const at = held.savedAt || 0;
       if (!S.bookAge || (at && at < S.bookAge)) S.bookAge = at;
-      return held.value;
+      return await paintPending(key, held.value);
     }
     try {
       const response = await (held ? knock(path, options) : fetch(path, options));
@@ -251,10 +251,10 @@ async function api(path, opts) {
           const at = held.savedAt || 0;
           if (!S.bookAge || (at && at < S.bookAge)) S.bookAge = at;
           paintNetworkStatus();
-          return held.value;
+          return await paintPending(key, held.value);
         }
         paintNetworkStatus();
-        throw new Error(NO_SAVED_COPY);
+        return await heldOrGhost(key);
       }
       throw error;
     }
@@ -276,7 +276,7 @@ async function api(path, opts) {
     const entry = {
       operationId: headers['X-Operation-Id'], method, path: key,
       body: payload, baseEtag: headers['If-Match'] || '',
-      tempId: method === 'POST' && /^\/api\/(clients|jobs|leads|expenses|payments|spoiled)$/.test(new URL(path, location.href).pathname)
+      tempId: method === 'POST' && /^\/api\/(clients|jobs|leads|expenses|payments|spoiled)(\/\d+\/convert)?$/.test(new URL(path, location.href).pathname)
         ? tempId : null,
       createdAt: new Date().toISOString(), sequence: nextOfflineSequence++, state: 'pending', error: '',
     };
@@ -475,10 +475,538 @@ async function syncOfflineQueue() {
     syncingOfflineQueue = false;
   }
 }
+/* ------------------------------------ what this device has written, painted
+   A photograph of the book is not the book. With the Mac off, the counter still takes orders and
+   still takes money, and until the shop answers again those figures live only in this machine's own
+   queue. Shown exactly as the shop last sent them, a job booked at ten is nowhere on the jobs screen
+   at eleven and the day's takings still read nothing — so every remembered screen is folded together
+   with what this device has written since. Every line that came from this machine says so, because a
+   number the shop has never seen must never be mistaken at the counter for one it has. */
+const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
+const OPEN_STATUSES = ['Pending', 'Printing', 'Ready'];
+const JOB_FIELDS = ['title', 'category', 'kind', 'status', 'priority', 'due_date', 'valid_until',
+  'quantity', 'unit', 'unit_price', 'extras', 'discount', 'size', 'description'];
+const CLIENT_FIELDS = ['name', 'phone', 'whatsapp', 'email', 'kind', 'address', 'notes',
+  'whatsapp_updates', 'email_updates'];
+const LEAD_FIELDS = ['name', 'phone', 'whatsapp', 'email', 'source', 'interest', 'value', 'stage',
+  'follow_up', 'note'];
+const HELD_ON_DEVICE = 'Held on this device';
+/* The mark a folded line wears. Two states, because they are two different facts: this line only
+   exists on this machine, or this line is the shop's own with money this machine is still holding. */
+const pendingTag = (row) => (row.pendingSync
+  ? ' <span class="pill s-Pending">' + esc(HELD_ON_DEVICE) + '</span>'
+  : (row.pendingMoney ? ' <span class="pill s-Pending">money held here</span>' : ''));
+/* A refund takes money back out of every figure it touches, so it travels as a negative delta. */
+function payDelta(body) {
+  const amount = Number((body || {}).amount || 0);
+  return String((body || {}).kind) === 'Refund' ? -amount : amount;
+}
+/* The shop's own price maths, run here so a job booked in the dark shows the figure it will carry
+   the moment the Mac answers: item lines first, otherwise the header quantity at its price, plus
+   extras, less the discount, and never below nothing. */
+function priceOf(payload) {
+  const P = payload || {};
+  const lines = Array.isArray(P.items) ? P.items : [];
+  const gross = lines.length
+    ? lines.reduce((a, l) => a + (Number(l && l.quantity) || 0) * (Number(l && l.unit_price) || 0), 0)
+    : (Number(P.quantity) || 0) * (Number(P.unit_price) || 0);
+  return round2(Math.max(gross + (Number(P.extras) || 0) - (Number(P.discount) || 0), 0));
+}
+async function pendingWrites() {
+  let rows;
+  try { rows = await offlineAll('outbox'); } catch (e) { return []; }
+  return rows.filter((r) => r && r.state === 'pending' && r.body)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) ||
+      (Number(a.sequence) || 0) - (Number(b.sequence) || 0));
+}
+/* The queue keeps the address a write was aimed at; this turns it back into the few shapes a screen
+   can fold in. Everything else in the queue — a note, a send, a delete, a settings press — changes no
+   figure this device could paint, so it stays named on the Pending sync screen and nowhere else. */
+function writeShape(entry) {
+  const parts = String(entry.path || '').split('?')[0].split('/').filter(Boolean);
+  const id = Number(parts[2]);
+  const sub = parts[3];
+  const onRecord = parts.length >= 3 && isFinite(id);
+  if (parts[1] === 'jobs') {
+    if (entry.method === 'POST' && parts.length === 2) return { kind: 'job-new' };
+    if (entry.method === 'PUT' && onRecord) return { kind: 'job-edit', id: id };
+    if (entry.method === 'POST' && onRecord && sub === 'status') return { kind: 'job-status', id: id };
+    if (entry.method === 'POST' && onRecord && sub === 'payment') return { kind: 'pay-new', jobId: id };
+    if (entry.method === 'POST' && onRecord && sub === 'convert') return { kind: 'quote-convert', id: id };
+  }
+  if (parts[1] === 'payments' && entry.method === 'POST') return { kind: 'pay-new' };
+  if (parts[1] === 'clients') {
+    if (entry.method === 'POST' && parts.length === 2) return { kind: 'client-new' };
+    if (entry.method === 'PUT' && onRecord) return { kind: 'client-edit', id: id };
+  }
+  if (parts[1] === 'leads') {
+    if (entry.method === 'POST' && parts.length === 2) return { kind: 'lead-new' };
+    if (entry.method === 'PUT' && onRecord) return { kind: 'lead-edit', id: id };
+    if (entry.method === 'POST' && onRecord && sub === 'convert') return { kind: 'lead-convert', id: id };
+  }
+  if (parts[1] === 'expenses' && entry.method === 'POST' && parts.length === 2) return { kind: 'expense-new' };
+  return null;
+}
+function fieldPatch(P, fields) {
+  const patch = {};
+  fields.forEach((k) => { if (P[k] !== undefined) patch[k] = P[k]; });
+  return patch;
+}
+function pendingJobRow(tempId, createdAt, P, who) {
+  const total = priceOf(P);
+  const quote = P.kind === 'Quote';
+  return {
+    id: tempId, ref: HELD_ON_DEVICE, kind: quote ? 'Quote' : 'Job',
+    title: P.title || (quote ? 'Quote written on this device' : 'Job written on this device'),
+    category: P.category || '', status: P.status || 'Pending', priority: P.priority || 'Normal',
+    due_date: P.due_date || null, valid_until: P.valid_until || null, converted_at: null,
+    quantity: P.quantity || 0, unit: P.unit || '', unit_price: P.unit_price || 0,
+    extras: P.extras || 0, discount: P.discount || 0, size: P.size || '',
+    description: P.description || '', client_id: P.client_id || null,
+    client: (who && who.name) || 'client not on file yet', client_phone: (who && who.phone) || '',
+    total: total, paid: 0, balance: total, cost: 0, profit: 0,
+    item_count: Array.isArray(P.items) ? P.items.length : 0, to_send: 0,
+    created_at: createdAt, updated_at: createdAt,
+    items: Array.isArray(P.items) ? P.items.slice() : [], payments: [], expenses: [],
+    spoilage: [], events: [], pendingSync: true,
+  };
+}
+async function buildShadow() {
+  const writes = await pendingWrites();
+  const sh = { count: writes.length, jobs: [], clients: [], leads: [], expenses: [], payments: [],
+    jobFields: {}, clientFields: {}, leadFields: {} };
+  if (!writes.length) return sh;
+  const heldClients = (await offlineRead('responses', '/api/clients')) || {};
+  const heldLeads = (await offlineRead('responses', '/api/leads?stage=open')) || {};
+  const clientRows = Array.isArray(heldClients.value) ? heldClients.value : [];
+  const leadRows = (heldLeads && Array.isArray(heldLeads.rows) ? heldLeads.rows : []).slice();
+  const nameOf = (id) => {
+    const hit = clientRows.concat(sh.clients).filter((c) => c.id === id && id)[0];
+    return hit ? { name: hit.name, phone: hit.phone || '' } : null;
+  };
+  for (const entry of writes) {
+    const shape = writeShape(entry);
+    if (!shape) continue;
+    const P = entry.body || {};
+    if (shape.kind === 'job-new') { sh.jobs.push(pendingJobRow(entry.tempId, entry.createdAt, P, nameOf(P.client_id))); continue; }
+    if (shape.kind === 'lead-convert' && entry.tempId) {
+      const lead = leadRows.concat(sh.leads).filter((l) => l.id === shape.id)[0] || {};
+      sh.jobs.push(pendingJobRow(entry.tempId, entry.createdAt,
+        Object.assign({ kind: 'Job', status: 'Pending' }, P, { client_id: lead.client_id || null }),
+        nameOf(lead.client_id)));
+      continue;
+    }
+    if (shape.kind === 'job-edit' || shape.kind === 'job-status') {
+      const patch = fieldPatch(P, JOB_FIELDS);
+      const priced = ['items', 'quantity', 'unit_price', 'extras', 'discount'].some((k) => P[k] !== undefined);
+      if (priced) patch.total = priceOf(Object.assign({}, (sh.jobs.filter((j) => j.id === shape.id)[0] || {}), P));
+      sh.jobFields[shape.id] = Object.assign(sh.jobFields[shape.id] || {}, patch);
+      continue;
+    }
+    if (shape.kind === 'quote-convert') {
+      sh.jobFields[shape.id] = Object.assign(sh.jobFields[shape.id] || {},
+        { kind: 'Job', status: P.status || 'Pending', converted_at: entry.createdAt });
+      continue;
+    }
+    if (shape.kind === 'client-new') {
+      sh.clients.push(Object.assign({ id: entry.tempId, archived: 0, jobs: 0, active_jobs: 0,
+        billed: 0, received: 0, balance_due: 0, open_job_balance: 0, account_credit: 0,
+        open_quotes: 0, last_job: null, created_at: entry.createdAt, pendingSync: true },
+        fieldPatch(P, CLIENT_FIELDS)));
+      continue;
+    }
+    if (shape.kind === 'client-edit') { sh.clientFields[shape.id] = Object.assign(sh.clientFields[shape.id] || {}, fieldPatch(P, CLIENT_FIELDS)); continue; }
+    if (shape.kind === 'lead-new') {
+      sh.leads.push(Object.assign({ id: entry.tempId, client: '', job_id: null, ref: null,
+        job_title: null, closed_at: null, created_at: entry.createdAt, updated_at: entry.createdAt,
+        days_to_follow: null, pendingSync: true }, fieldPatch(P, LEAD_FIELDS)));
+      continue;
+    }
+    if (shape.kind === 'lead-edit') { sh.leadFields[shape.id] = Object.assign(sh.leadFields[shape.id] || {}, fieldPatch(P, LEAD_FIELDS)); continue; }
+    if (shape.kind === 'expense-new') {
+      sh.expenses.push({ id: entry.tempId, amount: Number(P.amount) || 0, category: P.category || 'Other',
+        payee: P.payee || '', method: P.method || 'Cash', spent_on: P.spent_on || day10(entry.createdAt),
+        reference: P.reference || '', job_id: P.job_id ? Number(P.job_id) : null, note: P.note || '',
+        ref: null, job_title: null, is_spoilage: 0, created_at: entry.createdAt, pendingSync: true });
+      continue;
+    }
+    if (shape.kind === 'pay-new') {
+      const jobId = shape.jobId !== undefined ? shape.jobId
+        : (P.job_id === '' || P.job_id === null || P.job_id === undefined ? null : Number(P.job_id));
+      const onDevice = jobId === null ? null : sh.jobs.filter((j) => j.id === jobId)[0];
+      let clientId = P.client_id ? Number(P.client_id) : null;
+      if (onDevice) clientId = onDevice.client_id;
+      else if (jobId !== null && !clientId) {
+        /* The money names a job, and it is the job that says whose money it is. The walk carries each
+           live job's own sheet, so that is where the name comes from when the queue does not say it.
+           The body sent to the shop is left exactly as it was typed: the book works the client off
+           the job itself, and this is only ever about what to show on the screen meanwhile. */
+        const sheet = (await offlineRead('responses', '/api/jobs/' + jobId) || {}).value;
+        if (sheet && sheet.client_id) clientId = sheet.client_id;
+      }
+      sh.payments.push({ id: entry.tempId || -Math.abs(Number(entry.sequence) || 1) - 1000000,
+        jobId: jobId, clientId: clientId,
+        delta: payDelta(P), amount: Number(P.amount) || 0, kind: P.kind || 'Payment',
+        method: P.method || 'Cash', reference: P.reference || '', note: P.note || '',
+        paid_at: P.paid_at || entry.createdAt, job: onDevice || null,
+        createdAt: entry.createdAt, pendingSync: true });
+    }
+  }
+  const names = {};
+  clientRows.concat(sh.clients).forEach((c) => { names[c.id] = { name: c.name, phone: c.phone || '' }; });
+  sh.names = names;
+  /* Money handed over against an order this device booked belongs on that order's own line. The shop
+     works a job's paid figure off every payment naming it, so a line showing ₵180 billed with ₵100
+     taken against it would be wrong twice at the counter: the balance it shows, and every account
+     figure worked off that balance afterwards. */
+  sh.jobs.forEach((j) => {
+    const delta = moneyOnJob(sh, j.id);
+    if (!delta) return;
+    j.paid = round2(Number(j.paid || 0) + delta);
+    j.balance = round2(Number(j.total || 0) - j.paid);
+  });
+  return sh;
+}
+const moneyOnJob = (sh, id) => sh.payments.filter((p) => p.jobId === id).reduce((a, p) => a + p.delta, 0);
+const moneyOnClient = (sh, id) => sh.payments.filter((p) => p.clientId === id).reduce((a, p) => a + p.delta, 0);
+const creditOnClient = (sh, id) => sh.payments.filter((p) => p.clientId === id && p.jobId === null)
+  .reduce((a, p) => a + p.delta, 0);
+/* One remembered job, read as it now stands on this device: an edit, then the money handed over
+   against it. A job this device booked itself needs no fold — it was built that way. */
+function paintJobRow(j, sh) {
+  if (j.pendingSync) return j;
+  const patch = sh.jobFields[j.id];
+  if (patch) Object.keys(patch).forEach((k) => { j[k] = patch[k]; });
+  const delta = moneyOnJob(sh, j.id);
+  if (delta) {
+    j.paid = round2(Number(j.paid || 0) + delta);
+    j.balance = round2(Number(j.total || 0) - j.paid);
+    j.pendingMoney = true;
+  } else if (patch && patch.total !== undefined) {
+    j.balance = round2(Number(patch.total) - Number(j.paid || 0));
+    j.pendingMoney = true;
+  }
+  return j;
+}
+function pendingJobRows(sh) { return sh.jobs.slice().reverse(); }
+function jobsMatchFilter(j, kind, status) {
+  if (kind && String(j.kind) !== String(kind)) return false;
+  if (status === 'all' || !status) return true;
+  if (status === 'open') return OPEN_STATUSES.indexOf(j.status) >= 0;
+  return String(j.status) === String(status);
+}
+/* A queued line is only dropped into a list the shop filtered in ways this device can still judge.
+   A search, a date window, a category or a "still owing" tab is the shop's own SQL over records that
+   do not exist yet, so those screens stay as they were rather than show a row that may not belong. */
+function listIsPaintable(query) {
+  return !['q', 'from', 'to', 'category', 'overdue', 'debtors', 'paid', 'client', 'sort'].
+    some((k) => query.get(k));
+}
+function paintJobsList(rows, sh, query) {
+  rows.forEach((j) => paintJobRow(j, sh));
+  if (!listIsPaintable(query)) return rows;
+  const extra = pendingJobRows(sh).filter((j) => jobsMatchFilter(j, query.get('kind') || 'Job',
+    query.get('status') || 'open'));
+  return extra.concat(rows);
+}
+function paintClientRow(c, sh) {
+  if (c.pendingSync) return c;
+  const patch = sh.clientFields[c.id];
+  if (patch) Object.keys(patch).forEach((k) => { c[k] = patch[k]; });
+  const booked = sh.jobs.filter((j) => j.client_id === c.id);
+  const money = moneyOnClient(sh, c.id);
+  if (!booked.length && !money) return c;
+  booked.forEach((j) => {
+    c.jobs = (c.jobs || 0) + 1;
+    if (j.kind === 'Quote') { c.open_quotes = (c.open_quotes || 0) + 1; return; }
+    c.active_jobs = (c.active_jobs || 0) + 1;
+    c.billed = round2(Number(c.billed || 0) + j.total);
+    c.open_job_balance = round2(Number(c.open_job_balance || 0) + j.balance);
+    c.last_job = j.created_at;
+  });
+  if (money) {
+    c.received = round2(Number(c.received || 0) + money);
+    c.account_credit = round2(Number(c.account_credit || 0) + creditOnClient(sh, c.id));
+    c.pendingMoney = true;
+  }
+  c.balance_due = round2(Number(c.open_job_balance || 0) - Number(c.account_credit || 0));
+  return c;
+}
+function paintClients(list, sh, append) {
+  const painted = list.map((c) => paintClientRow(c, sh));
+  return append ? sh.clients.slice().reverse().concat(painted) : painted;
+}
+/* What the shop is owed: every client's job balances, less the money they left on their account, and
+   never below nothing for a client who has paid up. Same rule the book itself works to. */
+const outstandingFrom = (clients) => round2(clients
+  .filter((c) => !c.archived)
+  .reduce((a, c) => a + Math.max(Number(c.balance_due || 0), 0), 0));
+function paintLeads(d, sh) {
+  if (!d || !Array.isArray(d.rows)) return d;
+  d.rows.forEach((l) => {
+    if (l.pendingSync) return;
+    const patch = sh.leadFields[l.id];
+    if (patch) Object.keys(patch).forEach((k) => { l[k] = patch[k]; });
+  });
+  const openOf = (l) => l.stage !== 'Won' && l.stage !== 'Lost';
+  d.rows = (sh.leads.slice().reverse()).concat(d.rows);
+  d.count = d.rows.length;
+  const stages = {};
+  d.rows.filter(openOf).forEach((l) => {
+    const hit = stages[l.stage] || (stages[l.stage] = { stage: l.stage, n: 0, value: 0 });
+    hit.n += 1; hit.value = round2(hit.value + (Number(l.value) || 0));
+  });
+  d.pipeline = Object.keys(stages).map((k) => stages[k]);
+  const t = d.totals || {};
+  t.total = (Number(t.total) || 0) + sh.leads.length;
+  t.open = d.rows.filter(openOf).length;
+  t.open_value = round2(d.rows.filter(openOf).reduce((a, l) => a + (Number(l.value) || 0), 0));
+  t.due_today = d.rows.filter((l) => openOf(l) && l.follow_up && day10(l.follow_up) <= todayISO()).length;
+  d.totals = t;
+  return d;
+}
+function paintExpenses(d, sh) {
+  if (!d || !Array.isArray(d.rows)) return d;
+  const monthStart = todayISO().slice(0, 8) + '01';
+  const week = weekStart();
+  d.rows = sh.expenses.slice().reverse().concat(d.rows);
+  d.count = d.rows.length;
+  d.total = round2(d.rows.reduce((a, e) => a + Number(e.amount || 0), 0));
+  const t = d.totals || {};
+  sh.expenses.forEach((e) => {
+    const amount = Number(e.amount) || 0;
+    t.all_time = round2((Number(t.all_time) || 0) + amount);
+    if (day10(e.spent_on) >= monthStart) t.this_month = round2((Number(t.this_month) || 0) + amount);
+    if (day10(e.spent_on) >= week) t.this_week = round2((Number(t.this_week) || 0) + amount);
+    t[e.job_id ? 'on_jobs' : 'overhead'] = round2((Number(t[e.job_id ? 'on_jobs' : 'overhead']) || 0) + amount);
+  });
+  d.totals = t;
+  if (Array.isArray(d.by_category)) {
+    sh.expenses.forEach((e) => {
+      if (day10(e.spent_on) < monthStart) return;
+      const hit = d.by_category.filter((c) => c.category === e.category)[0];
+      if (hit) { hit.n += 1; hit.amount = round2(hit.amount + Number(e.amount || 0)); }
+      else d.by_category.push({ category: e.category, n: 1, amount: round2(Number(e.amount || 0)) });
+    });
+    d.by_category.sort((a, b) => b.amount - a.amount);
+  }
+  return d;
+}
+async function paintDashboard(d, sh) {
+  const k = d.kpi, today = day10(d.today), monthStart = today.slice(0, 8) + '01';
+  const week = (d.trend && d.trend.length) ? d.trend[Math.max(0, d.trend.length - 7)].day : weekStart();
+  const bumpDay = (field, day, amount) => {
+    const hit = (d.trend || []).filter((x) => x.day === day)[0];
+    if (hit) hit[field] = round2(Number(hit[field] || 0) + amount);
+  };
+  sh.jobs.forEach((j) => {
+    const day = day10(j.created_at);
+    if (j.kind === 'Quote') { k.open_quotes += 1; k.quoted_value = round2(k.quoted_value + j.total); return; }
+    if (day === today) k.jobs_today += 1;
+    if (day >= week) k.jobs_week += 1;
+    if (OPEN_STATUSES.indexOf(j.status) >= 0) k.open_jobs += 1;
+    if (j.status === 'Ready') k.ready_jobs += 1;
+    if (j.due_date && day10(j.due_date) < today && j.status !== 'Delivered' && j.status !== 'Cancelled') k.overdue_jobs += 1;
+    if (day >= monthStart) k.billed_month = round2(k.billed_month + j.total);
+    bumpDay('new_jobs', day, 1);
+    const by = d.by_status || {};
+    if (OPEN_STATUSES.indexOf(j.status) >= 0) by[j.status] = (by[j.status] || 0) + 1;
+    d.by_status = by;
+  });
+  sh.payments.forEach((p) => {
+    const day = day10(p.paid_at);
+    if (day === today) k.collected_today = round2(k.collected_today + p.delta);
+    if (day >= week) k.collected_week = round2(k.collected_week + p.delta);
+    if (day >= monthStart) k.collected_month = round2(k.collected_month + p.delta);
+    if (p.kind === 'Refund') k.refunds_total = round2(k.refunds_total + Number(p.amount || 0));
+    bumpDay('collected', day, p.delta);
+  });
+  sh.expenses.forEach((e) => { if (day10(e.spent_on) >= monthStart) k.spent_month = round2(k.spent_month + Number(e.amount || 0)); });
+  sh.clients.forEach(() => { k.clients += 1; });
+  sh.leads.forEach((l) => {
+    if (l.stage === 'Won' || l.stage === 'Lost') return;
+    k.open_leads += 1;
+    k.pipeline_value = round2(k.pipeline_value + (Number(l.value) || 0));
+    if (l.follow_up && day10(l.follow_up) <= today) k.leads_due += 1;
+  });
+  d.recent = paintJobsList(d.recent || [], sh, new URLSearchParams('status=all'));
+  d.overdue = paintJobsList(d.overdue || [], sh, new URLSearchParams('kind=Job&status=all'))
+    .filter((j) => j.due_date && day10(j.due_date) < today);
+  d.quotes = paintJobsList(d.quotes || [], sh, new URLSearchParams('kind=Quote&status=open'));
+  /* The money a client still owes is worked off the client book rather than guessed at: the shop's own
+     figure nets each client's account credit against their job balances, one client at a time. */
+  const held = await offlineRead('responses', '/api/clients');
+  if (held && Array.isArray(held.value)) {
+    const clients = paintClients(JSON.parse(JSON.stringify(held.value)), sh, true);
+    k.outstanding = outstandingFrom(clients);
+    d.debtors = clients.filter((c) => !c.archived && Number(c.balance_due) > 0.005)
+      .map((c) => ({ id: c.id, name: c.name, phone: c.phone, owed: round2(c.balance_due), jobs: c.jobs || 0 }))
+      .sort((a, b) => b.owed - a.owed).slice(0, 8);
+  }
+  return d;
+}
+async function paintAccounts(d, sh) {
+  const today = todayISO();
+  const monthStart = today.slice(0, 8) + '01';
+  const ledger = d.ledger || {};
+  const added = sh.payments.slice().reverse().map((p) => ({
+    id: p.id, amount: p.amount, kind: p.kind, method: p.method, reference: p.reference,
+    paid_at: p.paid_at, client_id: p.clientId,
+    client: p.job ? p.job.client
+      : ((nameOfCached(sh, p.clientId) || {}).name || 'money kept on an account'),
+    job_id: p.jobId, ref: p.job ? p.job.ref : null, title: p.job ? p.job.title : null,
+    pendingSync: true,
+  }));
+  ledger.rows = added.concat(ledger.rows || []);
+  ledger.count = (Number(ledger.count) || 0) + added.length;
+  ledger.total = round2(Number(ledger.total || 0) + sh.payments.reduce((a, p) => a + p.delta, 0));
+  d.ledger = ledger;
+  const held = {};
+  d.credit = (d.credit || []).map((c) => {
+    const money = creditOnClient(sh, c.id);
+    if (money) { c.credit = round2(Number(c.credit) + money); c.pendingMoney = true; }
+    return c;
+  });
+  sh.payments.filter((p) => p.jobId === null && p.clientId).forEach((p) => {
+    if (d.credit.filter((c) => c.id === p.clientId)[0]) return;
+    const who = nameOfCached(sh, p.clientId);
+    if (who) d.credit.push({ id: p.clientId, name: who.name, phone: who.phone || '',
+      credit: creditOnClient(sh, p.clientId), pendingSync: true });
+  });
+  d.credit.forEach((c) => { if (c.credit > 0) held[c.id] = c.credit; });
+  const debtors = (d.debtors || []).map((j) => paintJobRow(j, sh)).filter((j) => j.balance > 0.005);
+  const settledNow = [];
+  (d.debtors || []).forEach((j) => {
+    if (j.balance <= 0.005) { j.settled_on = j.settled_on || day10(j.updated_at || today); settledNow.push(j); }
+  });
+  sh.jobs.filter((j) => j.kind === 'Job' && j.status !== 'Cancelled').forEach((j) => {
+    const row = Object.assign({}, j, { phone: j.client_phone });
+    if (row.balance > 0.005) debtors.push(row); else settledNow.push(Object.assign(row, { settled_on: day10(today) }));
+  });
+  const avail = {};
+  Object.keys(held).forEach((k) => { avail[k] = held[k]; });
+  debtors.forEach((j) => {
+    const have = Number(avail[j.client_id] || 0);
+    j.covered_by_credit = round2(Math.min(have, Number(j.balance)));
+    j.still_owed = round2(Number(j.balance) - j.covered_by_credit);
+    avail[j.client_id] = round2(have - j.covered_by_credit);
+  });
+  debtors.sort((a, b) => Number(b.balance) - Number(a.balance));
+  d.debtors = debtors.slice(0, 500);
+  d.settled = settledNow.concat(d.settled || []);
+  const totals = d.totals || {};
+  totals.overdue_value = round2(debtors.filter((j) => j.due_date && day10(j.due_date) < today &&
+    j.status !== 'Delivered' && j.status !== 'Cancelled').reduce((a, j) => a + Number(j.balance), 0));
+  const book = await offlineRead('responses', '/api/clients');
+  if (book && Array.isArray(book.value)) {
+    totals.receivable = outstandingFrom(paintClients(JSON.parse(JSON.stringify(book.value)), sh, true));
+  }
+  d.totals = totals;
+  const spent = d.spent_total || {};
+  sh.expenses.forEach((e) => {
+    spent.all_time = round2((Number(spent.all_time) || 0) + Number(e.amount || 0));
+    if (day10(e.spent_on) >= monthStart) spent.this_month = round2((Number(spent.this_month) || 0) + Number(e.amount || 0));
+  });
+  d.spent_total = spent;
+  return d;
+}
+async function paintBootstrap(b, sh) {
+  const counts = b.counts || {};
+  sh.jobs.forEach((j) => {
+    if (j.kind === 'Quote') { b.open_quotes = (Number(b.open_quotes) || 0) + 1; return; }
+    counts[j.status] = (Number(counts[j.status]) || 0) + 1;
+    if (OPEN_STATUSES.indexOf(j.status) >= 0) b.open_jobs = (Number(b.open_jobs) || 0) + 1;
+  });
+  b.counts = counts;
+  if (sh.leads.length) b.open_leads = (Number(b.open_leads) || 0) + sh.leads.length;
+  return b;
+}
+/* A record this device made has no page in the shop's copy at all, so it is built here instead of
+   refused: the same figures the list shows, with the money handed over against it folded in. */
+async function pendingGhost(key) {
+  const path = String(key).split('?')[0];
+  const jobHit = path.match(/^\/api\/jobs\/(-\d+)$/);
+  const noteHit = path.match(/^\/api\/jobs\/(-\d+)\/notifications$/);
+  const clientHit = path.match(/^\/api\/clients\/(-\d+)$/);
+  const leadHit = path.match(/^\/api\/leads\/(-\d+)$/);
+  if (!jobHit && !noteHit && !clientHit && !leadHit) return null;
+  const sh = await buildShadow();
+  if (!sh.count) return null;
+  /* The sheet asks for the message card in the shop's own shape, so an order the shop has not seen
+     answers in that same shape with nothing in it: the messages are written by the book when the
+     order arrives there, so until the Mac answers again there genuinely are none. */
+  if (noteHit) return { messages: [], client: null, events: [], whatsapp_to: null, email_to: null,
+    missing: [], to_send: 0, not_consented: [], blocked: [] };
+  if (jobHit) {
+    const hit = sh.jobs.filter((j) => j.id === Number(jobHit[1]))[0];
+    if (!hit) return null;
+    /* The money is already on this line: buildShadow folded every payment naming the order into its
+       paid figure and balance when the order was built. The sheet only has to list the payments
+       themselves now, or a ₵100 deposit would read as ₵200 the moment the cashier opened the job. */
+    hit.payments = sh.payments.filter((p) => p.jobId === hit.id).map((p) => ({
+      id: p.id, amount: p.amount, kind: p.kind, method: p.method, reference: p.reference,
+      paid_at: p.paid_at, note: p.note, job_id: p.jobId, client_id: p.clientId, pendingSync: true,
+    }));
+    return hit;
+  }
+  if (clientHit) {
+    const hit = sh.clients.filter((c) => c.id === Number(clientHit[1]))[0];
+    if (!hit) return null;
+    return Object.assign({}, hit, {
+      jobs: sh.jobs.filter((j) => j.client_id === hit.id),
+      payments: sh.payments.filter((p) => p.clientId === hit.id),
+    });
+  }
+  const lead = sh.leads.filter((l) => l.id === Number(leadHit[1]))[0];
+  return lead || null;
+}
+/* An address with a negative record number names something only this device knows about, so it is
+   built from the queue rather than refused; anything else with nothing remembered is said plainly. */
+async function heldOrGhost(key) {
+  const ghost = await pendingGhost(key);
+  if (ghost) return ghost;
+  if (/\/-\d+/.test(String(key).split('?')[0])) {
+    throw new Error('That record is kept on this device — its full sheet comes once the shop’s Mac answers again.');
+  }
+  throw new Error(NO_SAVED_COPY);
+}
+function nameOfCached(sh, id) {
+  const hit = (sh.names || {})[id];
+  return hit && hit.name ? hit : null;
+}
+/* The one door every remembered screen goes through. A fold that cannot be made must not cost the
+   counter the screen: the remembered figures paint as they are and the queue stays named on Sync. */
+async function paintPending(key, value) {
+  let sh;
+  try { sh = await buildShadow(); } catch (e) { return value; }
+  try { sh = await buildShadow(); } catch (e) { return value; }
+  if (!sh || !sh.count || !value) return value;
+  const path = String(key).split('?')[0];
+  const query = new URLSearchParams(String(key).split('?')[1] || '');
+  try {
+    if (path === '/api/jobs' && Array.isArray(value)) return paintJobsList(value, sh, query);
+    if (/^\/api\/jobs\/\d+$/.test(path)) { paintJobRow(value, sh); return value; }
+    if (path === '/api/clients' && Array.isArray(value)) return paintClients(value, sh, !listIsPaintable(query));
+    if (/^\/api\/clients\/\d+$/.test(path)) {
+      paintClientRow(value, sh);
+      value.jobs = pendingJobRows(sh).filter((j) => j.client_id === value.id).concat(value.jobs || []);
+      return value;
+    }
+    if (path === '/api/dashboard') return await paintDashboard(value, sh);
+    if (path === '/api/accounts') return await paintAccounts(value, sh);
+    if (path === '/api/leads') return paintLeads(value, sh);
+    if (path === '/api/expenses') return paintExpenses(value, sh);
+    if (path === '/api/bootstrap') return await paintBootstrap(value, sh);
+  } catch (e) { return value; }
+  return value;
+}
 function toast(msg, kind) {
   if (S.offlineQueuedToast) {
     S.offlineQueuedToast = false;
-    msg = 'Saved on this device; waiting to sync when connected to the shop.';
+    /* The change is kept here, but it is not invisible: every screen this device can judge already
+       carries it, wearing the mark. Saying only "waiting to sync" leaves a cashier who has just taken
+       money hunting the takings figure for something the screen is already showing. */
+    msg = 'Saved on this device — it is on the screens, marked Held on this device, until the shop answers.';
     kind = 'good';
   }
   const t = document.createElement('div');
@@ -1424,7 +1952,7 @@ function cardTable(title, action, body, heads) {
 function jobRows(rows) {
   if (!rows.length) return '<tr><td colspan="5" class="hint">Nothing here yet.</td></tr>';
   return rows.map((j) => '<tr data-open="jobs/' + j.id + '">' +
-    '<td>' + qe('jobs/' + j.id + '/title', j.title, '<span class="strong">' + esc(j.title) + '</span>') + kindTag(j) +
+    '<td>' + qe('jobs/' + j.id + '/title', j.title, '<span class="strong">' + esc(j.title) + '</span>') + kindTag(j) + pendingTag(j) +
     ' ' + qe('jobs/' + j.id + '/priority', j.priority || 'Normal',
       j.priority === 'Urgent' ? prio('Urgent') : '<span class="pill quiet">normal</span>') +
     '<div class="ref">' + esc(j.category) + ' · ' + esc(j.client) +
@@ -1486,7 +2014,7 @@ async function viewJobs(r) {
     (quoted ? '' : '<th class=num>Paid</th><th class=num>Balance</th><th class=num>Profit</th>') +
     '<th>Status</th><th>' + (quoted ? 'Validity' : 'Due') + '</th></tr></thead>' +
     '<tbody>' + (rows.length ? rows.map((j) => '<tr data-open="jobs/' + j.id + '">' +
-      '<td><span class="strong">' + esc(j.title) + '</span>' + prio(j.priority) +
+      '<td><span class="strong">' + esc(j.title) + '</span>' + prio(j.priority) + pendingTag(j) +
       (j.item_count > 1 ? ' <span class="pill i-lines">' + j.item_count + ' lines</span>' : '') +
       '<div class="ref">' + esc(j.ref) + ' · ' + esc(j.category) + ' · booked ' + fdate(j.created_at) + '</div>' +
       (j.size ? '<div class="ref">' + esc(j.size) + '</div>' : '') +
@@ -1529,7 +2057,7 @@ async function viewClients(r) {
   $('#view').innerHTML = '<div class="card"><div class="tablewrap"><table><thead><tr><th>Client</th><th>Contact</th>' +
     '<th class=num>Jobs</th><th class=num>Billed</th><th class=num>Received</th><th class=num>Balance due</th><th>Last job</th></tr></thead><tbody>' +
     (rows.length ? rows.map((c) => '<tr data-open="clients/' + c.id + '">' +
-      '<td><span class="strong">' + esc(c.name) + '</span><div class="ref">' + esc(c.kind) +
+      '<td><span class="strong">' + esc(c.name) + '</span>' + pendingTag(c) + '<div class="ref">' + esc(c.kind) +
       (c.archived ? ' · archived' : '') + '</div></td>' +
       '<td>' + (c.phone ? esc(c.phone) : '<span class="hint">no phone</span>') +
       (c.email ? '<div class="ref">' + esc(c.email) + '</div>' : '') + '</td>' +
@@ -1577,7 +2105,7 @@ async function viewLeads(r) {
     '<div class="card"><div class="tablewrap"><table><thead><tr><th>Who asked</th><th>Contact</th>' +
     '<th>What they want</th><th>Source</th><th class=num>Est. value</th><th>Stage</th><th>Follow up</th><th></th></tr></thead><tbody>' +
     (d.rows.length ? d.rows.map((l) => '<tr data-open-lead="' + l.id + '">' +
-      '<td><span class="strong">' + esc(l.name) + '</span>' +
+      '<td><span class="strong">' + esc(l.name) + '</span>' + pendingTag(l) +
       (l.client ? '<div class="ref"><a href="#/clients/' + l.client_id + '">' + esc(l.client) + '</a></div>' : '<div class="ref">not on file yet</div>') + '</td>' +
       '<td>' + (l.phone ? '<a href="tel:' + esc(l.phone) + '">' + esc(l.phone) + '</a>' : '<span class="hint">no phone</span>') +
       (l.whatsapp && l.whatsapp !== l.phone ? '<div class="ref">WA ' + esc(l.whatsapp) + '</div>' : '') + '</td>' +
@@ -1647,7 +2175,7 @@ async function viewExpenses(r) {
     '<th>Against</th><th>Method</th><th class=num>Amount</th><th></th></tr></thead><tbody>' +
     (d.rows.length ? d.rows.map((e) => '<tr>' +
       '<td class="ref">' + fdate(e.spent_on) + '</td>' +
-      '<td><span class="strong">' + esc(e.category) + '</span>' + (e.note ? '<div class="ref">' + esc(e.note) + '</div>' : '') + '</td>' +
+      '<td><span class="strong">' + esc(e.category) + '</span>' + pendingTag(e) + (e.note ? '<div class="ref">' + esc(e.note) + '</div>' : '') + '</td>' +
       '<td>' + esc(e.payee || '—') + (e.reference ? '<div class="ref">' + esc(e.reference) + '</div>' : '') + '</td>' +
       '<td>' + (e.ref ? '<a href="#/jobs/' + e.job_id + '">' + esc(e.ref) + '</a><div class="ref">' + esc(e.job_title || '') + '</div>'
                        : '<span class="hint">shop overhead</span>') + '</td>' +
@@ -2601,7 +3129,8 @@ async function viewAccounts(r) {
     '</div>' +
     cardTable('Outstanding — who owes what', '<button class="btn sm" data-action="receive-payment">Receive payment</button>',
       d.debtors.length ? d.debtors.map((j) => '<tr data-open="jobs/' + j.id + '">' +
-        '<td><span class="strong">' + esc(j.title) + '</span><div class="ref">' + esc(j.ref) + ' · ' + esc(j.category) + '</div></td>' +
+        '<td><span class="strong">' + esc(j.title) + '</span>' + pendingTag(j) +
+        '<div class="ref">' + esc(j.ref) + ' · ' + esc(j.category) + '</div></td>' +
         '<td>' + esc(j.client) + (j.phone ? '<div class="ref">' + esc(j.phone) + '</div>' : '') + '</td>' +
         '<td>' + pill(j.status) + '</td><td>' + dueLabel(j) + '</td>' +
         '<td class=num>' + money(j.total) + '</td><td class=num>' + money(j.paid) + '</td>' +
@@ -2626,7 +3155,7 @@ async function viewAccounts(r) {
     cardTable('Payment ledger', '<button class="btn sm ghost" data-export="payments">Export CSV</button>',
       d.ledger.rows.length ? d.ledger.rows.map((p) => '<tr>' +
         '<td class="ref">' + fdate(p.paid_at) + '<div>' + day10(p.paid_at).slice(8) + '/' + day10(p.paid_at).slice(5, 7) + '</div></td>' +
-        '<td class="strong">' + esc(p.client) + (p.ref ? '<div class="ref"><a href="#/jobs/' + p.job_id + '">' + esc(p.ref) + ' · ' + esc(p.title) + '</a></div>' : '<div class="ref">on account</div>') + '</td>' +
+        '<td class="strong">' + esc(p.client) + pendingTag(p) + (p.ref ? '<div class="ref"><a href="#/jobs/' + p.job_id + '">' + esc(p.ref) + ' · ' + esc(p.title) + '</a></div>' : '<div class="ref">on account</div>') + '</td>' +
         '<td>' + esc(p.kind) + '</td>' +
         '<td class="num' + (p.kind === 'Refund' ? ' neg' : ' pos') + '">' + money(p.kind === 'Refund' ? -p.amount : p.amount) + '</td>' +
         '<td>' + esc(p.method) + (p.reference ? '<div class="ref">' + esc(p.reference) + '</div>' : '') + '</td>' +
@@ -2641,7 +3170,7 @@ async function viewAccounts(r) {
         : '<tr><td colspan="4" class="hint">No money has moved yet.</td></tr>',
       ['Month', 'In', 'Out', 'Net']) +
     (d.credit.length ? cardTable('Clients with credit on account', '',
-      d.credit.map((c) => '<tr data-open="clients/' + c.id + '"><td class="strong">' + esc(c.name) + '</td>' +
+      d.credit.map((c) => '<tr data-open="clients/' + c.id + '"><td class="strong">' + esc(c.name) + pendingTag(c) + '</td>' +
         '<td class="num pos">' + money(c.credit) + '</td></tr>').join(''), ['Client', 'Credit']) : '') +
     '</div>');
   restoreFocus();
@@ -2910,7 +3439,7 @@ async function openJobDrawer(id) {
   const spoilCost = spoiled.reduce((a, s) => a + Number(s.amount || 0), 0);
   $('#drawerBody').innerHTML =
     '<div class="drawer-h"><div><div class="ref">' + esc(job.ref) + ' · ' + (isQuote ? 'quoted' : 'booked') + ' ' + fdatetime(job.created_at) + '</div>' +
-    '<h2>' + esc(job.title) + '</h2>' +
+    '<h2>' + esc(job.title) + '</h2>' + pendingTag(job) +
     '<div style="margin-top:6px">' + pill(job.status) + prio(job.priority) +
     (settled ? ' <span class="pill k-paid">Paid in full</span>' : '') +
     (isQuote ? ' <span class="pill k-Quote">Quote</span>' : '') +
@@ -3679,7 +4208,7 @@ function bindModal() {
         }
         closeModal();
         if (job.offlineQueued) {
-          toast('Job saved on this device; it will appear in Print jobs after sync.', 'good');
+          toast('Job saved on this device; it is on the list, marked Held on this device.', 'good');
           return;
         }
         toast((job.kind === 'Quote' ? 'Quoted ' : 'Booked ') + job.ref + ' — ' + money(job.total), 'good');
