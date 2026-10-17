@@ -17,8 +17,10 @@ Two things a glass change breaks, and this file is built around catching both:
                 browser reports for the page it actually painted, over EVERY stop of BOTH wash layers
                 and with the panel's own saturate() applied before the compositing. Both must clear
                 WCAG AA.
-  blast radius — the class is only ever put on by viewDashboard() and taken off by render(), so
-                every other screen is loaded here and shown to still be opaque.
+  blast radius — the whole pass hangs on one class, put on once by render(), so this file loads every
+                screen and shows the material is on it, that the words sitting on no panel are still
+                readable over the wash, and that the two things left solid by rule — an alarm card and
+                a name plate — are still solid. Reversal is one word back in app.js.
 
 The live book is opened read-only and copied into a temp folder; the shop's file is never written
 to. Loopback is the shop, so none of this needs the shop's password.
@@ -187,7 +189,8 @@ def panel_rule():
     raise SystemExit("no glass panel rule with a backdrop-filter was found")
 
 
-PANEL_SELECTOR = ".view.glass .card:not(.warn-card):not(.shut), .view.glass .stat {"
+PANEL_SELECTOR = (".view.glass .card:not(.warn-card):not(.shut), .view.glass .stat,"
+                  " .view.glass > .empty {")
 GLASS_RULE = panel_rule()
 BLUR_PX = float(re.search(r"blur\((\d+(?:\.\d+)?)px\)", GLASS_RULE).group(1))
 SAT_K = float(re.search(r"saturate\((\d+(?:\.\d+)?)%\)", GLASS_RULE).group(1)) / 100.0
@@ -232,6 +235,30 @@ for palette, block in (("light", light_css), ("dark", dark_css)):
           gap >= 45 and on >= 18, "gap chroma %d, panel chroma %d" % (gap, on))
 check("the alarm cards are the one thing that stays opaque",
       ":not(.warn-card)" in css and ":not(.shut)" in css, "")
+check("a screen with nothing to list becomes a panel rather than floating on the wash",
+      ".view.glass > .empty" in panel_rule() and ".view.glass > .empty::after" in css, "")
+for palette, block in (("light", light_css), ("dark", dark_css)):
+    # The one word a glass screen puts on NO panel: the quiet line under its title. It gets the wash
+    # as its whole background, so it needs an ink of its own — and the number that matters is the
+    # plain muted, which this catches at 3.16:1 in the day and 3.10:1 at night if it is ever used.
+    paper = split_colour(token(block, "--paper"))
+    def over_wash(name, b=block, p=paper):
+        ink = split_colour(token(b, name))[0]
+        return min(contrast(ink, over(w[0], w[1], p[0]))
+                   for w in (split_colour(token(b, n)) for n in WASH_TOKENS))
+    plain, on_wash = over_wash("--muted"), over_wash("--muted-on-wash")
+    check("%s: the word on no panel has an ink of its own, and it clears AA on the bare wash"
+          % palette, on_wash >= 4.5, "%.2f:1" % on_wash)
+    check("...which is why: the shop's quiet grey would read only %.2f:1 there" % plain,
+          plain < 4.5 and on_wash > plain, "%.2f against %.2f" % (plain, on_wash))
+    # The same trap for a way in written inside that line. A link is the one word a counter is asked
+    # to press rather than read, and the brand crimson it would inherit has no glass over it here.
+    link, link_wash = over_wash("--link"), over_wash("--link-on-wash")
+    check("%s: a link written on the bare wash takes its own lifted brand, and it clears AA"
+          % palette, link_wash >= 4.5, "%.2f:1" % link_wash)
+    check("...which is why: the shop's %s would read only %.2f:1 there"
+          % (token(block, "--link"), link), link < 4.5 and link_wash > link,
+          "%.2f against %.2f" % (link, link_wash))
 check("an engine with no backdrop-filter gets a solid panel, not a washed-out one",
       "@supports not ((backdrop-filter:" in css, "")
 check("both spellings of the material are there, for WebKit and for Blink, and agree",
@@ -265,8 +292,11 @@ check("the press gives, and stops giving when the counter asks for no motion",
 check("and the wash stops drifting for that same counter, at rest rather than gone",
       ".view.glass::after { animation: none; opacity: .5; }"
       in media_block("(prefers-reduced-motion: reduce)"), "")
-check("only the dashboard ever puts the glass on, and every route takes it off first",
-      "$('#view').classList.add('glass')" in app and "v.classList.remove('glass')" in app, "")
+check("one class gates the whole pass, and it goes on every screen the counter works on",
+      "v.classList.add('glass');" in app and "classList.remove('glass')" not in app
+      and "$('#view').classList.add('glass')" not in app, "")
+check("so the pass is cuttable in the one word it was widened with",
+      app.count("classList.add('glass')") == 1, str(app.count("classList.add('glass')")))
 
 # ---------------------------------------------------------------- the page, as the app draws it
 THEME_JS = os.path.join(work, "theme-seed.js")
@@ -309,7 +339,10 @@ MEASURE = r"""
 JSON.stringify((function () {
   var view = document.getElementById('view');
   if (!view) return { missing: 'view' };
-  var card = document.querySelector('#view .card:not(.warn-card):not(.shut)');
+  /* The panel this screen is measured on: a card, or — for the screen that has nothing to list and
+     so draws no card at all — the empty state that the pass makes a panel of its own. */
+  var card = document.querySelector('#view .card:not(.warn-card):not(.shut)')
+          || document.querySelector('#view > .empty');
   var stat = document.querySelector('#view .stat');
   var figure = document.querySelector('#view .stat .v');
   var gc = card ? getComputedStyle(card) : null;
@@ -341,8 +374,32 @@ JSON.stringify((function () {
     washSeen: wash2.opacity,
     statAlpha: gs ? alpha(gs.backgroundColor) : null,
     ink: figure ? getComputedStyle(figure).color : null,
+    /* A list screen has no big money figure, so the plain words on its panel are the ink to test. */
+    panelInk: card ? getComputedStyle(card).color : null,
     quiet: (function () { var h = document.querySelector('#view .hint');
-      return h ? getComputedStyle(h).color : null; })()
+      return h ? getComputedStyle(h).color : null; })(),
+    /* The words that sit on no panel at all. On the dashboard there are two or three; on a list
+       screen a whole heading can. These get no glass over them, so the wash is their entire
+       background and they are the first text an widened wash would make unreadable. */
+    bareInks: (function () {
+      var out = {};
+      Array.prototype.forEach.call(document.querySelectorAll('#view *'), function (el) {
+        if (el.closest('.card, .stat') || (card && card.contains(el))) return;
+        var hasWords = Array.prototype.some.call(el.childNodes, function (n) {
+          return n.nodeType === 3 && n.textContent.trim(); });
+        if (!hasWords || el.closest('.plate')) return;
+        var c = getComputedStyle(el).color;
+        out[c] = (out[c] || 0) + 1;
+      });
+      return out;
+    })(),
+    /* What the pass deliberately left solid: an alarm card and the name plate. */
+    warnAlpha: (function () { var w = document.querySelector('#view .card.warn-card, #view .shut');
+      return w ? alpha(getComputedStyle(w).backgroundColor) : null; })(),
+    plateAlpha: (function () { var p = document.querySelector('#view .plate');
+      return p ? alpha(getComputedStyle(p).backgroundColor) : null; })(),
+    cards: document.querySelectorAll('#view .card:not(.warn-card):not(.shut)').length,
+    panelKind: card ? (card.classList.contains('empty') ? 'empty state' : 'card') : null
   };
 })())
 """
@@ -370,6 +427,20 @@ for _ in range(60):
 if not check("a throwaway shop server is answering on 127.0.0.1:%d" % PORT, ready):
     print("\nthe throwaway shop server did not start — no browser checks ran")
     sys.exit(1)
+
+# ...and it is THIS server answering, not one an earlier crashed run left holding the port. Its temp
+# folder is deleted when that run's process lingers, so every page it serves is an error page: the
+# probe then reads a document with no #view in it, every measurement comes back None, and the check
+# looks broken when it is the port that is stale. The tell is the process, not the command line —
+# `lsof` prints the interpreter's name ("Python") and never the script it was handed, so the only
+# honest match is the listener's PID against this process's own child.
+holder = subprocess.run(["lsof", "-nP", "-iTCP:%d" % PORT, "-sTCP:LISTEN"],
+                        capture_output=True, text=True).stdout.splitlines()
+listeners = {l.split()[1] for l in holder[1:] if len(l.split()) > 2 and l.split()[1].isdigit()}
+check("and the only thing answering on that port is the server this run started",
+      listeners == {str(server.pid)},
+      "%d listener(s) on %d, pids %s, this run's child is %d"
+        % (len(listeners), PORT, ",".join(sorted(listeners)) or "-", server.pid))
 
 
 def run_probe(route, commands, label="", size=None):
@@ -402,8 +473,17 @@ def run_probe(route, commands, label="", size=None):
         if line.startswith("{"):
             try:
                 reports.append(json.loads(line))
-            except ValueError:
+            except ValueError as bad:
+                # A report that will not parse is not a screen with nothing on it. Swallowing it as an
+                # empty dict made every measurement read None and the whole run look like a broken
+                # stylesheet; the line itself is the only evidence of what the probe really said.
+                fails.append("%s: the probe said something this check could not read: %s"
+                             % (label, str(bad)[:40]))
+                print("%s: unparseable report (%d chars): %s" % (label, len(line), line[:300]))
                 reports.append({})
+    if not reports:
+        fails.append("%s: the probe answered with no report at all" % label)
+        print("%s: nothing readable from the probe; raw output was:\n%s" % (label, raw[:1200]))
     return said, reports
 
 
@@ -412,6 +492,8 @@ def measured_ratio(m, ink):
     it actually painted — and over EVERY stop of BOTH wash layers, not the first one it finds. The
     first ship of this check read only the first stop, which is exactly how a glass can be green and
     the page still report itself pink."""
+    if "body" not in m or not m.get("cardRGB"):
+        return 0.0   # the probe said nothing; run_probe already called that a failure
     body = split_colour(m["body"])
     glass = (tuple(m["cardRGB"]), m["cardAlpha"])
     ink_rgb, _ = split_colour(ink)
@@ -427,6 +509,8 @@ def measured_ratio(m, ink):
 def measured_chroma(m):
     """How far from grey the panel actually is, on the page the engine painted. This is the number
     the owner's complaint is really about, so it is measured rather than argued."""
+    if "body" not in m or not m.get("cardRGB"):
+        return 0.0
     body = split_colour(m["body"])
     glass = (tuple(m["cardRGB"]), m["cardAlpha"])
     out = 0
@@ -435,6 +519,22 @@ def measured_chroma(m):
         bare = saturate(over(wash[0], wash[1], body[0]), SAT_K)
         out = max(out, chroma(over(glass[0], glass[1], bare)))
     return out
+
+
+def bare_ratio(m, ink):
+    """Contrast for a word that sits on NO panel. Nothing composites over it but the wash itself,
+    so this is the number a widened glass can quietly ruin — and it is computed the same way, over
+    every stop of both arrangements, worst case winning."""
+    if "body" not in m:
+        return 0.0
+    body = split_colour(m["body"])
+    ink_rgb, _ = split_colour(ink)
+    stops = re.findall(r"rgba?\([^)]*\)", (m.get("wash") or "") + (m.get("wash2") or ""))
+    worst = 99.0
+    for raw in stops:
+        wash = split_colour(raw)
+        worst = min(worst, contrast(ink_rgb, over(wash[0], wash[1], body[0])))
+    return worst if stops else 0.0
 
 
 def want(block, name):
@@ -478,11 +578,16 @@ check("the second one drifts over the first, so the tiles change hue under the f
       "%s / %s" % (m.get("washAnim"), m.get("washAnimTime")))
 expect("the money tiles are glass too", m.get("statAlpha"), GLASS_A["light"])
 check("the figures stay readable on it, as drawn",
-      measured_ratio(m, m.get("ink") or "#000") >= 4.5, "%.2f:1" % measured_ratio(m, m.get("ink") or "#000"))
-check("and so does the quiet text", measured_ratio(m, m.get("quiet") or "#000") >= 4.5,
-      "%.2f:1" % measured_ratio(m, m.get("quiet") or "#000"))
+      measured_ratio(m, m.get("ink") or "#000000") >= 4.5, "%.2f:1" % measured_ratio(m, m.get("ink") or "#000000"))
+check("and so does the quiet text", measured_ratio(m, m.get("quiet") or "#000000") >= 4.5,
+      "%.2f:1" % measured_ratio(m, m.get("quiet") or "#000000"))
 check("and as drawn, the glass is a coloured material and not a grey one",
       measured_chroma(m) >= 18, "panel chroma %d" % measured_chroma(m))
+dbare = m.get("bareInks") or {}
+worst_dbare = min([bare_ratio(m, c) for c in dbare], default=None)
+check("and the words on no panel read over the wash as drawn (%d of them)" % sum(dbare.values()),
+      worst_dbare is not None and worst_dbare >= 4.5,
+      "worst %.2f:1" % worst_dbare if worst_dbare is not None else "none found")
 
 MODE = "dark"
 said, reports = run_probe("dashboard", ["say|" + MEASURE, "shot|glass-dark"], "dark dashboard")
@@ -490,10 +595,15 @@ d = reports[0] if reports else {}
 expect("nine at night wears the dark palette", d.get("theme"), "dark")
 expect("and the dark palette gets its own glass", d.get("cardAlpha"), GLASS_A["dark"])
 check("on a dark counter the rim keeps its shine", d.get("inset") is True, "")
-check("and the figures still clear AA on it", measured_ratio(d, d.get("ink") or "#fff") >= 4.5,
-      "%.2f:1" % measured_ratio(d, d.get("ink") or "#fff"))
+check("and the figures still clear AA on it", measured_ratio(d, d.get("ink") or "#ffffff") >= 4.5,
+      "%.2f:1" % measured_ratio(d, d.get("ink") or "#ffffff"))
 check("with the evening wash showing through it", measured_chroma(d) >= 18,
       "panel chroma %d" % measured_chroma(d))
+nbare = d.get("bareInks") or {}
+worst_nbare = min([bare_ratio(d, c) for c in nbare], default=None)
+check("and the words on no panel read at night too (%d of them)" % sum(nbare.values()),
+      worst_nbare is not None and worst_nbare >= 4.5,
+      "worst %.2f:1" % worst_nbare if worst_nbare is not None else "none found")
 
 MODE = "light"
 said, reports = run_probe("dashboard", ["say|" + MEASURE, "shot|glass-on-a-phone"], "phone",
@@ -503,14 +613,37 @@ check("on a phone the panels are still glass",
       p.get("cardAlpha") == GLASS_A["light"] and (p.get("radius") or "") == RADIUS,
       "alpha=%s radius=%s" % (p.get("cardAlpha"), p.get("radius")))
 
-print("\n--- every other screen, which must not have changed")
-for route in ("jobs", "collect", "spoiled", "sync", "clients", "accounts", "leads", "expenses",
-              "reports", "shop"):
-    said, reports = run_probe(route, ["say|" + MEASURE], route)
+print("\n--- every screen the counter works on, which now wears the same material")
+ROUTES = ("jobs", "collect", "spoiled", "sync", "clients", "accounts", "leads", "expenses",
+          "reports", "shop")
+for route in ROUTES:
+    said, reports = run_probe(route, ["say|" + MEASURE, "shot|glass-%s" % route], route)
     r = reports[0] if reports else {}
-    check("%s: no glass on this screen" % route, r.get("viewGlass") is False, str(r.get("viewGlass")))
-    if r.get("cardAlpha") is not None:
-        expect("%s: and its panels are still solid" % route, r.get("cardAlpha"), 1)
+    check("%s: the class is on this screen too" % route, r.get("viewGlass") is True,
+          str(r.get("viewGlass")))
+    if r.get("cardAlpha") is None:
+        check("%s: and it has a panel to put the glass on" % route, False, "no .card and no .empty")
+        continue
+    check("%s: the panel measured here is %s" % (route, r.get("panelKind") or "nothing"),
+          r.get("panelKind") in ("card", "empty state"), str(r.get("panelKind")))
+    expect("%s: its panels are the glass, not the surface" % route, r.get("cardAlpha"),
+           GLASS_A["light"])
+    check("%s: the wash shows through them in colour (%d tiles)" % (route, r.get("cards") or 0),
+          measured_chroma(r) >= 18, "panel chroma %d" % measured_chroma(r))
+    on_panel = measured_ratio(r, r.get("ink") or r.get("panelInk") or "#000000")
+    check("%s: and a figure on a panel still clears AA as drawn" % route, on_panel >= 4.5,
+          "%.2f:1" % on_panel)
+    bare = r.get("bareInks") or {}
+    worst_bare = min([bare_ratio(r, c) for c in bare], default=None)
+    # A screen that puts every word on a panel has no bare text to fail: nothing on it depends on
+    # the wash for its legibility, and that is the outcome the pass is trying for.
+    check("%s: the words on no panel are still readable over the wash (%d of them)"
+          % (route, sum(bare.values())), worst_bare is None or worst_bare >= 4.5,
+          "worst %.2f:1" % worst_bare if worst_bare is not None else "none to check")
+    if r.get("warnAlpha") is not None:
+        expect("%s: an alarm card stays the one opaque thing on it" % route, r["warnAlpha"], 1)
+    if r.get("plateAlpha") is not None:
+        expect("%s: and a name plate stays paper" % route, r["plateAlpha"], 1)
 
 # ---------------------------------------------------------------- the book is still the shop's
 after = os.stat(LIVE)

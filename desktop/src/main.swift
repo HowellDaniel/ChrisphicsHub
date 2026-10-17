@@ -405,6 +405,17 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate, N
                         on: config.userContentController)
         } else {
             Bridge.bind("external", script: nil, on: config.userContentController)
+            // This window is the one surface in the shop with a room behind it, so the page is told
+            // to stop painting its own paper. .vibrant is the only way that look arrives, and nothing
+            // on the Wi-Fi ever receives it: a phone has no desktop to show, and a job sheet has to
+            // stay the white paper a client signs.
+            let vibrant = """
+            var addVibrant = function () { if (document.documentElement) document.documentElement.classList.add('vibrant'); };
+            addVibrant();
+            document.addEventListener('DOMContentLoaded', addVibrant);
+            """
+            config.userContentController.addUserScript(WKUserScript(source: vibrant, injectionTime: .atDocumentStart,
+                                                                   forMainFrameOnly: true))
         }
         web = WKWebView(frame: window.contentView!.bounds, configuration: config)
         web.autoresizingMask = [.width, .height]
@@ -412,7 +423,32 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate, N
         web.uiDelegate = self
         web.allowsBackForwardNavigationGestures = (kind == .main)
         if #available(macOS 13.3, *) { web.isInspectable = true }
-        window.contentView = web
+        if kind == .main {
+            // Apple's own material, under the page, blending with what is behind the window rather
+            // than with anything the shop draws. WebKit insists on painting an opaque sheet behind
+            // every page it shows, and that sheet is precisely what would hide the room, so it is
+            // turned off here and the page is left to stand on the material itself.
+            //
+            // The two views are siblings, not parent and child. An NSVisualEffectView treats every
+            // subview as part of the material it renders — which is right for a label and ruinous for
+            // a web view: measured with the page inside it, the window showed the blurred room and
+            // nothing of the shop at all. Stacked as siblings, the room blurs and the page paints.
+            let room = NSView(frame: window.contentView!.bounds)
+            let glass = NSVisualEffectView(frame: room.bounds)
+            glass.material = .underWindowBackground
+            glass.blendingMode = .behindWindow
+            glass.state = .followsWindowActiveState
+            glass.autoresizingMask = [.width, .height]
+            web.setValue(false, forKey: "drawsBackground")
+            if #available(macOS 12.0, *) { web.underPageBackgroundColor = .clear }
+            room.addSubview(glass)
+            web.frame = room.bounds
+            web.autoresizingMask = [.width, .height]
+            room.addSubview(web)
+            window.contentView = room
+        } else {
+            window.contentView = web
+        }
         window.delegate = self
         window.isReleasedWhenClosed = false
         if kind == .main {

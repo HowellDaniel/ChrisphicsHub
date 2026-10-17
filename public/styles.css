@@ -19,6 +19,9 @@
      block. Measured over the brightest wash stop, `--muted` reads 3.16:1 with nothing to hold it back;
      this reads 4.74:1. */
   --muted-on-wash: #534e50;
+  /* A link inside that quiet line: `--link` is 4.14:1 over the brightest wash stop, under the line
+     the rest of this pass was measured to, so bare-wash links take the darkened brand instead. */
+  --link-on-wash: #8c171b;
   /* the logo's crimson: money coming in, and anything the shop acts on */
   --brand: #ab1f23;
   --brand-ink: #8c171b;
@@ -114,6 +117,9 @@
   --muted: #a49a9c;
   --placeholder: #7d7375;
   --muted-on-wash: #cdc0c3;
+  /* The night half of the same measure: `--link` reads 3.50:1 over the evening wash, so a bare-wash
+     link takes the brand lifted until it clears 4.5 — #ffc9cc measures 5.82:1. */
+  --link-on-wash: #ffc9cc;
   --brand: #c93a3f;
   --brand-ink: #a8262c;
   --brand-soft: #33191b;
@@ -527,6 +533,9 @@ input::placeholder { color: var(--placeholder); }
    (a top-level one, so it is the same tier as a card and not a second glass inside a glass), and so
    its words need no special ink. */
 .view.glass > .hint { color: var(--muted-on-wash); }
+/* A way in written inside that line is the same case as the line itself: no glass over it, so the
+   brand crimson it would inherit reads 4.14:1 by day and 3.50:1 at night. Both palettes lift it. */
+.view.glass > .hint a { color: var(--link-on-wash); }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .view.glass .card:not(.warn-card):not(.shut), .view.glass .stat, .view.glass > .empty {
     background: var(--surface);

@@ -15,6 +15,13 @@
   --text: #221d1f;
   --muted: #6f686a;
   --placeholder: #9d9698;
+  /* The quiet ink when the shop's wash is the whole background rather than a panel's: see the glass
+     block. Measured over the brightest wash stop, `--muted` reads 3.16:1 with nothing to hold it back;
+     this reads 4.74:1. */
+  --muted-on-wash: #534e50;
+  /* A link inside that quiet line: `--link` is 4.14:1 over the brightest wash stop, under the line
+     the rest of this pass was measured to, so bare-wash links take the darkened brand instead. */
+  --link-on-wash: #8c171b;
   /* the logo's crimson: money coming in, and anything the shop acts on */
   --brand: #ab1f23;
   --brand-ink: #8c171b;
@@ -109,6 +116,10 @@
   --text: #ece7e7;
   --muted: #a49a9c;
   --placeholder: #7d7375;
+  --muted-on-wash: #cdc0c3;
+  /* The night half of the same measure: `--link` reads 3.50:1 over the evening wash, so a bare-wash
+     link takes the brand lifted until it clears 4.5 — #ffc9cc measures 5.82:1. */
+  --link-on-wash: #ffc9cc;
   --brand: #c93a3f;
   --brand-ink: #a8262c;
   --brand-soft: #33191b;
@@ -321,6 +332,11 @@ input::placeholder { color: var(--placeholder); }
 .stat.warn .v { color: var(--bad); }
 .stat.good .v { color: var(--ok); }
 .stat.amt .v { font-family: var(--num); font-weight: 600; }
+/* A shop address is one unbroken token, and the name is longer than the number ever was: set at the
+   size a figure gets, it ran past the edge of its own card. So it keeps a figure's weight at a
+   reading size, and is allowed to break where a device has to break it. */
+.stat .addr { font-family: var(--num); font-size: 15px; font-weight: 600; letter-spacing: 0;
+  line-height: 1.35; overflow-wrap: anywhere; }
 /* A tile that is also a way in: it lifts, and shows where it leads. It is an anchor, so
    without this the figures would all come through in link crimson and read as a warning. */
 .stat.go { position: relative; color: var(--text); text-decoration: none;
@@ -439,7 +455,7 @@ input::placeholder { color: var(--placeholder); }
 .today-date { font-size: 1.22em; font-weight: 600; letter-spacing: -.01em; margin: 0 0 7px;
   font-variant-numeric: tabular-nums; }
 
-/* ---------- liquid glass, on the dashboard and nowhere else ----------
+/* ---------- liquid glass, on every screen the counter works ----------
    The counter asked for Apple's liquid glass on the shop screen (2026-10-13), and the first ship of
    it went unseen: "am not seeing the apple liquid effects". Measured, the reason is arithmetic rather
    than taste. A panel that is 72% white lets through only 28% of what sits under it, and what sat
@@ -450,12 +466,18 @@ input::placeholder { color: var(--placeholder); }
    blob holds a flat core and then falls off, so the 20px blur has a real edge to smear under the
    glass — that smeared edge moving past a tile is the read of liquid — and a second arrangement of
    the same three colours crossfades over the first, so every tile on the screen changes hue slowly
-   underneath the figures. It is gated on `.view.glass`, a class only `viewDashboard()` puts on and
-   `render()` takes off, so the other seven screens, the sign-in door and the printed job sheet are
-   untouched. The two cards that are alarms — an open book and a shut shop — keep their solid washes:
-   an alarm should be the one opaque thing on the screen. Real refraction, the bending of the content
-   behind the glass, is not something any engine here will do from CSS, so this is the material
-   rather than the lens. */
+   underneath the figures. `render()` puts `.glass` on every screen the counter works on (asked again
+   2026-10-16), and that one class is the whole gate: put the word `remove` back in app.js and this
+   returns to the Dashboard alone. Three things stay solid by rule rather than by route: the two cards
+   that are alarms — an open book and a shut shop — because an alarm should be the one opaque thing on
+   the screen; the name plate, because it is read off paper; and the printed job sheet, which is its
+   own document and never sees this class. Widening it also uncovered two rules that only a glass
+   screen can need: the quiet line under a title, which is the one word with nothing over it, and a
+   screen's empty state, which becomes a panel rather than floating on the wash. There is deliberately
+   no second tier of glass inside a panel: rows, table headers and the topbar stayed flat paper when
+   this pass was last widened, and the counter sent that back. Real refraction, the bending of the
+   content behind the glass, is not something any engine here will do from CSS, so this is the
+   material rather than the lens. */
 .view.glass { position: relative; isolation: isolate; }
 .view.glass::before, .view.glass::after {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
@@ -477,7 +499,7 @@ input::placeholder { color: var(--placeholder); }
    wash that slid or scaled would widen the dashboard's own scroll area and leave a bare seam at one
    edge, and opacity is the one property the engine can animate without repainting the screen. */
 @keyframes glass-flow { from { opacity: 0; } to { opacity: .92; } }
-.view.glass .card:not(.warn-card):not(.shut), .view.glass .stat {
+.view.glass .card:not(.warn-card):not(.shut), .view.glass .stat, .view.glass > .empty {
   position: relative; background: var(--glass); border-radius: var(--r-glass);
   box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-rim);
   transition: background .16s ease, box-shadow .16s ease, transform .16s ease;
@@ -488,7 +510,8 @@ input::placeholder { color: var(--placeholder); }
 /* The specular rim: light along the edge, brightest where it meets the top-left and picking up
    again at the bottom-right. A one-pixel ring drawn from a gradient, with its own middle masked
    out — both spellings of the mask, because WebKit and Blink name the composite differently. */
-.view.glass .card:not(.warn-card):not(.shut)::after, .view.glass .stat::after {
+.view.glass .card:not(.warn-card):not(.shut)::after, .view.glass .stat::after,
+.view.glass > .empty::after {
   content: ""; position: absolute; inset: 0; padding: 1px; border-radius: inherit;
   pointer-events: none;
   background: linear-gradient(150deg, var(--glass-spec), var(--glass-spec-2) 34%,
@@ -500,9 +523,41 @@ input::placeholder { color: var(--placeholder); }
 /* A tile that is also a way in gives under the finger, the way a droplet flattens. */
 .view.glass .stat.go:hover { background: var(--glass-hover); }
 .view.glass .stat.go:active { background: var(--glass); transform: scale(.985); }
+/* The one word on a screen that sits on NO panel: the quiet line under its title. A panel keeps its
+   figures readable because 72% of the wash never reaches them; this line gets all of it, and the
+   shop's muted ink measured 3.16:1 over the brightest stop of the pink and 3.10:1 in the evening,
+   both under the 4.5 a counter needs to read a sentence. So the quiet grey has a second value for
+   glass screens, darkened (lightened at night) only where the wash is the whole background — paper
+   keeps its own muted, and a word inside a panel keeps its own, because there the glass does the
+   work. A screen with nothing to list is the other case: its `.empty` is a panel in its own right
+   (a top-level one, so it is the same tier as a card and not a second glass inside a glass), and so
+   its words need no special ink. */
+.view.glass > .hint { color: var(--muted-on-wash); }
+/* A way in written inside that line is the same case as the line itself: no glass over it, so the
+   brand crimson it would inherit reads 4.14:1 by day and 3.50:1 at night. Both palettes lift it. */
+.view.glass > .hint a { color: var(--link-on-wash); }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .view.glass .card:not(.warn-card):not(.shut), .view.glass .stat { background: var(--surface); }
+  .view.glass .card:not(.warn-card):not(.shut), .view.glass .stat, .view.glass > .empty {
+    background: var(--surface);
+  }
 }
+/* ---------- the shop's own Mac window, with a room behind it ----------
+   Every other machine that opens this book is a screen with nothing behind it, so its page has to
+   bring its own paper. This Mac is the one exception: its window is a native shell that puts Apple's
+   own material under the page, so the desktop — the counter, the wall, whatever is actually there —
+   is what the book sits on. The shell adds .vibrant to <html> for its own window only, and it is the
+   only thing that ever does, which is why a phone over the Wi-Fi cannot receive this look even by
+   accident and a job sheet stays the white paper it has to be.
+
+   Two changes, both about what is BEHIND the glass rather than the glass itself. The page stops
+   painting paper, so every screen that is not a glass screen becomes opaque cards standing on the
+   live room. And the wash thins to something over that room instead of covering it — the colour a
+   panel picks up is then partly the shop's own and partly the place the shop is in, which is the
+   whole point of the material. The panels keep their own alpha and their own rim, untouched: a
+   figure is readable because of the 72% it carries, not because of what is behind it, so thinning
+   the wash cannot take a number below the line it was measured on. */
+html.vibrant body { background: transparent; }
+html.vibrant .view.glass::before, html.vibrant .view.glass::after { filter: opacity(.58); }
 fieldset.hours-fields { border: 1px solid var(--line); border-radius: 8px; padding: 13px;
   display: grid; gap: 11px; margin: 0;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); }
