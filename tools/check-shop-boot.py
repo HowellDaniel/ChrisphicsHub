@@ -316,6 +316,80 @@ try:
 except OSError as err:
     check("a watchman is written to catch the login that never loaded the shop", False, str(err))
 
+# A job launchd registered is not a counter that answers. The keeper is a bash script, so launchd
+# reads a dead engine behind it as a running service — and the devices cannot report that, because
+# the page that would tell them lives behind the door that stopped answering. So the watchman also
+# asks the kernel who holds the shop's port, and it signs a timesheet every pass: an empty log cannot
+# tell "the shop was fine all day" from "the watchman never ran".
+BEAT_FILE = os.path.expanduser("~/Library/Application Support/Chrisphics Hub/shop-guard.heartbeat")
+try:
+    beat_age = time.time() - os.path.getmtime(BEAT_FILE)
+    beat_line = open(BEAT_FILE).read().strip()
+except OSError as err:
+    beat_age, beat_line = 1e9, "no timesheet (%s)" % err
+check("the watchman signs a timesheet, so a quiet log means a healthy shop",
+      beat_age < 1200, beat_line or "empty")
+check("and the last thing it read was the shop's own door answering",
+      str(SHOP_PORT) in beat_line and "no job" not in beat_line and "dark" not in beat_line, beat_line)
+
+# The rest runs the served bytes against a throwaway world. It aims at the watchman's own job — the
+# one launchd entry this check may restart without touching the book — and at a port claimed free at
+# the start, so a dark read here is a real dark read and not somebody else's squatted door.
+WATCH = os.path.join(work, "watch")
+os.makedirs(WATCH, exist_ok=True)
+WATCH_PORT = 8914
+claim(WATCH_PORT)
+blind_helper = os.path.join(WATCH, "blind.sh")
+talk_helper = os.path.join(WATCH, "talk.sh")
+with open(blind_helper, "w") as fh:
+    fh.write('#!/bin/bash\n[ "$1" = wifi-ip ] && exit 0\n')
+with open(talk_helper, "w") as fh:
+    fh.write('#!/bin/bash\n[ "$1" = wifi-ip ] && echo %s\n' % (ADDRESS or "192.0.2.7"))
+os.chmod(blind_helper, 0o755)
+os.chmod(talk_helper, 0o755)
+GUARD_SH = os.path.join(SERVED, "tools", "shop-guard.sh")
+watch_env = dict(os.environ, GUARD_LABEL="com.chrisphics.shop-guard", GUARD_SUPPORT=WATCH,
+                 GUARD_PORT=str(WATCH_PORT), GUARD_WAIT_N="2", GUARD_COOLDOWN_S="1800")
+
+
+def watch(run_env):
+    env = dict(watch_env, **run_env)
+    subprocess.run(["/bin/bash", GUARD_SH], capture_output=True, text=True, env=env, timeout=60)
+    path = os.path.join(WATCH, "shop-guard.heartbeat")
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return "no timesheet written"
+
+
+shop_engine = subprocess.run(["/usr/sbin/lsof", "-nP", "-iTCP:%d" % SHOP_PORT, "-sTCP:LISTEN"],
+                             capture_output=True, text=True).stdout
+first_dark = watch({"GUARD_HELPER": talk_helper})
+check("a counter nobody answers is counted before it is touched",
+      "dark turn 1 of" in first_dark, first_dark)
+second_dark = watch({"GUARD_HELPER": talk_helper})
+check("two dark turns with a real address to serve is the restart the devices cannot ask for",
+      "started the shop service again" in second_dark, second_dark)
+# A rescue zeroes the count, so the wait in front of the next one only reads on a shop that went dark
+# again on its own. Seed that: five turns already counted, one restart just taken.
+with open(os.path.join(WATCH, "shop-guard.state"), "w") as fh:
+    fh.write("5 %d\n" % int(time.time()))
+held_back = watch({"GUARD_HELPER": talk_helper})
+check("and it then waits before restarting the same shop twice",
+      "held back" in held_back, held_back)
+watched_shop = subprocess.run(["/usr/sbin/lsof", "-nP", "-iTCP:%d" % SHOP_PORT, "-sTCP:LISTEN"],
+                              capture_output=True, text=True).stdout
+check("none of that disturbed the book the shop is trading on",
+      watched_shop == shop_engine and watched_shop.strip() != "",
+      "the same engine holds the door")
+silent = watch({"GUARD_HELPER": blind_helper, "GUARD_WAIT_N": "1"})
+check("a Mac with no Wi-Fi number is left to the keeper, not rebooted every five minutes",
+      "no Wi-Fi number" in silent, silent)
+open(os.path.join(WATCH, "shop-guard.state"), "w").write("0 0\n")
+answered = watch({"GUARD_HELPER": talk_helper, "GUARD_PORT": str(SHOP_PORT)})
+check("a door that is held ends the counting", "holds" in answered and "dark" not in answered,
+      answered)
+
 # 5. The copy launchd runs is the copy this repository says it runs.
 
 for name in ("tools/shop-boot.sh", "tools/shop-server.sh", "tools/shop-guard.sh"):
