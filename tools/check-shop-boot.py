@@ -28,6 +28,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KEEPER = os.path.join(REPO, "tools", "shop-boot.sh")
 HELPER = os.path.join(REPO, "tools", "shop-server.sh")
 PLIST = os.path.expanduser("~/Library/LaunchAgents/com.chrisphics.shop-server.plist")
+GUARD_PLIST = os.path.expanduser("~/Library/LaunchAgents/com.chrisphics.shop-guard.plist")
 LIVE = os.path.expanduser("~/Library/Application Support/Chrisphics Hub/chrisphics.db")
 SERVED = os.path.expanduser("~/Applications/Chrisphics Hub")
 SHOP_PORT = 8834
@@ -289,9 +290,35 @@ if plist_ok:
           isinstance(agent.get("ThrottleInterval"), int)
           and agent["ThrottleInterval"] <= 30, "%s s" % agent.get("ThrottleInterval"))
 
+# The service file existing is not the service running: on 2026-10-14, 10-16 and again 10-19 macOS
+# started this Mac with the shop's agent in ~/Library/LaunchAgents and never loaded it, and the
+# counter stayed dark for hours because nothing was left awake to notice. tools/shop-guard.sh is
+# that notice, so it has to be installed and registered — a watchman that launchd also skipped is
+# no watchman at all.
+
+try:
+    with open(GUARD_PLIST, "rb") as handle:
+        guard = plistlib.load(handle)
+    gargs = guard.get("ProgramArguments", [])
+    check("a watchman is written to catch the login that never loaded the shop",
+          any(a.endswith("shop-guard.sh") for a in gargs), " ".join(gargs[:2]))
+    check("it starts at login and every few minutes after that",
+          guard.get("RunAtLoad") is True and isinstance(guard.get("StartInterval"), int)
+          and 0 < guard["StartInterval"] <= 600, "every %s s" % guard.get("StartInterval"))
+    # It runs from the served copy: a launchd-spawned process cannot read anything under Documents,
+    # so a watchman pointed into the repository would die exactly like the shop it watches.
+    check("and it reads from a place launchd is allowed to reach",
+          any(a.startswith(SERVED) for a in gargs[1:2]), gargs[1] if len(gargs) > 1 else "nothing")
+    live = subprocess.run(["/bin/launchctl", "print", "gui/%d/com.chrisphics.shop-guard" % os.getuid()],
+                          capture_output=True, text=True)
+    check("launchd is running that watchman right now", live.returncode == 0,
+          live.stdout.splitlines()[0] if live.stdout.strip() else live.stderr.strip()[:60])
+except OSError as err:
+    check("a watchman is written to catch the login that never loaded the shop", False, str(err))
+
 # 5. The copy launchd runs is the copy this repository says it runs.
 
-for name in ("tools/shop-boot.sh", "tools/shop-server.sh"):
+for name in ("tools/shop-boot.sh", "tools/shop-server.sh", "tools/shop-guard.sh"):
     repo_bytes = open(os.path.join(REPO, name), "rb").read()
     live_path = os.path.join(SERVED, name)
     live_bytes = open(live_path, "rb").read() if os.path.exists(live_path) else b""
