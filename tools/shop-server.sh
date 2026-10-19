@@ -10,9 +10,11 @@ REPO="$(dirname "$SRC")"
 PORT="${CHRISPHICS_SHOP_PORT:-8834}"   # 8834 is the shop's address; the variable is for dry runs
 LABEL=com.chrisphics.shop-server
 BACKUP_LABEL=com.chrisphics.nightly-backup
+GUARD_LABEL=com.chrisphics.shop-guard
 AGENTS="$HOME/Library/LaunchAgents"
 PLIST="$AGENTS/$LABEL.plist"
 BACKUP_PLIST="$AGENTS/$BACKUP_LABEL.plist"
+GUARD_PLIST="$AGENTS/$GUARD_LABEL.plist"
 BOOK_DIR="$HOME/Library/Application Support/Chrisphics Hub"
 BOOK="${CHRISPHICS_DB:-$BOOK_DIR/chrisphics.db}"   # the same book the app opens, unless a dry run says otherwise
 TLS_DIR="$HOME/Library/Application Support/CRISPprint TLS"
@@ -287,6 +289,13 @@ cmd_check() {
   else
     note "The always-on service is not installed. When the shop is ready: tools/shop-server.sh install"
   fi
+  if is_loaded "$GUARD_LABEL"; then
+    note "The watchman is loaded, so a reboot that skips the service is caught within five minutes."
+  elif [ -f "$GUARD_PLIST" ]; then
+    note "The watchman's file is there but launchd is not running it — the very thing it watches for."
+  else
+    note "There is no watchman here, so nothing notices if a reboot leaves the service unloaded."
+  fi
 
   app="$(app_holds_book)"
   if [ -n "$app" ]; then
@@ -492,6 +501,28 @@ backup_plist() {   # $1 = file to write
 PLIST
 }
 
+guard_plist() {   # $1 = file to write
+  cat > "$1" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$GUARD_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$SRC/shop-guard.sh</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>$BOOK_DIR/shop-guard.log</string>
+  <key>StandardErrorPath</key><string>$BOOK_DIR/shop-guard.log</string>
+</dict>
+</plist>
+PLIST
+}
+
 load_agent() {   # $1 = plist, $2 = label
   if launchctl bootout "$DOMAIN/$2" 2>/dev/null; then
     note "  (the old one was still loaded, so it was set aside first)"
@@ -625,12 +656,20 @@ cmd_install() {
   else
     note "The nightly copy was already scheduled."
   fi
+  if write_plist_quietly guard_plist "$GUARD_PLIST"; then
+    note "Wrote the watchman: if launchd ever starts this Mac without the shop's service, it registers the service again."
+  else
+    note "The watchman was already in place."
+  fi
 
   if ! load_agent "$PLIST" "$LABEL"; then
     fail_with "macOS would not take on the service — restart this Mac, then run tools/shop-server.sh install again."
   fi
   if ! load_agent "$BACKUP_PLIST" "$BACKUP_LABEL"; then
     warn "The nightly copy did not load this time; run install again once the server is answering."
+  fi
+  if ! load_agent "$GUARD_PLIST" "$GUARD_LABEL"; then
+    warn "The watchman did not load this time, so a reboot could leave the shop dark until someone notices."
   fi
 
   left=45
@@ -669,7 +708,9 @@ cmd_install() {
 # ------------------------------------------------------------------ remove
 cmd_remove() {
   local label="" file=""
-  for label in "$LABEL" "$BACKUP_LABEL"; do
+  # The watchman goes first: stop the server and leave the watchman running for one more turn and it
+  # would read the empty domain as a reboot that went wrong and start the server straight back up.
+  for label in "$GUARD_LABEL" "$LABEL" "$BACKUP_LABEL"; do
     if is_loaded "$label"; then
       if ! launchctl bootout "$DOMAIN/$label" 2>/dev/null; then
         launchctl unload "$AGENTS/$label.plist" 2>/dev/null || true
@@ -679,7 +720,7 @@ cmd_remove() {
       note "$label was not loaded, which is fine."
     fi
   done
-  for file in "$PLIST" "$BACKUP_PLIST"; do
+  for file in "$PLIST" "$BACKUP_PLIST" "$GUARD_PLIST"; do
     if [ -f "$file" ]; then
       rm -f "$file"
       note "Took back the file this tool made: $file"
@@ -707,6 +748,11 @@ cmd_status() {
     fi
   else
     note "The always-on server: not installed. When the shop is ready: tools/shop-server.sh install"
+  fi
+  if is_loaded "$GUARD_LABEL"; then
+    note "The watchman: loaded, checking every five minutes that launchd really did take the server."
+  else
+    note "The watchman: not loaded, so nobody notices a reboot that leaves the server unregistered."
   fi
 
   if [ -n "$(listener_pid)" ] && [ -n "$ip" ]; then

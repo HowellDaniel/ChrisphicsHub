@@ -22,7 +22,7 @@ there is never a moment when the shop's records only exist in one place.
 | `server.py`, `schema.sql`, `public/` | the records engine and the screens it serves |
 | `desktop/` | the native shell's Swift source and `build-app.sh` |
 | `render.yaml` | Render web service, HTTPS proxy, password and persistent-disk setup |
-| `tools/` | `shop-boot.sh` keeps the shop online on whatever address the Wi-Fi gives this Mac, `shop-server.sh` installs that service and its certificates, `nightly-backup.sh` copies the book each night, `carry-book.py` hands a copy to a hosted book, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
+| `tools/` | `shop-boot.sh` keeps the shop online on whatever address the Wi-Fi gives this Mac, `shop-server.sh` installs that service and its certificates, `shop-guard.sh` notices when launchd never loaded it at all, `nightly-backup.sh` copies the book each night, `carry-book.py` hands a copy to a hosted book, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
 | `~/Library/Application Support/Chrisphics Hub/` | your actual records — not in this folder |
 
 ## Start it
@@ -140,6 +140,20 @@ port (`lsof -sTCP:LISTEN`) rather than dialling it — a connection to a number 
 only lets go when macOS decides, tens of seconds later, and a keeper stuck mid-probe is a counter
 that stays dark and cannot even be stopped.
 
+**The guard: `tools/shop-guard.sh`.** A file in `~/Library/LaunchAgents` is not a running service. The
+shop's server died on the evening of 2026-10-18 — its last word was the keeper letting go of an address
+this Mac no longer held, at which point the Wi-Fi had no number for it to take instead — and after the
+reboot at 11:02 on the 19th the job was not in the domain at all: `launchctl print` answered "could not
+find service", while the nightly copy agent in the same folder had loaded normally. Nothing in the
+unified log says either way why, and the keeper cannot report a bind it was never asked to make, so the
+counter was dark for about sixteen hours with no complaint anywhere. A second, deliberately ordinary
+agent now watches for that: every five minutes and at login, if `launchctl print` has no answer for
+`com.chrisphics.shop-server`, it bootstraps the shop's own plist and writes one line to
+`shop-guard.log`; while the shop is registered, as it should always be, it does nothing and says
+nothing. It runs from the served copy under `~/Applications`, not from this folder, because a
+launchd-spawned process is not allowed to read `Documents`. Aim it at another job with `GUARD_LABEL`
+and `GUARD_PLIST` and it proves all three of its roads without touching the live shop.
+
 **The shape the shop runs today.** Since 2026-10-14 the service on this Mac is *not* the one above:
 the owner was shown what an open Wi-Fi means and answered **"Open the Wi-Fi, no word"**, so the
 LaunchAgent holds `--allow-unauthenticated-lan` and no `--host` at all — the keeper supplies the
@@ -157,9 +171,14 @@ the stale bind, asks `tools/shop-server.sh certs` for a leaf naming the new one,
 without anyone being told. With a password and `0.0.0.0` the bind never names a number, so only the
 certificate is the thing to renew; on the no-word shape both move together, and the keeper does
 both. `tools/shop-server.sh status` still says what is running, and `certs` followed by
-`install` remains the manual cure if the keeper is ever missing. Reserving the Mac's address in the
-router still avoids the question, and the *devices*' bookmarks type the number, so a moved address
-means the counter reprints its QR and tells phones the new one.
+`install` remains the manual cure if the keeper is ever missing — but note that `install` writes the
+plist from its own template, which carries no `--allow-unauthenticated-lan`, so on today's shape it
+would put the sign-in word back while nobody was looking. Read the plist it leaves behind before
+walking away. Reserving the Mac's address in the router still avoids the question, and a device that
+bookmarked the *name* (`https://BROWNHUBs-MacBook-Pro.local:8834/`) does not care what the router did:
+when this Mac's number went from `.100` to `.20` on 2026-10-19, that machine came back on its own and
+re-carried the whole rail. A device that bookmarked the old number is the one that has to be walked to
+and pointed at the name once.
 
 ### One shop password
 
