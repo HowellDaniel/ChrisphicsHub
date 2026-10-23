@@ -493,11 +493,12 @@ distinct colours and how wide a spread of light the picture of the window holds 
 the whole display comes back black whenever the display has slept, which says nothing about the
 app, and a page that arrived is not yet a page that painted. Every run ends by checking the port is
 free again: an app that leaves its engine behind is how the next copy silently joins a process
-nobody started. The Windows and Linux bundles are checked by shape only — the `.exe` and the
-`DLLs` half that carries `sqlite3` and `ssl` is there, the launcher names backslashes — because a
+nobody started. The Windows and Linux bundles are checked by shape only — the bundled
+`runtime\python.exe` and the `DLLs` half that carries `sqlite3` and `ssl` is there, the launcher names
+backslashes — because a
 Mac cannot start them, and the tool names which bundles ran and which were only looked at.
 
-**Two things a build like this cannot fix from here.**
+**Three things a build like this cannot fix from here.**
 
 - **macOS checks a downloaded app and cannot check this one**, because it is not from the App Store
   and has no developer identity behind it (the build ad-hoc signs it, which is what lets it run
