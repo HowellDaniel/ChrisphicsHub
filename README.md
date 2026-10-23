@@ -481,7 +481,13 @@ and each time asking it for `/healthz`, the dashboard, `/app.js` and `/api/boots
 the book it opened to confirm it holds the rows the build put in it — and no sessions, replays or
 access log, which is how the copy is told apart from the shop's live book. `/api/bootstrap` is also
 where the shop's own name is read back, and where the open book path must *not* be
-`~/Library/Application Support/Chrisphics Hub/chrisphics.db`. The app then reports on its own window
+`~/Library/Application Support/Chrisphics Hub/chrisphics.db`. When the build seeds a book, the proof
+does not stop at the folder it was built in: the **zip is opened and the entry read out of it**, the
+**.dmg is mounted and the book copied off the mounted volume**, and each **.pkg is unpacked with
+`pkgutil --expand-full` the way the installer would lay it down**, and the book found inside is opened
+and counted against the seed. A packaging step that quietly dropped `data/shop.db` is exactly the
+failure a folder check cannot see, and this is the file a person actually receives. The app then
+reports on its own window
 (`--window-probe`): what the page says its title is, how many screens are in the rail, and how many
 distinct colours and how wide a spread of light the picture of the window holds — because a grab of
 the whole display comes back black whenever the display has slept, which says nothing about the
@@ -503,6 +509,14 @@ Mac cannot start them, and the tool names which bundles ran and which were only 
   of the design and the limit of it: if the shop wants *one* book that several machines reach,
   that is the [always-on server](#run-the-shop-all-the-time) or the [hosted
   book](#carry-the-shops-records-onto-the-hosted-book), not this.
+- **There is no `Setup.exe`, and this Mac cannot make one.** A `.exe` installer is compiled by a
+  Windows toolchain; there is none here and no package manager to fetch one. The Windows deliverable
+  is the folder's `Install Chrisphics Hub.cmd` running the `install.ps1` beside it, which does the
+  parts a person means by "install": the program in `%LOCALAPPDATA%\Programs\Chrisphics Hub`, real
+  `.lnk` shortcuts in the Start Menu and on the Desktop, and the entry under Settings ▸ Apps that
+  uninstalls it. The executable those shortcuts reach is `runtime\python.exe` inside the same folder,
+  so nothing has to be installed on their PC first. A signed double-clickable `.exe`, and a Linux
+  `.deb`, both need a machine of that kind to build on.
 
 A bundle installed this way is still a plain `http://127.0.0.1:8712/` address, and browsers count
 loopback as a secure context — so the service worker installs, the screens come from the bundle's

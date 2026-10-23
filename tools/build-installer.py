@@ -899,7 +899,7 @@ def build(key):
           % (digest.hexdigest(), len(wanted), PYTHON, TAG, git_stamp()))
 
     if kind == "mac":
-        for extra in (mac_dmg(bundle, target), mac_pkg(bundle, target)):
+        for extra in mac_dmg(bundle, target) + mac_pkg(bundle, target):
             note("  %s" % extra[0], extra[1], extra[2])
 
     zip_path = os.path.join(DIST, target["zip"])
@@ -916,12 +916,35 @@ def build(key):
          and any(n.endswith("app/schema.sql") for n in names)
          and any(n.endswith("runtime/bin/python3") or n.endswith("runtime/python.exe")
                  for n in names), "%d entries" % len(names))
+    if SEEDING["path"]:
+        entry = [n for n in names if n.endswith(MAC_SEED if kind == "mac" else SEED_FOLDER)]
+        where = os.path.join(scratch(), "from-zip.db")
+        with zipfile.ZipFile(zip_path) as archive:
+            with open(where, "wb") as taken:
+                taken.write(archive.read(entry[0]) if entry else b"")
+        label, holds, detail = book_carries(where, "")
+        note("  and the zip a person downloads holds the shop's book", holds, detail)
     return {"bundle": bundle, "kind": kind, "launcher": launcher_path, "server": server,
             "interpreter": interpreter, "runtime": runtime, "command": command}
 
 
 def RUNTIME_BIN(kind):
     return ("python.exe",) if kind == "win" else ("bin", "python3")
+
+
+def book_carries(where, label):
+    """Ask a book that is already sealed inside a deliverable the same question as the seed.
+
+    The folder is proved by the checks in `build()`; this proves the .dmg, the .pkg and the zip a
+    person actually receives, because a package step that quietly drops a file is exactly the kind of
+    failure a folder check cannot see.
+    """
+    said = book_says(where) if where and os.path.isfile(where) else None
+    holds = bool(said) and said["figures"] == SEEDING["figures"]
+    holds = holds and not any(said["runtime"].values()) and not said["waiting"]
+    return (label, holds,
+            "%s, no sign-ins or replays — %s" % (said["figures"], SEEDING["from"])
+            if said else "no book inside what was built")
 
 
 def mac_dmg(bundle, target):
@@ -935,14 +958,22 @@ def mac_dmg(bundle, target):
                         "-ov", "-format", "UDZO", dmg], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         mount = tempfile.mkdtemp(prefix="chrisphics-mount-")
+        taken = ""
         try:
             subprocess.run(["hdiutil", "attach", "-nobrowse", "-mountpoint", mount, dmg],
                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             inside = sorted(os.listdir(mount))
+            on_the_disk = os.path.join(mount, MAC_SEED)
+            if SEEDING["path"] and os.path.isfile(on_the_disk):
+                taken = os.path.join(scratch(), "from-dmg.db")
+                shutil.copy2(on_the_disk, taken)
         finally:
             subprocess.run(["hdiutil", "detach", "-quiet", mount], stdout=subprocess.DEVNULL)
-        return ("the .dmg mounts and holds the app", MAC_APP in inside,
-                "%.1f MB — %s" % (os.path.getsize(dmg) / 1048576.0, ", ".join(inside)))
+        checks = [("the .dmg mounts and holds the app", MAC_APP in inside,
+                   "%.1f MB — %s" % (os.path.getsize(dmg) / 1048576.0, ", ".join(inside)))]
+        if SEEDING["path"]:
+            checks.append(book_carries(taken, "and the .dmg hands over the shop's own book"))
+        return checks
     finally:
         shutil.rmtree(stage, ignore_errors=True)
 
@@ -957,9 +988,21 @@ def mac_pkg(bundle, target):
     listed = subprocess.run(["pkgutil", "--payload-files", pkg],
                             capture_output=True, text=True).stdout
     ok = ("Contents/MacOS/%s" % MAC_EXE in listed and "Resources/runtime/bin/python3" in listed)
-    return ("the .pkg holds the launcher and the runtime", ok,
-            "%.1f MB, %d files inside" % (os.path.getsize(pkg) / 1048576.0,
-                                          len(listed.splitlines())))
+    checks = [("the .pkg holds the launcher and the runtime", ok,
+               "%.1f MB, %d files inside" % (os.path.getsize(pkg) / 1048576.0,
+                                             len(listed.splitlines())))]
+    if SEEDING["path"]:
+        # Unpack what the installer would actually lay down and open the book inside it.
+        box = os.path.join(scratch(), "pkg-contents")
+        shutil.rmtree(box, ignore_errors=True)
+        subprocess.run(["pkgutil", "--expand-full", pkg, box], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        found = [os.path.join(base, name)
+                 for base, _, names in os.walk(box) for name in names if name == "shop.db"]
+        checks.append(book_carries(found[0] if found else "",
+                                   "and the .pkg installs the shop's own book too"))
+        shutil.rmtree(box, ignore_errors=True)
+    return checks
 
 
 def ask(command, port, prefix=(), env_extra=None):
