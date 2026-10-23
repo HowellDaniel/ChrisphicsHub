@@ -22,7 +22,7 @@ there is never a moment when the shop's records only exist in one place.
 | `server.py`, `schema.sql`, `public/` | the records engine and the screens it serves |
 | `desktop/` | the native shell's Swift source and `build-app.sh` |
 | `render.yaml` | Render web service, HTTPS proxy, password and persistent-disk setup |
-| `tools/` | `shop-boot.sh` keeps the shop online on whatever address the Wi-Fi gives this Mac, `shop-server.sh` installs that service and its certificates, `shop-guard.sh` notices when launchd never loaded it at all, or when nothing is standing on its door, `nightly-backup.sh` copies the book each night, `carry-book.py` hands a copy to a hosted book, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
+| `tools/` | `shop-boot.sh` keeps the shop online on whatever address the Wi-Fi gives this Mac, `shop-server.sh` installs that service and its certificates, `shop-guard.sh` notices when launchd never loaded it at all, or when nothing is standing on its door, `nightly-backup.sh` copies the book each night, `carry-book.py` hands a copy to a hosted book, `build-installer.py` packs the whole shop into a folder that runs on a machine with nothing installed, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
 | `~/Library/Application Support/Chrisphics Hub/` | your actual records — not in this folder |
 
 ## Start it
@@ -387,6 +387,63 @@ private address only, which leaves the whole book open to anyone who joins that 
 as a demo switch. Do not forward the port to the internet either: a bare Mac with a hole punched
 in the router has no HTTPS and no password in front of the accounts. If the book should be
 reachable away from the shop, [host it](#host-on-render) instead.
+
+### A copy that installs on any computer
+
+`run.sh` asks the machine for Python 3 first, and most machines do not have one to give: macOS
+stopped shipping a usable `python3`, and Windows ships none. `tools/build-installer.py` removes
+that question. It downloads a relocatable CPython (python-build-standalone — the same interpreter
+every time, unpacked wherever the folder is put, no installer, no registry, no admin rights),
+puts the shop beside it, and points the book **inside the folder**:
+
+```sh
+python3 tools/build-installer.py                 # all four machine kinds
+python3 tools/build-installer.py mac-arm64       # or just the one you are handing over
+python3 tools/build-installer.py --clean         # throw the folders away, keep the downloads
+```
+
+Each kind lands in `dist/` twice — a folder to copy onto the machine and a zip to send it in:
+
+```
+Chrisphics Hub for Mac (Apple silicon)/
+├── Start Chrisphics Hub.command     ← the one thing whoever receives it double-clicks
+├── app/                             ← server.py, schema.sql, public/ — the whole shop
+├── runtime/                         ← the Python that runs it
+├── data/shop.db                     ← this computer's own book, created on the first start
+├── README.txt                       ← what to tell them, including the two fixes below
+└── app.sha256                       ← the fingerprint of the files this build took
+```
+
+The launcher sets `CHRISPHICS_SUPPORT` **and** `CHRISPHICS_DB` inside the folder. Naming the book
+matters more than it looks: the engine only goes looking for an older book in `~/Library` when it
+is left to choose its own path, so a portable copy that picked its own default would quietly open
+this Mac's shop records and print one print shop's takings on another company's screen. A bundle
+is a second shop, not a second window onto the first one.
+
+**What the build proves, and what it does not.** `tools/build-installer.py` checks each bundle as
+it is built and then runs the Mac ones — the folder in place, and again unpacked from its own zip
+into a path the repository has never seen, on a spare port, asking it for `/healthz`, the
+dashboard, `/api/bootstrap` and `/app.js` and reading the book it made. That unzip-and-run is the
+only real test of the two things a zip can lose: the symlinks inside a runtime and the executable
+bit on the interpreter. The Windows and Linux bundles are checked by shape only — the `.exe` and
+the `DLLs` half that carries `sqlite3` and `ssl` is there, the launcher names backslashes — because
+a Mac cannot start them, and the tool says which is which rather than implying all four ran.
+
+**Two things a folder like this cannot fix from here.**
+
+- **macOS checks a downloaded folder and cannot check this one**, because it is not from the App
+  Store and has no developer identity behind it. One line, once, in Terminal:
+  `xattr -dr com.apple.quarantine "<the folder>"`. Buying that away means an Apple developer
+  account and notarisation, not a different script.
+- **Nothing merges two bundles' books.** Each computer keeps its own records, which is the point
+  of the design and the limit of it: if the shop wants *one* book that several machines reach,
+  that is the [always-on server](#run-the-shop-all-the-time) or the [hosted
+  book](#carry-the-shops-records-onto-the-hosted-book), not this.
+
+A bundle installed this way is still a plain `http://127.0.0.1:8712/` address, and browsers count
+loopback as a secure context — so the service worker installs, the screens come from the bundle's
+own `app/public/`, and the offline carry the [phone rail](#put-the-book-on-a-phone) does works on
+the machine's own address without a certificate.
 
 ### Host on Render
 
