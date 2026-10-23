@@ -22,7 +22,7 @@ there is never a moment when the shop's records only exist in one place.
 | `server.py`, `schema.sql`, `public/` | the records engine and the screens it serves |
 | `desktop/` | the native shell's Swift source and `build-app.sh` |
 | `render.yaml` | Render web service, HTTPS proxy, password and persistent-disk setup |
-| `tools/` | `shop-boot.sh` keeps the shop online on whatever address the Wi-Fi gives this Mac, `shop-server.sh` installs that service and its certificates, `shop-guard.sh` notices when launchd never loaded it at all, or when nothing is standing on its door, `nightly-backup.sh` copies the book each night, `carry-book.py` hands a copy to a hosted book, `build-installer.py` packs the whole shop into a folder that runs on a machine with nothing installed, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
+| `tools/` | `shop-boot.sh` keeps the shop online on whatever address the Wi-Fi gives this Mac, `shop-server.sh` installs that service and its certificates, `shop-guard.sh` notices when launchd never loaded it at all, or when nothing is standing on its door, `nightly-backup.sh` copies the book each night, `carry-book.py` hands a copy to a hosted book, `build-installer.py` builds the shop into an application that installs on a Mac or a Windows PC with the Python inside it, `make-qr.swift` and `make-web-icons.swift` draw the QR and the install icons; the rest are dev checks |
 | `~/Library/Application Support/Chrisphics Hub/` | your actual records — not in this folder |
 
 ## Start it
@@ -393,8 +393,9 @@ reachable away from the shop, [host it](#host-on-render) instead.
 `run.sh` asks the machine for Python 3 first, and most machines do not have one to give: macOS
 stopped shipping a usable `python3`, and Windows ships none. `tools/build-installer.py` removes
 that question. It downloads a relocatable CPython (python-build-standalone — the same interpreter
-every time, unpacked wherever the folder is put, no installer, no registry, no admin rights),
-puts the shop beside it, and points the book **inside the folder**:
+every time, unpacked wherever the folder is put, no installer, no registry, no admin rights), puts
+the shop beside it, and builds what a person actually expects to receive: an application that
+installs.
 
 ```sh
 python3 tools/build-installer.py                 # all four machine kinds
@@ -402,39 +403,68 @@ python3 tools/build-installer.py mac-arm64       # or just the one you are handi
 python3 tools/build-installer.py --clean         # throw the folders away, keep the downloads
 ```
 
-Each kind lands in `dist/` twice — a folder to copy onto the machine and a zip to send it in:
+**On a Mac** the deliverable is `Chrisphics Hub.app` — a real window with the shop in it, its own
+icon, its own menu, and the engine and the screens inside it (`Contents/Resources/runtime` and
+`Contents/Resources/app`). Nothing on the receiving machine has to be installed first: not a
+runtime, not Python, not a package. The window shell is `tools/portable-app-shell.m`, compiled by
+`clang` for one chip or the other — Objective-C rather than Swift because the command-line Swift
+runtime on a Mac without Xcode ships arm64 slices only, so an Intel copy could not be built from
+here. It starts the bundled engine, waits for the book to open, points a `WKWebView` at it over
+loopback, and closes the engine again when it is quit or killed.
 
 ```
 Chrisphics Hub for Mac (Apple silicon)/
-├── Start Chrisphics Hub.command     ← the one thing whoever receives it double-clicks
-├── app/                             ← server.py, schema.sql, public/ — the whole shop
-├── runtime/                         ← the Python that runs it
-├── data/shop.db                     ← this computer's own book, created on the first start
-├── README.txt                       ← what to tell them, including the two fixes below
-└── app.sha256                       ← the fingerprint of the files this build took
+├── Chrisphics Hub.app                 ← the application itself
+├── Install Chrisphics Hub.command     ← double-click: copies it into /Applications and opens it
+├── Start Chrisphics Hub.command       ← or run it out of this folder, same records
+├── README.txt, app.sha256
+Chrisphics-Hub-Mac-Apple-silicon.dmg   ← beside the folder: drag the icon onto Applications
+Chrisphics-Hub-Mac-Apple-silicon.pkg   ← beside the folder: double-click an installer
+Chrisphics-Hub-Mac-Apple-silicon.zip   ← the folder, for sending
 ```
 
-The launcher sets `CHRISPHICS_SUPPORT` **and** `CHRISPHICS_DB` inside the folder. Naming the book
-matters more than it looks: the engine only goes looking for an older book in `~/Library` when it
-is left to choose its own path, so a portable copy that picked its own default would quietly open
-this Mac's shop records and print one print shop's takings on another company's screen. A bundle
-is a second shop, not a second window onto the first one.
+**On Windows** the deliverable is `Install Chrisphics Hub.cmd`, which runs one PowerShell script:
+the program goes into `%LOCALAPPDATA%\Programs\Chrisphics Hub` (no admin rights), an entry appears
+in the Start Menu and on the Desktop, and a line goes into `HKCU\...\Uninstall` so it shows up in
+Settings ▸ Apps and uninstalls like anything else. `Uninstall Chrisphics Hub.cmd` takes it all away
+and leaves the records. A Windows folder cannot hold a window, so this one keeps its console —
+which is also what makes it explainable: closing the console closes the shop, and it says so.
 
-**What the build proves, and what it does not.** `tools/build-installer.py` checks each bundle as
-it is built and then runs the Mac ones — the folder in place, and again unpacked from its own zip
-into a path the repository has never seen, on a spare port, asking it for `/healthz`, the
-dashboard, `/api/bootstrap` and `/app.js` and reading the book it made. That unzip-and-run is the
-only real test of the two things a zip can lose: the symlinks inside a runtime and the executable
-bit on the interpreter. The Windows and Linux bundles are checked by shape only — the `.exe` and
-the `DLLs` half that carries `sqlite3` and `ssl` is there, the launcher names backslashes — because
-a Mac cannot start them, and the tool says which is which rather than implying all four ran.
+**Linux** gets a folder and a launcher, and the build report says so plainly rather than calling it
+an installer.
 
-**Two things a folder like this cannot fix from here.**
+Each install owns its records. They go in *this computer's* per-user folder
+(`~/Library/Application Support/CRISPprint Hub`, `%LOCALAPPDATA%\CRISPprint Hub`) and the launcher
+names the book file (`CHRISPHICS_DB`) rather than letting the engine choose — because the engine
+only goes looking for an older book in `~/Library` when left to pick its own path, so a portable
+copy that picked its own default would quietly open this Mac's shop records and print one print
+shop's takings on another company's screen. A bundle is a second shop, not a second window onto the
+first one.
 
-- **macOS checks a downloaded folder and cannot check this one**, because it is not from the App
-  Store and has no developer identity behind it. One line, once, in Terminal:
-  `xattr -dr com.apple.quarantine "<the folder>"`. Buying that away means an Apple developer
-  account and notarisation, not a different script.
+**What the build proves, and what it does not.** Every Mac bundle is *run* here, four times over:
+the folder in place; again unpacked from its own zip into a path the repository has never seen,
+which is the only real test of the two things a zip can lose (the symlinks inside a runtime and the
+executable bit on the interpreter); again after `Install Chrisphics Hub.command` has copied it into
+a throwaway Applications folder under a throwaway `HOME`, twice so the copy it replaced is kept;
+and each time asking it for `/healthz`, the dashboard, `/app.js` and `/api/bootstrap`, then reading
+the book it made to confirm it is an empty one. The app then reports on its own window
+(`--window-probe`): what the page says its title is, how many screens are in the rail, and how many
+distinct colours and how wide a spread of light the picture of the window holds — because a grab of
+the whole display comes back black whenever the display has slept, which says nothing about the
+app, and a page that arrived is not yet a page that painted. Every run ends by checking the port is
+free again: an app that leaves its engine behind is how the next copy silently joins a process
+nobody started. The Windows and Linux bundles are checked by shape only — the `.exe` and the
+`DLLs` half that carries `sqlite3` and `ssl` is there, the launcher names backslashes — because a
+Mac cannot start them, and the tool names which bundles ran and which were only looked at.
+
+**Two things a build like this cannot fix from here.**
+
+- **macOS checks a downloaded app and cannot check this one**, because it is not from the App Store
+  and has no developer identity behind it (the build ad-hoc signs it, which is what lets it run
+  here, and buys nothing at the door). Right-click → Open the first time, or one line in Terminal:
+  `xattr -dr com.apple.quarantine "<the app>"`. Windows shows the same hesitation for a script it
+  cannot vouch for: "More info ▸ Run anyway". Buying either away means an Apple developer account
+  plus notarisation and an Authenticode certificate — money, not a different script.
 - **Nothing merges two bundles' books.** Each computer keeps its own records, which is the point
   of the design and the limit of it: if the shop wants *one* book that several machines reach,
   that is the [always-on server](#run-the-shop-all-the-time) or the [hosted
@@ -442,8 +472,10 @@ a Mac cannot start them, and the tool says which is which rather than implying a
 
 A bundle installed this way is still a plain `http://127.0.0.1:8712/` address, and browsers count
 loopback as a secure context — so the service worker installs, the screens come from the bundle's
-own `app/public/`, and the offline carry the [phone rail](#put-the-book-on-a-phone) does works on
-the machine's own address without a certificate.
+own `public/`, and the offline carry the [phone rail](#put-the-book-on-a-phone) does works on the
+machine's own address without a certificate. On the Mac the window is that same address; opening it
+in a browser instead is a matter of typing it.
+
 
 ### Host on Render
 
