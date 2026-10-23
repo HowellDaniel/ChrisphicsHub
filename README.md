@@ -403,6 +403,8 @@ python3 tools/build-installer.py mac-arm64        # or just the one you are hand
 python3 tools/build-installer.py --book-from copy-of-book.db   # start from that copy instead
 python3 tools/build-installer.py --blank          # empty books, for a shop that is not this one
 python3 tools/build-installer.py --clean          # throw the folders away, keep the downloads
+
+CHRISPHICS_DIST=/elsewhere python3 tools/build-installer.py --blank   # a set beside this one
 ```
 
 **On a Mac** the deliverable is `Chrisphics Hub.app` — a real window with the shop in it, its own
@@ -460,7 +462,15 @@ those would either sign in as somebody else or send the same client the same mes
 app password never travels because it was never in the book — it sits in `email-secrets.json`, mode
 600, and typing it is the owner's job. `--book-from FILE` seeds from that copy, and `--blank` builds
 empty books for a shop that is not this one; either way the README inside the bundle says where the
-figures came from and when they were read.
+figures came from and when they were read, and the build report ends by saying which kind of set it
+just made.
+
+A seeded bundle is therefore a **handover of the shop's records**, not just of a program: whoever
+receives one receives the client names, numbers and money with it. That is why `CHRISPHICS_DIST`
+exists — a `--blank` set written to its own folder, with every file named `DEMO-…` and a note on the
+front saying it holds nothing, so the two sets cannot be sent by reflex. The demo copy does not even
+carry the shop's name, since that lives in the book: whoever installs it types their own on Shop &
+devices.
 
 **What the build proves, and what it does not.** Every Mac bundle is *run* here, four times over:
 the folder in place; again unpacked from its own zip into a path the repository has never seen,

@@ -16,5 +16,6 @@ tools/write-off-152-profit.sql
 # Portable bundles and the interpreter archives they are built from. Both are products of
 # `tools/build-installer.py`, both are hundreds of megabytes, and the archives are re-downloadable:
 # they belong on the machine that receives them, not in the repository that built them.
-dist/
+# `dist*` also covers the second folder a `CHRISPHICS_DIST=… --blank` demo build writes beside it.
+dist*/
 runtime-cache/

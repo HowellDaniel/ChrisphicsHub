@@ -58,6 +58,10 @@ Usage:
     python3 tools/build-installer.py --book-from copy-of-book.db   # start from that copy instead
     python3 tools/build-installer.py --blank          # empty books, for a shop that is not this one
     python3 tools/build-installer.py --clean          # throw the folders away, keep the downloads
+
+    CHRISPHICS_DIST=/elsewhere python3 tools/build-installer.py --blank
+        # writes the set to that folder instead of dist/, so a demo build never lands on top of the
+        # shop's seeded one
 """
 import hashlib
 import os
@@ -75,7 +79,9 @@ import zipfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(REPO, "runtime-cache")
-DIST = os.path.join(REPO, "dist")
+# A blank demo build must not overwrite the seeded one, so the output folder can be moved: the two
+# sets then sit apart and a person cannot send the wrong half of the shop's records by reflex.
+DIST = os.environ.get("CHRISPHICS_DIST") or os.path.join(REPO, "dist")
 
 # One release of one interpreter, chosen for the widest set of machines rather than for the newest
 # number: the engine is stdlib-only and this is the release this shop's own book has been migrated on.
@@ -1187,7 +1193,7 @@ def main():
         return 2
     if "--clean" in argv:
         shutil.rmtree(DIST, ignore_errors=True)
-        print("removed dist/ (runtime-cache/ kept)")
+        print("removed %s (runtime-cache/ kept)" % DIST)
         return 0
     keys = wanted or list(TARGETS)
     os.makedirs(DIST, exist_ok=True)
@@ -1233,7 +1239,11 @@ def main():
         print("  failed: %s" % f)
     if proved:
         print("proved by running: %s" % ", ".join(TARGETS[k]["folder"] for k in proved))
-    print("in dist/: " + ", ".join(sorted(os.listdir(DIST))))
+    print("%s" % ("WARNING: these copies carry the shop's clients and money — send them only to "
+                  "somebody who will work on the shop's book"
+                  if SEEDING["path"] else
+                  "these copies start with an empty book — safe to hand to anybody"))
+    print("in %s/: %s" % (DIST, ", ".join(sorted(os.listdir(DIST)))))
     return 1 if fails else 0
 
 
