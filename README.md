@@ -398,9 +398,11 @@ the shop beside it, and builds what a person actually expects to receive: an app
 installs.
 
 ```sh
-python3 tools/build-installer.py                 # all four machine kinds
-python3 tools/build-installer.py mac-arm64       # or just the one you are handing over
-python3 tools/build-installer.py --clean         # throw the folders away, keep the downloads
+python3 tools/build-installer.py                  # all four kinds, each starting from the shop's book
+python3 tools/build-installer.py mac-arm64        # or just the one you are handing over
+python3 tools/build-installer.py --book-from copy-of-book.db   # start from that copy instead
+python3 tools/build-installer.py --blank          # empty books, for a shop that is not this one
+python3 tools/build-installer.py --clean          # throw the folders away, keep the downloads
 ```
 
 **On a Mac** the deliverable is `Chrisphics Hub.app` — a real window with the shop in it, its own
@@ -441,13 +443,35 @@ copy that picked its own default would quietly open this Mac's shop records and 
 shop's takings on another company's screen. A bundle is a second shop, not a second window onto the
 first one.
 
+Owning a book is not the same as starting with an empty one, and an empty one is no use to anybody at
+this shop. So a build made on the shop's Mac reads that Mac's own book — read-only, the same way
+`tools/carry-book.py` and `server.py --backup` read it while the shop is trading — and puts a copy of
+it inside every bundle, at `data/shop.db` (for a Mac, `Contents/Resources/data/shop.db`), which is
+the file the launcher hands to a machine that has no book yet. The install then opens on the shop's
+figures and the shop's settings — name, address, phone, tagline, clients, jobs, money, expenses — and
+the person who receives it never has to import anything. The read is `mode=ro` and the build reports
+the book's fingerprint before and after, so the shop's own file is proved untouched by the copy taken
+out of it.
+
+Rows that only mean something on the shop's Mac are removed from the copy first: the sign-in
+sessions, the `sync_requests` rows the server has already replayed, the access log, any client
+message still waiting to be sent, and the backup and MoMo history keys. A second machine that carried
+those would either sign in as somebody else or send the same client the same message twice. The email
+app password never travels because it was never in the book — it sits in `email-secrets.json`, mode
+600, and typing it is the owner's job. `--book-from FILE` seeds from that copy, and `--blank` builds
+empty books for a shop that is not this one; either way the README inside the bundle says where the
+figures came from and when they were read.
+
 **What the build proves, and what it does not.** Every Mac bundle is *run* here, four times over:
 the folder in place; again unpacked from its own zip into a path the repository has never seen,
 which is the only real test of the two things a zip can lose (the symlinks inside a runtime and the
 executable bit on the interpreter); again after `Install Chrisphics Hub.command` has copied it into
 a throwaway Applications folder under a throwaway `HOME`, twice so the copy it replaced is kept;
 and each time asking it for `/healthz`, the dashboard, `/app.js` and `/api/bootstrap`, then reading
-the book it made to confirm it is an empty one. The app then reports on its own window
+the book it opened to confirm it holds the rows the build put in it — and no sessions, replays or
+access log, which is how the copy is told apart from the shop's live book. `/api/bootstrap` is also
+where the shop's own name is read back, and where the open book path must *not* be
+`~/Library/Application Support/Chrisphics Hub/chrisphics.db`. The app then reports on its own window
 (`--window-probe`): what the page says its title is, how many screens are in the rail, and how many
 distinct colours and how wide a spread of light the picture of the window holds — because a grab of
 the whole display comes back black whenever the display has slept, which says nothing about the

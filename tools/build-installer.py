@@ -35,6 +35,16 @@ another company's screens. Two installs are two books: nothing merges them. That
 design chose. For one book several machines reach, there is the always-on shop server and the
 offline-carry devices instead.
 
+Owning a book is not the same as starting with an empty one, and an empty one is no use to anybody at
+the shop. So a build made on the shop's Mac reads that Mac's own book — read-only, the same way
+`tools/carry-book.py` and `server.py --backup` read it while the shop is open — and puts a copy of it
+inside every bundle. The install then opens with the shop's figures and the shop's settings: name,
+address, phone, tagline, clients, jobs, money, expenses. The rows that only mean something on the
+shop's Mac are taken out of the copy first — who is signed in, which writes its server already
+replayed, the access log, and any client message still waiting to be sent, because a second machine
+would send the client the same message a second time. And the email password never travels, because it
+was never in the book; it sits in its own file at mode 600, and typing it is the owner's job.
+
 Every Mac bundle is **run** here — the launcher in place, then again after the installer has copied
 it into an Applications folder and again out of its own zip — because a copy can lose the symlinks
 inside a runtime or the interpreter's executable bit, and only starting it proves it kept them. The
@@ -43,8 +53,10 @@ says it is, and how many distinct colours the picture of it holds. Windows and L
 by shape from here and the report names which is which.
 
 Usage:
-    python3 tools/build-installer.py                  # every machine kind
+    python3 tools/build-installer.py                  # every kind, from the shop's own book
     python3 tools/build-installer.py mac-arm64 win-x64
+    python3 tools/build-installer.py --book-from copy-of-book.db   # start from that copy instead
+    python3 tools/build-installer.py --blank          # empty books, for a shop that is not this one
     python3 tools/build-installer.py --clean          # throw the folders away, keep the downloads
 """
 import hashlib
@@ -86,6 +98,35 @@ MAC_MIN = "10.13"
 # launchd service, and a computer that owns its own book needs neither.
 APP_FILES = ("server.py", "schema.sql")
 APP_DIRS = ("public",)
+
+# The shop's own records, on this Mac. Everything the shop configures — its name, address, phone,
+# tagline, the backup choices, the consent default — lives in this one file, so copying the book is
+# what "all its settings" means; there is no separate settings file to hand over.
+SHOP_SUPPORT = os.path.expanduser("~/Library/Application Support/Chrisphics Hub")
+SHOP_BOOK = os.path.join(SHOP_SUPPORT, "chrisphics.db")
+BOOK_COPY = re.compile(r"^(backup|manual)-\d{8}-\d{6}\.db$")
+
+# Where a bundle keeps the copy it installs from, and what the machine's own book is called.
+SEED_FOLDER = os.path.join("data", "shop.db")
+MAC_SEED = os.path.join(MAC_APP, "Contents", "Resources", "data", "shop.db")
+
+# What never travels with a copy of the book. Who is signed in, which writes the shop's server has
+# already replayed and what the shop's access log says are facts about the shop's own Mac; and a
+# client message still waiting to be sent would be sent a second time by whichever machine happened
+# to install the copy.
+LEAVE_AT_HOME = ("DELETE FROM sessions",
+                 "DELETE FROM sync_requests",
+                 "DELETE FROM security_log",
+                 "DELETE FROM notifications WHERE state <> 'Sent'",
+                 "DELETE FROM app_state WHERE key IN ('last_backup_at','last_backup_file',"
+                 "'last_backup_kind','last_backup_error','last_backup_note','last_backup_mail',"
+                 "'momo_status','momo_checked')")
+FIGURES = ("jobs", "clients", "payments")
+RUNTIME_TABLES = ("sessions", "sync_requests", "security_log")
+
+# Filled in by main(): the one snapshot every bundle in this build is seeded from.
+SEEDING = {"path": None, "from": "an empty book", "figures": {t: 0 for t in FIGURES},
+           "shop": {}, "settings": "", "when": ""}
 
 
 def git_stamp():
@@ -142,6 +183,12 @@ export CHRISPHICS_SUPPORT="$SUPPORT"
 # Naming the book, instead of letting the engine reach its default, is what keeps this copy its own
 # shop: see legacy_book_path() in server.py.
 export CHRISPHICS_DB="$SUPPORT/shop.db"
+# The first time this app is opened on a computer, it takes the copy of the shop's book that came
+# inside it and puts it where this machine keeps its own records. After that it works only from this
+# machine's book, so reinstalling the app never overwrites what this computer has written since.
+if [ ! -f "$SUPPORT/shop.db" ] && [ -f "$CONTENTS/Resources/data/shop.db" ]; then
+  cp "$CONTENTS/Resources/data/shop.db" "$SUPPORT/shop.db"
+fi
 exec "$CONTENTS/Resources/runtime/bin/python3" "$CONTENTS/Resources/app/server.py" \\
      --port "$PORT" "$@"
 """
@@ -201,6 +248,10 @@ set HERE=%%~dp0
 if "%%CHRISPHICS_PORT%%"=="" set CHRISPHICS_PORT=8712
 set SUPPORT=%%LOCALAPPDATA%%\\CRISPprint Hub
 if not exist "%%SUPPORT%%" mkdir "%%SUPPORT%%"
+rem The first time this is started on the PC, the copy of the shop's book that came in the program
+rem folder is put where this machine keeps its own records. After that only this machine's book is
+rem opened, so reinstalling the program never overwrites what this PC has written since.
+if not exist "%%SUPPORT%%\\shop.db" if exist "%%HERE%%data\\shop.db" copy /b "%%HERE%%data\\shop.db" "%%SUPPORT%%\\shop.db" >nul
 echo Opening Chrisphics Hub at http://127.0.0.1:%%CHRISPHICS_PORT%%/
 echo Records: %%SUPPORT%%\\shop.db
 echo Leave this window open while you work; close it to stop the shop.
@@ -250,7 +301,7 @@ if ($Action -eq "install") {
         Move-Item -Path $Program -Destination "$Program.before-$Stamp"
     }
     New-Item -ItemType Directory -Force -Path $Program | Out-Null
-    foreach ($Item in @("app", "runtime", "Chrisphics Hub.ico", "Start Chrisphics Hub.bat",
+    foreach ($Item in @("app", "runtime", "data", "Chrisphics Hub.ico", "Start Chrisphics Hub.bat",
                         "install.ps1", "README.txt")) {
         Copy-Item -Recurse -Force (Join-Path $Root $Item) $Program
     }
@@ -302,9 +353,11 @@ RUN IT
 
 YOUR RECORDS
 %(records)s
-    Nothing here reads or writes any other computer's book. This install is a shop of its own: two
-    computers running it keep two books and nothing merges them. To move the records, copy that
-    file. To back the shop up, copy that folder.
+%(starts)s
+    Nothing here reads or writes any other computer's book. Two computers running this keep two books
+    and nothing merges them: what you write on one does not appear on the other, and it never will.
+    That is the deal a standalone copy makes so it can work with the network down and the shop Mac
+    switched off. To move records, copy that file. To back this computer up, copy that folder.
 
 MAKE IT FEEL LIKE AN APP ON THE PHONE
     The browser can keep this address as an installed app, and the last figures you were shown still
@@ -320,7 +373,9 @@ because nothing outside this computer can reach it.
 """
 
 MAC_RECORDS = """    They live in "~/Library/Application Support/CRISPprint Hub/shop.db" — the folder this
-    computer's own copy keeps. It is NOT the shop's "Chrisphics Hub" folder, and it never opens it."""
+    computer's own copy keeps. It is NOT the shop's "Chrisphics Hub" folder, and the app never opens
+    that one: the shop's book was copied into this app when it was built, and this file is the only
+    book it reads or writes."""
 
 WIN_RECORDS = """    They live in "%LOCALAPPDATA%\\CRISPprint Hub\\shop.db" — this user's own copy.
     Uninstalling leaves that file where it is, so the records outlive the program."""
@@ -340,6 +395,22 @@ WIN_OPENING = """    A console window opens and the shop appears in your browser
     into Chrome, Edge or Firefox."""
 
 LINUX_OPENING = WIN_OPENING.replace("console", "terminal")
+
+# What the install opens with. A build made on the shop's Mac hands over the shop's own book, so the
+# first screen shows the shop's figures instead of an empty ledger; a build with nothing to copy — or
+# one asked for with --blank — starts a shop of its own from zero, which is what somebody outside the
+# shop needs.
+SEEDED_START = """    It starts already full of the shop's records and the shop's settings — name, address, phone and
+    tagline, clients, jobs and money — as they stood on %s. The figures are in the file,
+    not on a server: this copy works with no network at all, and it needs nothing from the shop
+    Mac to run.
+    Where this book came from: %s.
+    Two things do not travel, and cannot. The shop's email password is never in the book, so this
+    computer cannot send the shop's mail until somebody types it in here; and the money alerts are
+    read off the shop Mac's own Messages app, so those stay with that machine.
+    Anything written on this computer stays on this computer. If a job is also written on the shop
+    Mac, there are then two records of it and nothing joins them up."""
+BLANK_START = """    It starts with an empty book, and everything you write belongs to this computer alone."""
 
 fails = []
 checks = 0
@@ -370,20 +441,131 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def rows_in(path):
-    """How much a fresh book actually holds — read straight out of the file, because the one failure
-    these checks exist to catch is a portable copy quietly filling itself with the shop's records."""
+def book_says(path):
+    """What a book actually holds, read straight out of the file. These checks exist to catch a copy
+    that quietly opens somebody else's records, and a running engine is a poor witness; the file is."""
     try:
         book = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
     except sqlite3.Error:
         return None
     try:
-        return {table: book.execute("SELECT COUNT(*) FROM %s" % table).fetchone()[0]
-                for table in ("jobs", "clients", "payments")}
+        tables = {r[0] for r in book.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if "jobs" not in tables or "app_state" not in tables:
+            return None
+        got = {"integrity": book.execute("PRAGMA integrity_check").fetchone()[0],
+               "figures": {t: book.execute("SELECT COUNT(*) FROM %s" % t).fetchone()[0]
+                           for t in FIGURES if t in tables},
+               "settings": dict(book.execute("SELECT key, value FROM app_state "
+                                             "WHERE key LIKE 'shop_%'").fetchall())}
+        got["runtime"] = {t: (book.execute("SELECT COUNT(*) FROM %s" % t).fetchone()[0]
+                              if t in tables else 0) for t in RUNTIME_TABLES}
+        got["waiting"] = (book.execute("SELECT COUNT(*) FROM notifications "
+                                       "WHERE state <> 'Sent'").fetchone()[0]
+                          if "notifications" in tables else 0)
+        return got
     except sqlite3.Error:
         return None
     finally:
         book.close()
+
+
+def shop_book_source(argv):
+    """Which copy of the shop's book the installs start from.
+
+    The live book, read read-only, is the one that answers "give the app all its settings" best: the
+    figures are tonight's, not last night's. `server.py --backup` and `tools/carry-book.py` already
+    read that same file this way while the shop is running, so a build joining the read is nothing new.
+    `--book-from FILE` names a copy, and `--blank` builds empty ones for handing the app to somebody
+    who is not this shop.
+    """
+    if "--blank" in argv:
+        return None
+    for index, word in enumerate(argv):
+        if word == "--book-from":
+            return argv[index + 1] if index + 1 < len(argv) else None
+        if word.startswith("--book-from="):
+            return word.split("=", 1)[1]
+    if os.path.isfile(SHOP_BOOK):
+        return SHOP_BOOK
+    try:
+        names = [n for n in os.listdir(os.path.join(SHOP_SUPPORT, "Backups")) if BOOK_COPY.match(n)]
+    except OSError:
+        return None
+    return os.path.join(SHOP_SUPPORT, "Backups", max(names)) if names else None
+
+
+def seed_book(source):
+    """One clean copy of the shop's book, made once per build and handed to every bundle.
+
+    The shop's file is opened `mode=ro`, which is the guarantee the last note in this function
+    checks: SQLite refuses a write through that URI, so a build cannot scribble on the records it is
+    copying. The copy is left in delete-journal mode with no sidecar files, because a book that needs
+    a `-wal` beside it is not a book a launcher can `cp` into place.
+    """
+    destination = os.path.join(scratch(), "shop-seed.db")
+    for extra in (destination, destination + "-wal", destination + "-shm"):
+        try:
+            os.remove(extra)
+        except OSError:
+            pass
+    before = sha256_file(source)
+    shop = sqlite3.connect("file:%s?mode=ro" % source, uri=True)
+    copy = sqlite3.connect(destination)
+    try:
+        if shop.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            return None, "the shop's book did not pass its own check"
+        shop.backup(copy)
+        for statement in LEAVE_AT_HOME:
+            copy.execute(statement)
+        copy.commit()
+        copy.execute("PRAGMA journal_mode=DELETE")
+        copy.execute("VACUUM")
+        copy.commit()
+    except sqlite3.Error as err:
+        copy.close()
+        shop.close()
+        return None, "the copy could not be made: %s" % err
+    copy.close()
+    shop.close()
+    after = sha256_file(source)
+    if after != before and os.path.getmtime(source) < time.time() - 120:
+        os.remove(destination)
+        return None, "the build changed the shop's own book — stop and look"
+    for extra in (destination + "-wal", destination + "-shm"):
+        try:
+            os.remove(extra)
+        except OSError:
+            pass
+    said = book_says(destination)
+    if not said or said["integrity"] != "ok":
+        return None, "the copy did not pass its own check"
+    note("the shop's own book came out of the read unchanged",
+         after == before, "same fingerprint before and after" if after == before
+         else "it moved while the build read it, which only the shop can do: the build holds it "
+              "mode=ro and SQLite refuses a write through that")
+    return destination, ""
+
+
+def prepare_seed(argv):
+    """Decide once, for the whole build, what every installed copy starts its book with."""
+    source = shop_book_source(argv)
+    if not source:
+        SEEDING["from"] = "an empty book — this Mac holds no copy of the shop's book to start from"
+        note("a build with no book to copy makes empty installs", True, "--blank, or no shop book here")
+        return
+    path, why = seed_book(source)
+    if not path:
+        SEEDING["from"] = "an empty book — %s" % why
+        note("the shop's book copied into the installs", False, why)
+        return
+    said = book_says(path)
+    SEEDING.update(path=path, figures=said["figures"], shop=said["settings"],
+                   settings=", ".join(sorted(said["settings"])),
+                   when=time.strftime("%Y-%m-%d"))
+    SEEDING["from"] = ("the shop's own book, read as the build ran" if source == SHOP_BOOK
+                       else "the shop's copy %s" % os.path.basename(source))
+
 
 
 def download(asset):
@@ -600,6 +782,32 @@ def build(key):
         shutil.copy2(source, destination)
     note("every app file copied into the bundle", len(wanted) >= 10, "%d files" % len(wanted))
 
+    # The copy of the shop's book this install opens with. For a Mac it travels *inside* the .app, so
+    # dragging the icon to Applications takes the records with it; for Windows and Linux it sits in a
+    # `data` folder beside the launcher. A Linux copy works straight out of that file, because that
+    # folder is its support folder; Mac and Windows copy it out to their own per-user book the first
+    # time they are started, so the app can be reinstalled without losing what the machine wrote.
+    if SEEDING["path"]:
+        where = os.path.join(bundle, MAC_SEED if kind == "mac" else SEED_FOLDER)
+        os.makedirs(os.path.dirname(where), exist_ok=True)
+        shutil.copy2(SEEDING["path"], where)
+        os.chmod(where, 0o644)
+        said = book_says(where)
+        note("  and it starts with a copy of the shop's book", bool(said),
+             "%s — taken from %s" % (", ".join("%s %d" % kv for kv in sorted(said["figures"].items()))
+                                     if said else "unreadable", SEEDING["from"]))
+        note("    with the shop's own settings in it", bool(said and said["settings"]),
+             ", ".join(sorted(said["settings"])) if said else "none")
+        note("    and none of the shop's sign-ins, replays or access log",
+             bool(said) and not any(said["runtime"].values()) and not said["waiting"],
+             str(said["runtime"]) + (", %d client messages still waiting to send" % said["waiting"]
+                                     if said and said["waiting"] else "") if said else "unreadable")
+        note("    and it passes its own check as a book", bool(said) and said["integrity"] == "ok",
+             said["integrity"] if said else "unreadable")
+        note("    and it is one file, with no write-ahead sidecars",
+             not any(os.path.exists(where + s) for s in ("-wal", "-shm")),
+             os.path.getsize(where) // 1024 and "%d KB" % (os.path.getsize(where) // 1024))
+
     server = os.path.join(bundle, prefix, "server.py")
     interpreter = os.path.join(runtime, *RUNTIME_BIN(kind))
     launcher_path = (os.path.join(macos, MAC_EXE) if kind == "mac"
@@ -667,9 +875,14 @@ def build(key):
 
     run_hint = ('"Start Chrisphics Hub.command" runs it from this folder, or open "%s" once it is '
                 'installed.' % MAC_APP) if kind == "mac" else '"%s"' % run_name
+    starts = (SEEDED_START % (SEEDING["when"], SEEDING["from"])) if SEEDING["path"] else BLANK_START
     write(os.path.join(bundle, "README.txt"), README_TXT % {
         "install": install_hint, "run": run_hint, "records": records, "port_hint": port_hint,
-        "opening": opening}, newline="\n")
+        "opening": opening, "starts": starts}, newline="\n")
+    told = open(os.path.join(bundle, "README.txt")).read()
+    note("the README a person reads says where the book came from",
+         "Where this book came from" in told if SEEDING["path"] else "empty book" in told.lower(),
+         SEEDING["from"])
 
     digest = hashlib.sha256()
     for relative, source in sorted(wanted.items()):
@@ -770,6 +983,16 @@ def ask(command, port, prefix=(), env_extra=None):
                           capture_output=True, text=True).stdout
     yield ("the API answers on the same open door", '"shop"' in boot or '"clients"' in boot,
            "%d bytes" % len(boot))
+    # The shop's name is a setting, and it lives in the book. So a copy that shows it is reading the
+    # records the build put inside it, and not the empty schema it would have had to make itself.
+    named = SEEDING["shop"].get("shop_name", "")
+    yield ("  and it shows the shop's own name, from the settings it was given",
+           not SEEDING["path"] or (named and named in boot),
+           named or "no shop name to look for")
+    on = re.search(r'"db": ?"([^"]*)"', boot)
+    yield ("  and the book it has open is this computer's own",
+           bool(on) and "Chrisphics Hub/chrisphics.db" not in on.group(1),
+           on.group(1) if on else "it did not say which book")
     child.terminate()
     try:
         child.wait(timeout=15)
@@ -809,10 +1032,18 @@ def run_bundle(key, built, port, prefix=(), says=None, home=None):
     if book:
         note("  the book it made is this computer's own", os.path.exists(book),
              os.path.relpath(book, shop_home))
-        rows = rows_in(book) if os.path.exists(book) else None
-        note("  and it is an empty book, not this Mac's shop records",
-             rows == {"jobs": 0, "clients": 0, "payments": 0},
-             "no book" if rows is None else str(rows))
+        said = book_says(book) if os.path.exists(book) else None
+        note("  and it opened holding the records the build put in it",
+             bool(said) and said["figures"] == SEEDING["figures"],
+             "no book" if said is None else "%s, expected %s"
+             % (said["figures"], SEEDING["figures"]))
+        # The shop's live book holds who is signed in, which writes its server has replayed and its own
+        # access log. A copy that has those rows in front of it is not reading a copy — it is reading
+        # the shop, which is the failure this whole branch of checks exists to catch.
+        note("  and it is a copy, not the shop's live book",
+             bool(said) and not any(said["runtime"].values()) and not said["waiting"],
+             str(said["runtime"]) if said and any(said["runtime"].values()) else
+             "no sign-ins, no replay rows, no audit trail" if said else "no book")
     if own_home:
         shutil.rmtree(shop_home, ignore_errors=True)
 
@@ -947,17 +1178,21 @@ def prove_from_zip(key, built, port, prefix):
 
 
 def main():
-    wanted = [a for a in sys.argv[1:] if not a.startswith("--")]
+    argv = sys.argv[1:]
+    after = [word for index, word in enumerate(argv) if index and argv[index - 1] == "--book-from"]
+    wanted = [a for a in argv if not a.startswith("--") and a not in after]
     unknown = [a for a in wanted if a not in TARGETS]
     if unknown:
         print("unknown machine kind: %s — pick from %s" % (", ".join(unknown), ", ".join(TARGETS)))
         return 2
-    if "--clean" in sys.argv:
+    if "--clean" in argv:
         shutil.rmtree(DIST, ignore_errors=True)
         print("removed dist/ (runtime-cache/ kept)")
         return 0
     keys = wanted or list(TARGETS)
     os.makedirs(DIST, exist_ok=True)
+    prepare_seed(argv)
+    print("each install starts from %s" % SEEDING["from"])
     built = {key: build(key) for key in keys}
 
     # A Mac bundle can be run here: this machine's own chip natively, the other kind through Rosetta

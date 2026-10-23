@@ -3,7 +3,8 @@
 // This is the portable install's own application shell, not the shop's. The shop's Mac app attaches
 // to the always-on Wi-Fi server and the one shared book; this one starts the engine carried inside
 // this .app (Contents/Resources/runtime + app), points its window at it over loopback, and reads and
-// writes only this computer's own book.
+// writes only this computer's own book — a book that, the first time the app is opened on a computer,
+// is filled from the copy of the shop's records the build put inside the app.
 //
 // Objective-C rather than Swift for one reason: the command-line Swift runtime on a Mac without Xcode
 // ships arm64 slices only, so a Swift shell cannot be built here for an Intel Mac. clang links
@@ -40,6 +41,26 @@ static NSString *urlPath(NSString *tail) {
     return [kBase stringByAppendingString:tail];
 }
 
+// A copy built by the shop's own build tool arrives with the shop's records inside it, at
+// Contents/Resources/data/shop.db, so the first screen a person sees holds the shop's figures and the
+// shop's settings instead of an empty ledger. The first time the app is opened on a computer that copy
+// is put where this machine keeps its own book — and never again. That is what lets the app be
+// reinstalled without wiping a month of work, and what keeps the two books from being the same file:
+// after the first open this machine writes its own, and the shop Mac writes its own.
+static void takeInShopCopy(NSString *support) {
+    NSFileManager *disk = [NSFileManager defaultManager];
+    NSString *book = [support stringByAppendingPathComponent:@"shop.db"];
+    NSString *seed = [[NSBundle mainBundle].resourcePath stringByAppendingPathComponent:@"data/shop.db"];
+    if ([disk fileExistsAtPath:book] || ![disk fileExistsAtPath:seed]) return;
+    NSError *failure = nil;
+    if ([disk copyItemAtPath:seed toPath:book error:&failure])
+        printf("Your records start from the shop's own book, copied into %s\n", book.UTF8String);
+    else
+        printf("The shop's records could not be put in place (%s) — this copy starts with an empty book.\n",
+               failure.localizedDescription.UTF8String);
+    fflush(stdout);
+}
+
 // Is the shop already answering on this port? Bounded by the request's own timeout: an unbounded
 // connect is how a check hangs instead of failing.
 static BOOL engineUp(NSTimeInterval wait) {
@@ -68,6 +89,7 @@ static NSTask *startEngine(void) {
     NSFileManager *disk = [NSFileManager defaultManager];
     [disk createDirectoryAtPath:support withIntermediateDirectories:YES attributes:nil error:nil];
     if (![disk isExecutableFileAtPath:python] || ![disk fileExistsAtPath:server]) return nil;
+    takeInShopCopy(support);
 
     NSTask *child = [[NSTask alloc] init];
     child.executableURL = [NSURL fileURLWithPath:python];
