@@ -286,11 +286,15 @@ check("and still calls the copy written", "Backup written to" in run.stdout, run
 
 # ── the shop's own book was never part of this ─────────────────────────────────────────────────
 live = sqlite3.connect("file:%s?mode=ro" % LIVE_BOOK, uri=True)
-rows = live.execute("SELECT count(*) FROM app_state WHERE key IN"
-                    " ('backup_mail','last_backup_mail')").fetchone()[0]
+# The shop may name a real address here — the owner's own Gmail, once typed, sits in these same
+# keys. What must never appear is this check's throwaway one, so the test is for the test's words.
+saved = [v for (v,) in live.execute("SELECT value FROM app_state WHERE key IN"
+                                    " ('backup_mail','last_backup_mail')") if v]
+leaked = [v for v in saved if "example.com" in v]
 senders = live.execute("SELECT count(*) FROM email_accounts WHERE smtp_host='127.0.0.1'").fetchone()[0]
 live.close()
-check("the live book holds no mailing address written by this check", rows == 0, "%d rows" % rows)
+check("the live book holds no mailing address written by this check", not leaked,
+      "; ".join(leaked) or "%d real row(s) left alone" % len(saved))
 check("and its mailbox was not repointed", senders == 0, "%d" % senders)
 check("and is the size it was before this ran",
       os.stat(LIVE_BOOK).st_size == live_bytes_before, "%d bytes" % os.stat(LIVE_BOOK).st_size)
