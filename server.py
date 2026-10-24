@@ -5586,6 +5586,23 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, backup_report()
             return 405, {"error": "Use GET for the copies, PUT to settle how often they happen,"
                                   " POST to make one now"}
+        if head == "backup-restore":
+            if method != "POST":
+                return 405, {"error": "POST the name of the copy to put it back"}
+            # The whole book goes back to the moment that copy was made, sign-ins and all — so this
+            # door is the shop's own Mac only, and the copy has to be named twice: once to open it and
+            # see what is inside, once here to say that is the one. Nothing restores by one stray press.
+            if not self.is_shop_computer():
+                return 403, {"error": "The book is only ever put back the way it was on the shop's own"
+                                      " computer, where the copy was made"}
+            body = self.body()
+            name = text(body.get("name"), 120)
+            if not name or body.get("confirm") != name:
+                return 400, {"error": "Say the name of the copy again to put it back"}
+            answer = restore_backup_copy(name, self.client_ip(),
+                                         self.headers.get("User-Agent", ""))
+            answer["backup"] = backup_report()
+            return 200, answer
         if head == "security":
             if method == "GET":
                 return 200, security_view()
@@ -5784,12 +5801,29 @@ class Handler(BaseHTTPRequestHandler):
             rows, filename, _count = export_rows(name, params)
             return 200, ("csv", rows, filename)
         if method == "GET" and head == "backup":
+            chosen = params.get("name", [""])[0]
+            if chosen:
+                # A copy that already lies in the folder, handed back as it is. Its own check is asked
+                # first: a file only becomes something somebody else can restore from once it has said
+                # it is whole, and a damaged one is worth naming rather than posting.
+                path = backup_copy_path(chosen)
+                verdict = check_copy_integrity(path)
+                if verdict != "ok":
+                    raise ValueError("That copy does not pass its own check (%s), so it is not"
+                                     " handed out as the shop's book" % verdict)
+                note_security("book_taken", self.client_ip(), self.headers.get("User-Agent", ""),
+                              "the copy of %s was downloaded" % chosen)
+                return 200, ("file", path, os.path.basename(path), "application/x-sqlite3")
             tmp = write_backup("manual")
             # Whole ledgers leave through this door, on purpose. Which device took one, and from
             # where, is the kind of thing the shop is entitled to look up afterwards.
             note_security("book_taken", self.client_ip(), self.headers.get("User-Agent", ""),
                           "a copy of every record was downloaded")
             return 200, ("file", tmp, os.path.basename(tmp), "application/x-sqlite3")
+        if method == "GET" and head == "backup-copy":
+            # One copy opened and read: what it holds, table by table, beside what the book open right
+            # now holds — the screen a person looks at before they let one book replace another.
+            return 200, open_backup_copy(params.get("name", [""])[0])
         if head == "import-book":
             if method != "POST":
                 return 405, {"error": "Use POST with the book copy itself as the body"}
@@ -5815,6 +5849,10 @@ class Handler(BaseHTTPRequestHandler):
 def write_backup(kind="backup"):
     """Snapshot the book into BACKUP_DIR and return the new file's path. `manual` marks a copy
     the shop asked for, which retention keeps for longer than the nightly ones."""
+    # The kind becomes the first half of the file's name, and that name is the only thing a later
+    # request gets to point a copy at — so it has to be one of the three this folder is made of.
+    if not STAMPED_BACKUP.match("%s-20260101-000000.db" % kind):
+        raise ValueError("A copy is only ever called backup, manual or pre-restore")
     os.makedirs(BACKUP_DIR, exist_ok=True)
     # The name only carries to the second, and a copy that quietly overwrote an earlier one is a
     # copy lost — so if this second is already taken, wait for the next name that is free.
@@ -5852,7 +5890,18 @@ BACKUP_KEEP_PER_DAY = 12
 BACKUP_HOURS_DEFAULT = 24
 BACKUP_HOURS_MIN, BACKUP_HOURS_MAX = 1, 168
 BACKUP_DAYS_MIN, BACKUP_DAYS_MAX = 3, 120
-STAMPED_BACKUP = re.compile(r"^(backup|manual)-(\d{8})-(\d{6})\.db$")
+# The three names a copy in the backups folder can carry — and the only names this engine will open
+# out of that folder. `pre-restore` is the book as it stood one moment before an older copy was put
+# back over it: whoever restores has to be able to undo it, so that copy is listed and aged like any
+# other rather than left in the folder invisibly.
+STAMPED_BACKUP = re.compile(r"^(backup|manual|pre-restore)-(\d{8})-(\d{6})\.db$")
+# Copies somebody asked for, as opposed to the clock: retention keeps the last dozen of these.
+BY_HAND_KINDS = ("manual", "pre-restore")
+
+
+def backup_kind(name):
+    match = STAMPED_BACKUP.match(name or "")
+    return match.group(1) if match else ""
 
 
 def backup_time(name):
@@ -5936,7 +5985,7 @@ def tend_backup_folder(now=None, folder=None, keep_days=None):
     stamped = sorted(((n, backup_time(n)) for n in names), key=lambda pair: pair[1], reverse=True)
     keep, months, manual, per_day = set(), {}, 0, {}
     for name, when in stamped:
-        if name.startswith("manual"):
+        if backup_kind(name) in BY_HAND_KINDS:
             manual += 1
             if manual <= BACKUP_KEEP_MANUAL:
                 keep.add(name)
@@ -6373,9 +6422,149 @@ def recent_backups(limit=6, folder=None):
             size = os.path.getsize(os.path.join(folder, name))
         except OSError:
             size = 0
-        rows.append({"name": name, "kind": name.split("-")[0],
+        rows.append({"name": name, "kind": backup_kind(name),
                      "at": when.strftime("%Y-%m-%d %H:%M:%S"), "bytes": size})
     return rows
+
+
+def check_copy_integrity(path):
+    """What a copy says about itself when nothing is being written from it yet. The file is opened
+    read-only, so this can be asked of a copy a person has merely pointed at — and a file that will not
+    open at all answers with its own words rather than a fault in the shop's server, because a damaged
+    copy is exactly the thing somebody wants to know about."""
+    try:
+        reader = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    except sqlite3.Error as error:
+        return "%s will not open (%s)" % (type(error).__name__, str(error)[:80])
+    try:
+        verdict = reader.execute("PRAGMA integrity_check").fetchone()[0]
+    except sqlite3.Error as error:
+        verdict = "%s will not check (%s)" % (type(error).__name__, str(error)[:80])
+    finally:
+        reader.close()
+    return verdict
+
+
+def backup_copy_path(name):
+    """The file behind a copy a screen named, and nothing else. The name has to match the pattern this
+    folder's own copies are made of, so a request can never step outside the backups folder or open a
+    file the shop did not write."""
+    if not STAMPED_BACKUP.match(name or ""):
+        raise LookupError("%s is not the name of a copy this shop makes" % (name or "nothing"))
+    path = os.path.join(BACKUP_DIR, name)
+    if not os.path.isfile(path):
+        raise LookupError("There is no copy named %s in %s" % (name, short_path(BACKUP_DIR)))
+    return path
+
+
+def book_tables(reader):
+    """Every table a book holds, with how many rows each has. The names come out of that book's own
+    sqlite_master and are quoted back in, so a file nobody has decided to trust cannot reach sideways
+    out of itself."""
+    names = [row[0] for row in reader.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        " ORDER BY name")]
+    out = {}
+    for table in names:
+        try:
+            out[table] = reader.execute('SELECT count(*) FROM "%s"' % table).fetchone()[0]
+        except sqlite3.Error:
+            out[table] = None
+    return out
+
+
+def book_headlines(reader):
+    """The few figures a person looks for first when deciding whether a copy of the book is the one
+    they want: whose shop it says it is, how many jobs and clients it holds, how much money was
+    written into it, and when its newest job was made. `payments_total` is every amount in the
+    payments table, refunds included as they were written — it is a sign of life, not a takings."""
+    def figure(sql):
+        try:
+            row = reader.execute(sql).fetchone()
+        except sqlite3.Error:
+            return None
+        return row[0] if row else None
+    return {"shop_name": figure("SELECT value FROM app_state WHERE key='shop_name'") or "",
+            "jobs": figure("SELECT count(*) FROM jobs"),
+            "clients": figure("SELECT count(*) FROM clients"),
+            "payments_total": figure("SELECT round(coalesce(sum(amount), 0), 2) FROM payments"),
+            "newest_job": figure("SELECT max(created_at) FROM jobs")}
+
+
+def open_backup_copy(name):
+    """Read one copy the way somebody decides whether to trust it: its own check first, then what it
+    holds table by table beside what the book that is open right now holds. This writes nothing,
+    anywhere — it is the look before the leap."""
+    path = backup_copy_path(name)
+    when = backup_time(name)
+    integrity = check_copy_integrity(path)
+    tables, figures, rows, missing, absent = {}, {}, [], [], []
+    if integrity == "ok":
+        copy = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+        try:
+            tables = book_tables(copy)
+            figures = book_headlines(copy)
+        finally:
+            copy.close()
+        live = book_tables(_db)
+        rows = [{"table": t, "copy": tables.get(t), "live": live.get(t)}
+                for t in sorted(set(tables) | set(live))]
+        missing = [row["table"] for row in rows if row["live"] is not None and row["copy"] is None]
+        absent = [row["table"] for row in rows if row["copy"] is not None and row["live"] is None]
+    reasons = []
+    if integrity != "ok":
+        reasons.append("it does not pass its own check (%s)" % integrity)
+    elif missing:
+        # A file with one or two tables short is this book from before a migration; one with most of
+        # them short, or all, is somebody else's database. The two need saying differently.
+        if len(missing) <= 2:
+            reasons.append("it has no %s table, so it is not a state of this book" % ", ".join(missing))
+        elif len(missing) == len(live):
+            reasons.append("it holds none of the %s tables this book keeps, so it is some other "
+                           "program's file and not a state of this one" % len(live))
+        else:
+            reasons.append("it is missing %s of the %s tables this book keeps, so it is not a state "
+                           "of this one" % (len(missing), len(live)))
+    return {"name": name, "kind": backup_kind(name),
+            "at": when.strftime("%Y-%m-%d %H:%M:%S") if when else "",
+            "bytes": os.path.getsize(path), "folder": short_path(BACKUP_DIR),
+            "integrity": integrity, "figures": figures, "tables": rows,
+            "missing": missing, "extra": absent, "reasons": reasons,
+            # A copy goes back only when it is a book this engine wrote — whole, checking, and holding
+            # every table the open book holds. Anything else is some other program's file.
+            "restorable": not reasons,
+            "live_figures": book_headlines(_db)}
+
+
+def restore_backup_copy(name, address="", device=""):
+    """Put one of the shop's own copies back over the open book.
+
+    Nothing changes until the copy has passed its own check and proved it holds every table the open
+    book holds. The book as it stands is then copied first, as a `pre-restore-…` file, because the
+    only sane way to undo a restore is another restore — and the swap runs over the live connection
+    while the request lock is held, which is how every other screen of the shop sees one consistent
+    book rather than half of each. What it replaces is everything: the copy is a whole state of the
+    shop, not a merge, and it carries that state's sign-ins and device writes with it."""
+    current = open_backup_copy(name)
+    if not current["restorable"]:
+        raise ValueError("That copy will not go back — %s" % ", ".join(current["reasons"]))
+    safety = write_backup("pre-restore")
+    reader = sqlite3.connect("file:%s?mode=ro" % backup_copy_path(name), uri=True)
+    try:
+        with _lock:
+            reader.backup(_db)
+            _db.commit()
+    finally:
+        reader.close()
+    note = "put back %s (%s jobs · %s clients · %s); the book it replaced is kept as %s" % (
+        current["name"], current["figures"]["jobs"], current["figures"]["clients"],
+        current["at"], os.path.basename(safety))
+    set_state("last_restore_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    set_state("last_restore_note", note)
+    set_state("last_restore_file", os.path.basename(safety))
+    note_security("book_restored", address, device, note)
+    return {"ok": True, "name": current["name"], "from": current["figures"],
+            "at": current["at"], "safety": os.path.basename(safety), "note": note}
 
 
 def backup_report():
@@ -6424,6 +6613,9 @@ def backup_report():
             "offsite_restore_at": state_value("offsite_restore_at"),
             "error": state_value("last_backup_error"),
             "error_at": state_value("last_backup_error_at"),
+            "restored_at": state_value("last_restore_at"),
+            "restored_note": state_value("last_restore_note"),
+            "restored_safety": state_value("last_restore_file"),
             "free_gb": free_gb, "recent": recent_backups()}
 
 
