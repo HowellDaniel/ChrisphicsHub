@@ -1976,12 +1976,22 @@ let notifyPollBusy = false;
 async function viewJobs(r) {
   const p = r.params;
   const kind = p.get('kind') || 'Job';
+  const quoted = kind === 'Quote';
+  const counts = S.boot.counts || {};
+  const openCount = quoted ? (S.boot.open_quotes || 0)
+    : (counts.Pending || 0) + (counts.Printing || 0) + (counts.Ready || 0);
+  const jobsTotal = Object.values(counts).reduce((a, b) => a + b, 0);
+  /* A shop that has finished everything has an empty open tray. Landing there over a full book
+     reads as "there are no jobs at all", so the first look falls back to every job — while an
+     explicit Open tab still means open. */
+  const status = p.get('status') || (openCount ? 'open' : 'all');
+  const narrowed = ['q', 'category', 'from', 'to', 'overdue', 'debtors', 'client', 'paid']
+    .some((k) => p.get(k));
   const rows = await api('/api/jobs?' + qs({
-    status: p.get('status') || 'open', kind: kind, category: p.get('category'), q: p.get('q'),
+    status: status, kind: kind, category: p.get('category'), q: p.get('q'),
     sort: p.get('sort'), from: p.get('from'), to: p.get('to'), overdue: p.get('overdue'),
     debtors: p.get('debtors'), client: p.get('client'), paid: p.get('paid'),
   }));
-  const quoted = kind === 'Quote';
   const total = rows.reduce((a, j) => a + j.total, 0);
   const due = rows.reduce((a, j) => a + Math.max(j.balance, 0), 0);
   const profit = rows.reduce((a, j) => a + (j.profit || 0), 0);
@@ -1994,15 +2004,16 @@ async function viewJobs(r) {
     ]);
   $('#topbar').insertAdjacentHTML('beforeend', filtersBar('jobs', [
     { type: 'tabs', key: 'kind', def: 'Job', options: [
-      { v: 'Job', label: 'Jobs' }, { v: 'Quote', label: 'Quotes', count: S.boot.open_quotes || 0 }]},
-    { type: 'tabs', key: 'status', def: 'open', options: [
-      { v: 'open', label: 'Open', count: (S.boot.counts.Pending || 0) + (S.boot.counts.Printing || 0) + (S.boot.counts.Ready || 0) },
-      { v: 'all', label: 'All', count: Object.values(S.boot.counts).reduce((a, b) => a + b, 0) },
-      { v: 'Pending', label: 'Pending', count: S.boot.counts.Pending || 0 },
-      { v: 'Printing', label: 'Printing', count: S.boot.counts.Printing || 0 },
-      { v: 'Ready', label: 'Ready', count: S.boot.counts.Ready || 0 },
-      { v: 'Delivered', label: 'Delivered', count: S.boot.counts.Delivered || 0 },
-      { v: 'Cancelled', label: 'Cancelled', count: S.boot.counts.Cancelled || 0 }]},
+      { v: 'Job', label: 'Jobs', count: jobsTotal },
+      { v: 'Quote', label: 'Quotes', count: S.boot.open_quotes || 0 }]},
+    { type: 'tabs', key: 'status', def: status, options: [
+      { v: 'open', label: 'Open', count: openCount },
+      { v: 'all', label: 'All', count: quoted ? undefined : jobsTotal }].concat(quoted ? [] : [
+      { v: 'Pending', label: 'Pending', count: counts.Pending || 0 },
+      { v: 'Printing', label: 'Printing', count: counts.Printing || 0 },
+      { v: 'Ready', label: 'Ready', count: counts.Ready || 0 },
+      { v: 'Delivered', label: 'Delivered', count: counts.Delivered || 0 },
+      { v: 'Cancelled', label: 'Cancelled', count: counts.Cancelled || 0 }])},
     /* Quotes are an ask, not a bill, so "paid in full" means nothing on that tab. */
     ...(quoted ? [] : [{ type: 'select', key: 'paid', options: [
       ['', 'Money: any'], ['due', 'Still owing'], ['full', 'Paid in full']] }]),
@@ -2031,9 +2042,16 @@ async function viewJobs(r) {
           (j.cost > 0 ? '' : 'Nothing has been costed on this job yet') + '">' + money(j.profit) + '</td>') +
       '<td>' + pill(j.status) + (isSettled(j) ? ' <span class="pill k-paid">Paid in full</span>' : '') + '</td>' +
       '<td>' + dateLabel(j) + '</td></tr>').join('')
-      : '<tr><td colspan="8">' + emptyState(quoted ? 'No quotes out there' : 'No jobs match this filter',
+      : '<tr><td colspan="8">' + emptyState(
+        quoted ? 'No quotes out there'
+          : narrowed ? 'No jobs match these filters'
+          : status === 'all' ? 'No jobs booked yet'
+          : 'Nothing ' + status.toLowerCase() + ' right now',
         quoted ? 'Send a price before the client commits — a quote can be booked as a job in one click.'
-               : 'Try another status tab, or book the first job for today.',
+          : narrowed ? pluralise(jobsTotal, 'job') + ' on file — clear the filters, or open the All tab.'
+          : status === 'all' ? 'Book the first job and it lands here, with its client, money and stage.'
+          : jobsTotal ? pluralise(jobsTotal, 'job') + ' on file — the All tab lists every one.'
+          : 'Try another status tab, or book the first job for today.',
         '<button class="btn primary" data-action="' + (quoted ? 'new-quote' : 'new-job') + '">+ ' +
         (quoted ? 'New quote' : 'New job') + '</button>') + '</td></tr>') +
     '</tbody></table></div></div>' +
