@@ -33,6 +33,8 @@ LIVE = os.path.expanduser("~/Library/Application Support/Chrisphics Hub/chrisphi
 TLS = os.path.expanduser("~/Library/Application Support/CRISPprint TLS/device-download")
 PORT = 8896
 ANDROID_NAME = "CRISPprint-Shop-Root-CA.cacert.cer"
+import shopcheck  # noqa: E402  (lives beside this check)
+shopcheck.require_free(PORT)
 
 work = tempfile.mkdtemp(prefix="chrisphics-device-trust-")
 CLONE = os.path.join(work, "clone.db")

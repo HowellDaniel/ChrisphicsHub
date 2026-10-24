@@ -34,6 +34,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIVE = os.path.expanduser("~/Library/Application Support/Chrisphics Hub/chrisphics.db")
 PORT = 8902
 BASE = "http://127.0.0.1:%d" % PORT
+import shopcheck  # noqa: E402  (lives beside this check)
+shopcheck.require_free(PORT)
 
 # Worked out by hand, before looking at any code. Each client: what they were billed, what money
 # they handed over that is still on their account, and what the shop can genuinely still collect.

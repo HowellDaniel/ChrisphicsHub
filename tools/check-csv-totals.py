@@ -27,6 +27,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIVE = os.path.expanduser("~/Library/Application Support/Chrisphics Hub/chrisphics.db")
 PORT = 8901
 BASE = "http://127.0.0.1:%d" % PORT
+import shopcheck  # noqa: E402  (lives beside this check)
+shopcheck.require_free(PORT)
 sys.path.insert(0, REPO)
 import server  # noqa: E402
 

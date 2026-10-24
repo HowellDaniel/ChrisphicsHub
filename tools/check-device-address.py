@@ -27,6 +27,8 @@ LIVE = os.path.expanduser("~/Library/Application Support/Chrisphics Hub/chrisphi
 PORT = 8897
 NAME_PORT = 8898
 LOCAL_PORT = 8899
+import shopcheck  # noqa: E402  (lives beside this check)
+shopcheck.require_free(PORT, NAME_PORT, LOCAL_PORT)
 
 work = tempfile.mkdtemp(prefix="chrisphics-device-address-")
 CLONE = os.path.join(work, "clone.db")

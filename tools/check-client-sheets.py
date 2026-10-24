@@ -23,6 +23,8 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LIVE = os.path.expanduser("~/Library/Application Support/Chrisphics Hub/chrisphics.db")
 PORT = 8896
 BASE = "http://127.0.0.1:%d" % PORT
+import shopcheck  # noqa: E402  (lives beside this check)
+shopcheck.require_free(PORT)
 
 work = tempfile.mkdtemp(prefix="chrisphics-client-words-")
 CLONE = os.path.join(work, "clone.db")
