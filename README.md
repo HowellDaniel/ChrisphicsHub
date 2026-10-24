@@ -498,9 +498,13 @@ receives one receives the client names, numbers and money with it. That is why `
 exists — a `--blank` set written to its own folder, with every file named `DEMO-…` and a note on the
 front saying it holds nothing, so the two sets cannot be sent by reflex. The demo copy does not even
 carry the shop's name, since that lives in the book: whoever installs it types their own on Shop &
-devices.
+devices. Holding no records is not the same as holding no *rules*, though: a demo ships the same
+`server.py` and the same launchers, so it is rebuilt beside the seeded set whenever either changes, not
+only when the data does — a demo that is two engine rules behind is a machine that will behave
+differently from the one it was shown on.
 
-**What the build proves, and what it does not.** Every Mac bundle is *run* here, four times over:
+**What the build proves, and what it does not.** Every Mac bundle is *run* here, four times over (five
+when the build seeded a book, counting the empty-machine run further down):
 the folder in place; again unpacked from its own zip into a path the repository has never seen,
 which is the only real test of the two things a zip can lose (the symlinks inside a runtime and the
 executable bit on the interpreter); again after `Install Chrisphics Hub.command` has copied it into
