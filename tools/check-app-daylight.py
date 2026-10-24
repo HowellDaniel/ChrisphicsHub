@@ -5,8 +5,8 @@ The counter's word on 2026-10-13 was "Remove Light, Dark or System because By cl
 there", so the app no longer has a mode to pick: the shop's clock (light 08:00 to 17:00, dark
 outside them) is the shell's only rule, and the same rule is what the page and its pre-paint script
 work to. This runs the rule hour by hour out of the real code and then reads the shell and the page
-back, refusing any leftover appearance choice — a menu item, a Settings pane, a stored mode, a
-segmented button.
+back, refusing any leftover Light/Dark/System choice — a menu item, a stored mode, a segmented
+button — while allowing the Appearance pane that now holds only the page's backgrounds.
 
 Nothing here waits for 5:00 pm. `desktop/src/Theme.swift` is compiled on its own into a throwaway
 command line tool that answers for all twenty-four hours, so the rule is run rather than read.
@@ -37,6 +37,12 @@ DAY_END = 17
 work = tempfile.mkdtemp(prefix="chrisphics-app-daylight-")
 fails = []
 live_hash = hashlib.sha256(open(LIVE, "rb").read()).hexdigest()
+
+# The app may legitimately be closed while the shop runs from its Wi-Fi server; what this check
+# must never do is disturb it. Snapshotted here so the end can be compared with the start.
+APP_AT_START = [ln.split()[0] for ln in
+                subprocess.run(["ps", "ax"], capture_output=True, text=True).stdout.splitlines()
+                if "Chrisphics Hub.app/Contents/MacOS" in ln]
 
 
 def check(label, ok, detail=""):
@@ -141,9 +147,18 @@ check("the shell has no mode to pick, stored or otherwise",
       and "commit()" not in main, "")
 check("the View menu carries no Appearance submenu",
       "appearanceSubmenu" not in main and "pickTheme" not in main, "")
-check("Settings has no Appearance pane, and the three that remain are still listed",
-      "AppearancePane" not in main and "for pane in [GeneralPane(), ProfilePane(), UpdatesPane()] {" in main,
-      "")
+panes = re.search(r"for pane in \[([^\]]+)\] \{", main)
+check("Settings still lists every pane it has, Appearance for paper among them",
+      bool(panes) and [p.strip() for p in panes.group(1).split(",")] ==
+      ["GeneralPane()", "AppearancePane()", "ProfilePane()", "UpdatesPane()"],
+      panes.group(1) if panes else "not found")
+appearance = (main[main.index("final class AppearancePane"):
+                   main.index("final class UpdatesPane")]
+              if "final class AppearancePane" in main else "")
+check("the Appearance pane offers paper, never a Light/Dark/System look",
+      bool(appearance) and "backgrounds" in appearance
+      and all(word not in appearance
+              for word in ('"Light"', '"Dark"', '"System"', "Theme.", "NSSegmentedControl")), "")
 check("the shell watches the hour after the window is drawn",
       "Theme.startClockWatch()" in main and "func startClockWatch" in swift, "")
 check("the page can no longer tell the shell a look, or be told one by it",
@@ -161,8 +176,11 @@ check("and the page's own entry point cannot be walked to a fixed look",
 live = subprocess.run(["ps", "ax"], capture_output=True, text=True).stdout
 running = [ln.split()[0] for ln in live.splitlines()
            if "Chrisphics Hub.app/Contents/MacOS" in ln]
-check("the counter's app was not touched by this check", bool(running),
-      "pid(s) " + " ".join(running) if running else "not running")
+if APP_AT_START:
+    check("the counter's app was running and this check left it alone",
+          all(pid in running for pid in APP_AT_START), "pid(s) " + " ".join(APP_AT_START))
+else:
+    check("the counter's app was closed, so there was nothing of his to disturb", True, "")
 
 after = hashlib.sha256(open(LIVE, "rb").read()).hexdigest()
 expect("the live book was not written to", after, live_hash)
