@@ -6822,6 +6822,7 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
     watch_notifications()
     watch_backups()
     httpd = ShopHTTPServer((host, port), Handler)
+    context = None
     if tls_cert:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(tls_cert, tls_key)
@@ -6831,6 +6832,20 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
     else:
         httpd.is_tls = bool(trust_proxy)
         scheme = "https" if trust_proxy else "http"
+    if not local_only:
+        # The Mac app looks for the shop on https://127.0.0.1:<port>/healthz and, hearing nothing
+        # there, starts a second engine over the same book. A second bound socket on loopback —
+        # same handler, same book, same certificate — lets it attach to this one engine instead.
+        # Loopback only, so no device on the Wi-Fi gains a door it did not already have.
+        try:
+            mirror = ShopHTTPServer(("127.0.0.1", port), Handler)
+            if context is not None:
+                mirror.socket = context.wrap_socket(mirror.socket, server_side=True)
+            mirror.is_tls = httpd.is_tls
+            threading.Thread(target=mirror.serve_forever, daemon=True).start()
+        except OSError as err:
+            print("The Mac app will start its own engine: 127.0.0.1:%d is not free (%s)."
+                  % (port, err))
     display_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     url = "%s://%s:%d/" % (scheme, display_host, port)
     print("%s is running at %s" % (SHOP["name"], url))
