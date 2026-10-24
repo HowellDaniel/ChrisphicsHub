@@ -40,6 +40,15 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote, quote
 
+# Say what is happening as it happens. Python block-buffers stdout the moment it is a file rather than
+# a terminal, which is what every launcher but a typed `python3 server.py` makes it: the .command, the
+# Windows .bat, launchd's log and the Mac app's engine.log all catch the output through a file. So the
+# lines that say which book this machine opened — the only record a person has when their copy shows
+# the wrong figures — sat in an 8 KB buffer and were gone whenever the engine was stopped to close the
+# window, while the request log (stderr, line-buffered by itself) filled the file from the first line.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PUBLIC = os.path.join(ROOT, "public")
 # Which clock the shop keeps. Every figure the counter relies on — today's takings, this month's
@@ -285,6 +294,11 @@ def take_in_shop_copy(source, target=None):
             if os.path.exists(target + tail):
                 os.replace(target + tail, aside + tail)
                 moved += 1
+    # The folder is made before the book is written, not after: every launcher creates it, but a person
+    # following the README's `--shop-copy` line on a machine nobody has set up yet would otherwise get a
+    # traceback here and no engine.log to read — this step runs before connect(), which makes the folder
+    # for the book it is about to open.
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
     with open(seed, "rb") as reader, open(target, "wb") as writer:
         for chunk in iter(lambda: reader.read(1 << 20), b""):
             writer.write(chunk)

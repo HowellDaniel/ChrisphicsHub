@@ -1503,6 +1503,21 @@ def prove_window(key, built, port, prefix=()):
              "exit %s, port %d %s" % (child.returncode, port, "free" if not held(port) else "still held"))
         if child.poll() is None:
             child.kill()
+        # The README tells a person with a window that will not show up to read this file, so it has to
+        # hold what the engine said and not only what it answered. Two ways it did not: the request log
+        # (stderr) writing over the startup words (stdout) because the two writers each kept their own
+        # place in the file, and the startup words never reaching the file at all because Python holds
+        # them in an 8 KB buffer while stdout is a file and the engine is then stopped, not exited.
+        log = os.path.join(home, "Library", "Application Support", "CRISPprint Hub", "engine.log")
+        words = open(log, errors="replace").read() if os.path.exists(log) else ""
+        verdict = re.search(r"(Took the shop's book into[^\n]*|Left this machine's own book alone[^\n]*)", words)
+        note("  and the log a person is told to read holds what the engine said",
+             bool(re.search(r"is running at", words))
+             and (bool(verdict) if SEEDING["path"] else True),
+             (verdict.group(1)[:60] + "\n" if verdict else "")
+             + "%d lines, %d of them the engine's own words"
+             % (words.count("\n"), sum(1 for l in words.splitlines() if "HTTP/1.1" not in l))
+             if words else "no engine.log was written")
     finally:
         shutil.rmtree(home, ignore_errors=True)
 

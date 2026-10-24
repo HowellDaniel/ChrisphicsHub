@@ -20,6 +20,7 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
+#import <fcntl.h>
 #import <signal.h>
 
 static NSString *const kName = @"Chrisphics Hub";
@@ -52,6 +53,17 @@ static NSString *urlPath(NSString *tail) {
 // setting somebody typed. After that this machine writes its own book and the shop Mac writes its own.
 static NSString *shopCopyInsideBundle(void) {
     return [[NSBundle mainBundle].resourcePath stringByAppendingPathComponent:@"data/shop.db"];
+}
+
+// One descriptor, opened for appending, for everything the engine prints. A handle from
+// `fileHandleForWritingAtPath:` is given to stdout and stderr separately, and each of those writers
+// keeps its own position in the file: the request log starts at the top and lays itself over whatever
+// the engine said first. O_APPEND is a property of the open file, not of the writer, so every write
+// lands after the last one whoever made it.
+static NSFileHandle *openForAppend(NSString *path) {
+    int descriptor = open([path fileSystemRepresentation], O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (descriptor < 0) return nil;
+    return [[NSFileHandle alloc] initWithFileDescriptor:descriptor closeOnDealloc:YES];
 }
 
 // Is the shop already answering on this port? Bounded by the request's own timeout: an unbounded
@@ -95,15 +107,20 @@ static NSTask *startEngine(void) {
     child.environment = environment;
 
     // What the engine says is the only record a person has when their copy will not open, so it goes
-    // in the same folder as their book rather than into a window that already closed.
+    // in the same folder as their book rather than into a window that already closed. Both streams go
+    // to one descriptor opened with O_APPEND: a plain writing handle leaves each of them its own
+    // position, and the request log then writes over the top of the file — which is how the line that
+    // says what happened to the shop's book went missing from a copy that had, in fact, taken it.
     NSString *log = [support stringByAppendingPathComponent:@"engine.log"];
-    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:log];
+    NSFileHandle *handle = openForAppend(log);
     if (!handle) {
         [disk createFileAtPath:log contents:nil attributes:nil];
-        handle = [NSFileHandle fileHandleForWritingAtPath:log];
+        handle = openForAppend(log);
     }
-    child.standardOutput = handle;
-    child.standardError = handle;
+    if (handle) {
+        child.standardOutput = handle;
+        child.standardError = handle;
+    }
     NSError *failure = nil;
     if (![child launchAndReturnError:&failure] || failure) return nil;
     return child;

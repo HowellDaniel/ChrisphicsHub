@@ -531,7 +531,13 @@ reports on its own window
 (`--window-probe`): what the page says its title is, how many screens are in the rail, and how many
 distinct colours and how wide a spread of light the picture of the window holds — because a grab of
 the whole display comes back black whenever the display has slept, which says nothing about the
-app, and a page that arrived is not yet a page that painted. Every run ends by checking the port is
+app, and a page that arrived is not yet a page that painted. The same run then reads back the
+`engine.log` that copy wrote for itself, because the handover folder tells a person whose window never
+appears to read that file, and it held only the request log: what the engine *said* — which book it
+opened, and whether it took the shop's — was either written over by the request log, since stdout and
+stderr each kept their own place in a file opened without `O_APPEND`, or never reached it at all, since
+Python holds stdout in an 8 KB buffer while it is a file and the engine is then stopped rather than
+exited. Every run ends by checking the port is
 free again: an app that leaves its engine behind is how the next copy silently joins a process
 nobody started. The Windows and Linux bundles are checked by shape only — the bundled
 `runtime\python.exe` and the `DLLs` half that carries `sqlite3` and `ssl` is there, the launcher names
