@@ -210,6 +210,7 @@ TARGETS = {
         "asset": "cpython-%s+%s-x86_64-pc-windows-msvc-install_only.tar.gz" % (PYTHON, TAG),
         "folder": "Chrisphics Hub for Windows",
         "zip": "Chrisphics-Hub-Windows.zip",
+        "portable_zip": "Chrisphics-Hub-Windows-portable.zip",
         "kind": "win", "arch": "x86_64-pc-windows-msvc",
     },
     "linux-x64": {
@@ -316,6 +317,26 @@ rem Naming the book, instead of letting the engine reach its default, keeps this
 set CHRISPHICS_SUPPORT=%%SUPPORT%%
 set CHRISPHICS_DB=%%SUPPORT%%\\shop.db
 "%%HERE%%runtime\\python.exe" "%%HERE%%app\\server.py" --port %%CHRISPHICS_PORT%% --shop-copy "%%HERE%%data\\shop.db" %%*
+"""
+
+# The same launcher arranged so the folder itself is the whole shop: nothing is installed and the
+# book stays inside the folder, in data\shop.db, so a USB stick carries the program and its records
+# together. No take-over step is needed: the book the folder carries is the book it opens.
+RUN_BAT_WIN_PORTABLE = """@echo off
+rem Open Chrisphics Hub straight out of this folder. Nothing is installed: the program runs from
+rem here, and its book lives here too, in data\\shop.db, so the whole folder - records and all -
+rem can be carried on a USB stick.
+setlocal
+set HERE=%%~dp0
+if "%%CHRISPHICS_PORT%%"=="" set CHRISPHICS_PORT=8712
+echo Opening Chrisphics Hub at http://127.0.0.1:%%CHRISPHICS_PORT%%/
+echo Records: %%HERE%%data\\shop.db
+echo Leave this window open while you work; close it to stop the shop.
+rem Naming the book, instead of letting the engine reach its default, keeps this copy its own shop:
+rem the book that came in the data folder is the one it opens, and everything written goes back there.
+set CHRISPHICS_SUPPORT=%%HERE%%data
+set CHRISPHICS_DB=%%HERE%%data\\shop.db
+"%%HERE%%runtime\\python.exe" "%%HERE%%app\\server.py" --port %%CHRISPHICS_PORT%% %%*
 """
 
 INSTALL_CMD_WIN = """@echo off
@@ -480,6 +501,33 @@ SEEDED_START = """    It starts already full of the shop's records and the shop'
     exactly as it is, and the empty book that got replaced is kept beside it named "shop.was-empty-…"
     for as long as anybody wants it."""
 BLANK_START = """    It starts with an empty book, and everything you write belongs to this computer alone."""
+
+# The README inside the Windows portable zip: the same program with the installer scripts left out,
+# and the book kept inside the folder so the stick carries everything.
+PORTABLE_README_WIN = """CHRISPPRINT GHANA — CHRISPHICS HUB (PORTABLE)
+The same printing-shop records program, arranged to run straight out of this folder with nothing
+installed. Put the whole folder on a USB stick, a network drive or any folder on the PC, and start it.
+
+RUN IT
+    Double-click "Start Chrisphics Hub (portable).bat". A console window opens and the shop appears
+    in your browser at <http://127.0.0.1:8712/>. Keep the console open while you work — closing it
+    closes the shop. If no page appears, type that address into Chrome, Edge or Firefox.
+
+    Nothing is installed and nothing is written outside this folder: no Start Menu entry, no
+    Settings > Apps entry, and no trace of the program anywhere but here.
+
+YOUR RECORDS
+    They live inside this folder, in "data\\shop.db" — the book travels with the folder, so the
+    stick you carry holds the shop's records on it, and what is written on this computer stays on
+    this computer.
+%(starts)s
+
+IF PORT 8712 IS TAKEN
+    %(port_hint)s
+
+This is not the shop's Wi-Fi server: it answers only on this computer, and no password is asked for
+because nothing outside this computer can reach it.
+"""
 
 fails = []
 checks = 0
@@ -884,6 +932,8 @@ def build(key):
         run_name, install_name = "Start Chrisphics Hub.bat", "Install Chrisphics Hub.cmd"
         command = [os.path.join(bundle, run_name)]
         write(os.path.join(bundle, run_name), RUN_BAT_WIN % {}, newline="\r\n")
+        write(os.path.join(bundle, "Start Chrisphics Hub (portable).bat"),
+              RUN_BAT_WIN_PORTABLE % {}, newline="\r\n")
         write(os.path.join(bundle, install_name), INSTALL_CMD_WIN, newline="\r\n")
         write(os.path.join(bundle, "Uninstall Chrisphics Hub.cmd"), UNINSTALL_CMD_WIN, newline="\r\n")
         write(os.path.join(bundle, "install.ps1"), INSTALL_PS1_WIN % {"stamp": git_stamp()},
@@ -961,6 +1011,11 @@ def build(key):
         note("  with the separators Windows reads",
              "runtime\\python.exe" in launcher_text and "app\\server.py" in launcher_text,
              "backslashes")
+        portable_text = open(os.path.join(bundle, "Start Chrisphics Hub (portable).bat")).read()
+        note("  and the portable launcher keeps the book inside the folder",
+             all(n in portable_text for n in ("data\\shop.db", "runtime\\python.exe",
+                                              "app\\server.py")),
+             "Start Chrisphics Hub (portable).bat")
     if kind == "mac":
         note("  and ad-hoc signs the app so macOS will run what was copied in",
              subprocess.run(["codesign", "--force", "--deep", "--sign", "-",
@@ -1011,8 +1066,12 @@ def build(key):
          all("app" in open(os.path.join(runtime, n)).read() for n in pth),
          ", ".join(pth) or "none in this runtime")
 
-    run_hint = ('"Start Chrisphics Hub.command" runs it from this folder, or open "%s" once it is '
-                'installed.' % MAC_APP) if kind == "mac" else '"%s"' % run_name
+    run_hint = (('"Start Chrisphics Hub.command" runs it from this folder, or open "%s" once it is '
+                 'installed.' % MAC_APP) if kind == "mac" else
+                ('"Start Chrisphics Hub.bat" runs it and keeps the records in App Data. '
+                 '"Start Chrisphics Hub (portable).bat" runs it with the records kept inside this '
+                 'folder instead, so the whole folder — book included — can live on a USB stick.')
+                if kind == "win" else '"%s"' % run_name)
     starts = (SEEDED_START % (SEEDING["when"], SEEDING["from"])) if SEEDING["path"] else BLANK_START
     write(os.path.join(bundle, "README.txt"), README_TXT % {
         "install": install_hint, "run": run_hint, "records": records, "port_hint": port_hint,
@@ -1056,6 +1115,50 @@ def build(key):
                 taken.write(archive.read(entry[0]) if entry else b"")
         label, holds, detail = book_carries(where, "")
         note("  and the zip a person downloads holds the shop's book", holds, detail)
+
+    if kind == "win":
+        # The same program with the installer scripts left out and the book kept inside the folder:
+        # unzip onto a USB stick and the whole shop travels on it.
+        portable = os.path.join(DIST, "Chrisphics Hub for Windows (portable)")
+        shutil.rmtree(portable, ignore_errors=True)
+        for item in ("app", "runtime"):
+            shutil.copytree(os.path.join(bundle, item), os.path.join(portable, item))
+        if os.path.isdir(os.path.join(bundle, "data")):
+            shutil.copytree(os.path.join(bundle, "data"), os.path.join(portable, "data"))
+        for item in ("Start Chrisphics Hub (portable).bat", "Chrisphics Hub.ico"):
+            shutil.copy2(os.path.join(bundle, item), os.path.join(portable, item))
+        starts = (SEEDED_START % (SEEDING["when"], SEEDING["from"])) if SEEDING["path"] else BLANK_START
+        write(os.path.join(portable, "README.txt"), PORTABLE_README_WIN % {
+            "starts": starts,
+            "port_hint": 'set CHRISPHICS_PORT=8801 && "Start Chrisphics Hub (portable).bat"'},
+            newline="\n")
+        portable_zip = os.path.join(DIST, target["portable_zip"])
+        if os.path.exists(portable_zip):
+            os.remove(portable_zip)
+        subprocess.run(["zip", "-qryX", portable_zip, os.path.basename(portable)], cwd=DIST,
+                       check=True)
+        names = zipfile.ZipFile(portable_zip).namelist()
+        note("the portable zip runs the whole shop with nothing installed",
+             any(n.endswith("Start Chrisphics Hub (portable).bat") for n in names)
+             and any(n.endswith("app/server.py") for n in names)
+             and any(n.endswith("runtime/python.exe") for n in names)
+             and any(n.endswith("public/app.js") for n in names)
+             and any(n.endswith("app/schema.sql") for n in names)
+             and not any(n.endswith("install.ps1") for n in names),
+             "%d entries" % len(names))
+        bat = zipfile.ZipFile(portable_zip).read([n for n in names
+                                                  if n.endswith("Start Chrisphics Hub (portable).bat")][0])
+        note("  and its launcher names the book that lives in the folder",
+             b"data\\shop.db" in bat and b"CHRISPHICS_DB" in bat,
+             "the stick carries the records with it")
+        if SEEDING["path"]:
+            entry = [n for n in names if n.endswith("data/shop.db")]
+            where = os.path.join(scratch(), "from-portable-zip.db")
+            with zipfile.ZipFile(portable_zip) as archive:
+                with open(where, "wb") as taken:
+                    taken.write(archive.read(entry[0]) if entry else b"")
+            label, holds, detail = book_carries(where, "")
+            note("  and the portable zip holds the shop's book too", holds, detail)
     return {"bundle": bundle, "kind": kind, "launcher": launcher_path, "server": server,
             "interpreter": interpreter, "runtime": runtime, "command": command}
 
