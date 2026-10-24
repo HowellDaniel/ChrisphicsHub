@@ -56,8 +56,10 @@ Every Mac bundle is **run** here — the launcher in place, then again after the
 it into an Applications folder and again out of its own zip — because a copy can lose the symlinks
 inside a runtime or the interpreter's executable bit, and only starting it proves it kept them. The
 window is proved too, by asking the app to describe its own window (`--window-probe`): what the page
-says it is, and how many distinct colours the picture of it holds. Windows and Linux can be checked
-by shape from here and the report names which is which.
+says it is, and how many distinct colours the picture of it holds. The settings window is proved the
+same way (`--settings-probe`): its General, Profile and Updates panes must each draw, the menu item
+must open it, and the Updates pane must name the day this build was made. Windows and Linux can be
+checked by shape from here and the report names which is which.
 
 Usage:
     python3 tools/build-installer.py                  # every kind, from the shop's own book
@@ -168,6 +170,12 @@ def git_stamp():
     """The build the person installs is traceable to the commit it came from."""
     return subprocess.run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"],
                           capture_output=True, text=True).stdout.strip() or "unknown"
+
+
+def build_date():
+    """When this bundle was made. The app's Settings window says it back, so a person holding a
+    copy can tell one build from another without opening anything else."""
+    return time.strftime("%Y-%m-%d %H:%M")
 
 
 TARGETS = {
@@ -831,7 +839,8 @@ def build(key):
             launcher_text = open(exe).read()
             note("the app's executable is a shell script that opens a browser tab", True,
                  "no clang here, so the window shell could not be built")
-        plist = dict(MAC_PLIST, CFBundleShortVersionString=git_stamp(), CFBundleVersion=git_stamp())
+        plist = dict(MAC_PLIST, CFBundleShortVersionString=git_stamp(), CFBundleVersion=git_stamp(),
+                     ChrisphicsBuildDate=build_date())
         with open(os.path.join(app, "Contents", "Info.plist"), "wb") as fh:
             plistlib.dump(plist, fh)
         note("the app's Info.plist names its executable and identifier",
@@ -1522,6 +1531,69 @@ def prove_window(key, built, port, prefix=()):
         shutil.rmtree(home, ignore_errors=True)
 
 
+def prove_settings(key, built, port, prefix=()):
+    """The window's Settings… has to open from the app menu, draw each pane, and say which build it
+    is. The probe sends the menu item's own action, because that — not a method call — is how a
+    person reaches it. Each pane comes back with a picture, and a pane that did not draw is one
+    colour with no spread."""
+    folder = TARGETS[key]["folder"]
+    if built["command"][1:] != ["--engine"]:
+        note("%s: Settings…" % folder, False, "no native shell in this bundle to open it")
+        return
+    where = os.path.join(DIST, "settings-proof-%s" % key)
+    home = tempfile.mkdtemp(prefix="chrisphics-home-")
+    shutil.rmtree(where, ignore_errors=True)
+    child = subprocess.Popen(list(prefix) + [built["launcher"], "--settings-probe", where,
+                                             "--port", str(port)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             env=dict(os.environ, HOME=home))
+    said = None
+    try:
+        for _ in range(160):
+            time.sleep(0.25)
+            report = os.path.join(where, "settings.txt")
+            if os.path.exists(report):
+                said = open(report, errors="replace").read()
+                break
+            if child.poll() is not None:
+                break
+        menu = re.search(r"menu: Settings… (enabled|disabled), (.+?), (opened|did not open) the window",
+                         said or "")
+        note("%s: the app menu's Settings… opens the settings window" % folder,
+             bool(menu) and menu.group(1) == "enabled" and menu.group(3) == "opened",
+             "⌘, under About" if menu else (said or "no report came back").strip()[:70])
+        for pane in ("General", "Profile", "Updates"):
+            line = re.search(r"^%s: (.*)$" % pane, said or "", re.M)
+            painted = re.search(r"(\d+) colours, light (\d+) to (\d+)", line.group(1)) if line else None
+            note("  and %s drew its own pane" % pane,
+                 bool(painted) and int(painted.group(1)) > 1
+                 and int(painted.group(3)) - int(painted.group(2)) > 60,
+                 "%s colours, light %s–%s" % painted.groups() if painted else "no picture")
+        made = re.search(r"Made: value=(\S+ \S+)", said or "")
+        note("  and it says when this build was made",
+             bool(made) and made.group(1) != "unknown",
+             made.group(1) if made else "no build date in the bundle")
+        # The one outward call in the app. It may answer with a newer commit or with a refusal to
+        # reach GitHub — both prove the button returned; only silence does not.
+        asked = re.search(r"value=(This is the newest build[^\n]*|The repository has moved on[^\n]*|"
+                          r"GitHub could not be reached[^\n]*)", said or "")
+        note("  Check for update answers, and only when pressed",
+             bool(asked) and "Asking GitHub" not in (said or ""),
+             asked.group(1)[:64] if asked else "no answer came back")
+        for _ in range(20):
+            time.sleep(0.25)
+            if child.poll() is not None and not held(port):
+                break
+        note("  and closing it let go of the engine it opened",
+             child.poll() is not None and not held(port),
+             "exit %s, port %d %s" % (child.returncode, port,
+                                      "free" if not held(port) else "still held"))
+    finally:
+        if child.poll() is None:
+            child.kill()
+        shutil.rmtree(home, ignore_errors=True)
+
+
 def prove_from_zip(key, built, port, prefix):
     """Unpack the zip a second computer will receive, put it somewhere this repository has never
     seen and run it from there: the only real test of the symlinks and the executable bit a zip
@@ -1585,6 +1657,7 @@ def main():
             if TARGETS[key]["kind"] == "mac":
                 prove_installed(key, built[key], base + 2)
                 prove_window(key, built[key], base + 3, prefix)
+                prove_settings(key, built[key], 8824 + index, prefix)
             # The empty-book rule asked of a whole running copy needs a spare port beyond the four
             # above: 8820 and up never collide with 8798+index*4. It is a Mac-and-Windows question —
             # a Linux copy works on the book inside its own folder, so it has none to take over.

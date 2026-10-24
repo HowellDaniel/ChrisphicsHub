@@ -16,6 +16,7 @@
 //     --engine         serve this computer's book and stay in the terminal — no window, no browser
 //     --port N         the loopback port to use (default 8712); CHRISPHICS_PORT works too
 //     --window-probe D open the shop, write what its own window shows into folder D, and close
+//     --settings-probe D  open Settings, write what each pane says into folder D, and close
 
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
@@ -28,6 +29,14 @@ static NSInteger kPort = 8712;
 static NSString *kBase = nil;
 static NSTask *serving = nil;
 static NSString *kProbeTo = nil;
+static NSString *kSettingsProbeTo = nil;
+// The settings window and the shop window share these three: the page they size, the sign-in
+// preference that outlives a launch, and the caffeinate that holds this Mac awake while it runs.
+static WKWebView *kShopWeb = nil;
+static NSTask *keepingAwake = nil;
+static NSString *const kZoomKey = @"ChrisphicsPageSize";
+static NSString *const kStayAwakeKey = @"ChrisphicsStayAwake";
+static void holdAwakeNow(BOOL on);
 
 // Where a portable install keeps its records: this user's own folder, and a book we name. The name
 // matters — server.py only goes looking for an older book when it is left to pick its own path, and
@@ -170,6 +179,11 @@ static int runEngineOnly(void) {
 }
 
 // ------------------------------------------------------------ the application
+@interface ShopSettings : NSObject
++ (void)show;
++ (void)probeInto:(NSString *)folder done:(void (^)(void))done;
+@end
+
 @interface ShopWindow : NSObject <NSApplicationDelegate, WKNavigationDelegate>
 @end
 
@@ -201,9 +215,20 @@ static int runEngineOnly(void) {
     _web.navigationDelegate = self;
     [_window.contentView addSubview:_web];
     [_window makeKeyAndOrderFront:nil];
+    kShopWeb = _web;
+
+    // Two settings belong to the shell, not to a page it shows, so they are picked up before the
+    // page arrives: the size it reads at, and whether this Mac is held awake while it is open.
+    double zoom = [[NSUserDefaults standardUserDefaults] doubleForKey:kZoomKey];
+    _web.magnification = (zoom >= 0.9 && zoom <= 1.4) ? zoom : 1.0;
+    if ([[NSUserDefaults standardUserDefaults] boolForKey:kStayAwakeKey]) holdAwakeNow(YES);
 
     if (!engineUp(1.0)) serving = startEngine();
     [self showWhenReady];
+}
+
+- (void)openSettings {
+    [ShopSettings show];
 }
 
 // The engine takes a second or two to open its book; the window asks again until it answers rather
@@ -248,6 +273,18 @@ static int runEngineOnly(void) {
 // has one colour and no spread, which is exactly the failure to catch.
 
 - (void)webView:(WKWebView *)view didFinishNavigation:(WKNavigation *)navigation {
+    if (kSettingsProbeTo) {
+        NSString *folder = kSettingsProbeTo;
+        kSettingsProbeTo = nil;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+                           [ShopSettings probeInto:folder done:^{
+                               [serving terminate];
+                               exit(0);
+                           }];
+                       });
+        return;
+    }
     if (!kProbeTo) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.75 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ [self report]; });
@@ -365,6 +402,13 @@ static int runEngineOnly(void) {
     [appMenu addItemWithTitle:[@"About " stringByAppendingString:kName]
                        action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
+    // Right under About, where a Mac user reaches for it: ⌘, opens the same window. The target is
+    // named rather than left to the responder chain, so the item works from any window — including
+    // no window at all — and the settings probe can prove the item itself is wired.
+    NSMenuItem *settingsItem = [appMenu addItemWithTitle:@"Settings…" action:@selector(openSettings)
+                                           keyEquivalent:@","];
+    settingsItem.target = self;
+    [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:[@"Hide " stringByAppendingString:kName]
                        action:@selector(hide:) keyEquivalent:@"h"];
     NSMenuItem *others = [appMenu addItemWithTitle:@"Hide Others"
@@ -413,17 +457,809 @@ static int runEngineOnly(void) {
 
 @end
 
+// ------------------------------------------------------------ settings
+// Everything a person changes about this copy without leaving it: where its book and copies are,
+// how big the page reads, whether it opens by itself and stays awake, the shop's own words that go
+// on every sheet, and which build this is. A window with three panes rather than a web screen,
+// because two of the three are about the shell itself — the half a page cannot reach.
+static NSString *const kRepository = @"https://github.com/HowellDaniel/ChrisphicsHub";
+static NSString *const kLaunchLabel = @"com.crispprint.chrisphicshub.portable";
+
+// caffeinate holds this Mac awake for as long as this process lives, so quitting the app is all it
+// takes to let the Mac sleep again — the same arrangement the engine uses when it serves a Wi-Fi.
+static void holdAwakeNow(BOOL on) {
+    if (on && !keepingAwake) {
+        NSTask *task = [[NSTask alloc] init];
+        task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/caffeinate"];
+        task.arguments = @[@"-i", @"-s", @"-w", [NSString stringWithFormat:@"%d", getpid()]];
+        if ([task launchAndReturnError:NULL]) keepingAwake = task;
+    } else if (!on && keepingAwake) {
+        [keepingAwake terminate];
+        keepingAwake = nil;
+    }
+}
+
+static NSString *bookFile(void) {
+    return [supportFolder() stringByAppendingPathComponent:@"shop.db"];
+}
+
+static NSString *copiesFolder(void) {
+    return [supportFolder() stringByAppendingPathComponent:@"Backups"];
+}
+
+// The home this copy is running under, written as `~`. Not `stringByAbbreviatingWithTildeInPath`:
+// that asks the user database, while this app deliberately follows HOME so a copy run under another
+// home — as the build check does — reads and writes there and nowhere else.
+static NSString *shortPath(NSString *path) {
+    NSString *home = [NSProcessInfo processInfo].environment[@"HOME"];
+    if (home.length && [path hasPrefix:home])
+        return [@"~" stringByAppendingString:[path substringFromIndex:home.length]];
+    return [path stringByAbbreviatingWithTildeInPath];
+}
+
+static NSTextField *captionText(NSString *text) {
+    NSTextField *label = [NSTextField labelWithString:text ?: @""];
+    label.textColor = [NSColor labelColor];
+    return label;
+}
+
+// The right-hand half of a form row: what the shop is set to, not something to type in.
+static NSTextField *valueText(NSString *text) {
+    NSTextField *label = [NSTextField labelWithString:text ?: @""];
+    label.textColor = [NSColor secondaryLabelColor];
+    label.font = [NSFont systemFontOfSize:12];
+    label.selectable = YES;
+    label.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [label.widthAnchor constraintGreaterThanOrEqualToConstant:250].active = YES;
+    [label.widthAnchor constraintLessThanOrEqualToConstant:320].active = YES;
+    return label;
+}
+
+static NSTextField *entryField(NSString *placeholder) {
+    NSTextField *field = [NSTextField textFieldWithString:@""];
+    field.placeholderString = placeholder;
+    [field.widthAnchor constraintEqualToConstant:300].active = YES;
+    return field;
+}
+
+static NSTextField *statusText(void) {
+    NSTextField *line = [NSTextField labelWithString:@""];
+    line.textColor = [NSColor secondaryLabelColor];
+    line.font = [NSFont systemFontOfSize:12];
+    line.lineBreakMode = NSLineBreakByWordWrapping;
+    line.maximumNumberOfLines = 4;
+    line.preferredMaxLayoutWidth = 470;
+    return line;
+}
+
+static NSTextField *noteText(NSString *text) {
+    NSTextField *line = [NSTextField labelWithString:text ?: @""];
+    line.textColor = [NSColor secondaryLabelColor];
+    line.font = [NSFont systemFontOfSize:11];
+    line.lineBreakMode = NSLineBreakByWordWrapping;
+    line.maximumNumberOfLines = 5;
+    line.preferredMaxLayoutWidth = 470;
+    return line;
+}
+
+static NSButton *pushButton(NSString *title, id target, SEL action) {
+    NSButton *button = [NSButton buttonWithTitle:title target:target action:action];
+    button.bezelStyle = NSBezelStyleRounded;
+    return button;
+}
+
+static NSStackView *rowOf(NSArray<NSView *> *views) {
+    NSStackView *row = [NSStackView stackViewWithViews:views];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.spacing = 8;
+    row.alignment = NSLayoutAttributeCenterY;
+    return row;
+}
+
+// A label/control grid, with any number of full-width lines below it. Same shape as the shop's own
+// Mac app, so the two settings windows read alike.
+static NSGridView *formGrid(NSArray<NSArray<NSView *> *> *rows, NSArray<NSView *> *notes) {
+    NSGridView *grid = [NSGridView gridViewWithViews:rows];
+    grid.rowSpacing = 10;
+    grid.columnSpacing = 12;
+    grid.translatesAutoresizingMaskIntoConstraints = NO;
+    if (grid.numberOfColumns > 1) {
+        [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
+        [grid columnAtIndex:1].xPlacement = NSGridCellPlacementLeading;
+    }
+    for (NSView *note in notes) {
+        NSGridRow *row = [grid addRowWithViews:@[note, [NSGridCell emptyContentView]]];
+        [row mergeCellsInRange:NSMakeRange(0, grid.numberOfColumns)];
+        [row cellAtIndex:0].xPlacement = NSGridCellPlacementLeading;
+        row.topPadding = 4;
+    }
+    return grid;
+}
+
+// ------------------------------------------------------------- the engine's own answers
+static void callEngine(NSString *method, NSString *path, NSDictionary *body,
+                       void (^done)(NSDictionary *json, NSString *why)) {
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
+                                   [NSURL URLWithString:urlPath(path)]];
+    request.HTTPMethod = method;
+    request.timeoutInterval = 10;
+    if (body) {
+        request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+        [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    }
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:
+                             [NSURLSessionConfiguration ephemeralSessionConfiguration]];
+    [[session dataTaskWithRequest:request
+               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                   NSDictionary *json = data.length ? [NSJSONSerialization JSONObjectWithData:data
+                                                                                      options:0
+                                                                                        error:nil] : nil;
+                   NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+                   NSString *why = nil;
+                   if (error) why = error.localizedDescription;
+                   else if (status >= 400) why = json[@"error"]
+                       ?: [NSString stringWithFormat:@"the engine answered %ld", (long)status];
+                   dispatch_async(dispatch_get_main_queue(), ^{ done(json, why); });
+                   [session finishTasksAndInvalidate];
+               }] resume];
+}
+
+// ------------------------------------------------------------- the three panes
+@interface SettingsPane : NSViewController
+@property (nonatomic, copy) NSString *paneName;
+@property (nonatomic, strong) NSTextField *status;
+- (void)say:(NSString *)text colour:(NSColor *)colour;
+- (void)place:(NSGridView *)grid;
+@end
+
+@implementation SettingsPane
+- (void)say:(NSString *)text colour:(NSColor *)colour {
+    self.status.stringValue = text ?: @"";
+    self.status.textColor = colour ?: [NSColor secondaryLabelColor];
+}
+
+- (void)place:(NSGridView *)grid {
+    NSView *root = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 560, 380)];
+    [root addSubview:grid];
+    // Only the top edge is pinned. Pinning the bottom too makes the grid stretch to whatever height
+    // the window happens to be, and the notes — the last rows — drift away from the form they belong
+    // to, which reads as a form with a hole in it.
+    [NSLayoutConstraint activateConstraints:@[
+        [grid.topAnchor constraintEqualToAnchor:root.topAnchor constant:22],
+        [grid.centerXAnchor constraintEqualToAnchor:root.centerXAnchor],
+        [grid.leadingAnchor constraintGreaterThanOrEqualToAnchor:root.leadingAnchor constant:20],
+        [root.widthAnchor constraintGreaterThanOrEqualToConstant:560],
+        [root.heightAnchor constraintGreaterThanOrEqualToConstant:380],
+    ]];
+    self.view = root;
+}
+@end
+
+// -- General: this copy's own book, copies, page size, staying awake and opening at sign-in
+@interface SettingsGeneral : SettingsPane
+@end
+
+@implementation SettingsGeneral {
+    NSTextField *_engineValue;
+    NSTextField *_bookValue;
+    NSTextField *_copiesValue;
+    NSTextField *_zoomValue;
+    NSButton *_awakeBox;
+}
+
+- (instancetype)init {
+    if ((self = [super init])) self.paneName = @"General";
+    return self;
+}
+
+static NSString *sizeWords(unsigned long long bytes) {
+    if (bytes >= 1048576) return [NSString stringWithFormat:@"%.1f MB", bytes / 1048576.0];
+    return [NSString stringWithFormat:@"%llu KB", (bytes + 1023) / 1024];
+}
+
+- (void)loadView {
+    _engineValue = valueText(kBase);
+    NSString *book = bookFile();
+    unsigned long long bytes = [[[NSFileManager defaultManager]
+                                 attributesOfItemAtPath:book error:nil][NSFileSize] unsignedLongLongValue];
+    _bookValue = valueText(bytes ? [NSString stringWithFormat:@"%@ · %@",
+                                    shortPath(book), sizeWords(bytes)]
+                                 : shortPath(book));
+    _bookValue.toolTip = book;
+    _copiesValue = valueText(shortPath(copiesFolder()));
+    _copiesValue.toolTip = copiesFolder();
+
+    NSButton *look = pushButton(@"Open in browser", self, @selector(openInBrowser));
+    NSButton *reveal = pushButton(@"Show in Finder", self, @selector(revealBook));
+    NSButton *openCopies = pushButton(@"Open folder", self, @selector(openCopies));
+    NSButton *copyNow = pushButton(@"Copy the book now", self, @selector(copyNow));
+
+    // Page size is the whole page, not only the words: a cashier on a small screen wants the
+    // figures bigger, and a settings window that quietly changed one and not the other would be
+    // lying about what it did.
+    double zoom = [[NSUserDefaults standardUserDefaults] doubleForKey:kZoomKey];
+    if (zoom < 0.9 || zoom > 1.4) zoom = 1.0;
+    NSSlider *slider = [NSSlider sliderWithValue:zoom minValue:0.9 maxValue:1.4
+                                          target:self action:@selector(moveZoom:)];
+    [slider.widthAnchor constraintEqualToConstant:190].active = YES;
+    _zoomValue = valueText([NSString stringWithFormat:@"%d%%", (int)llround(zoom * 100)]);
+    [_zoomValue.widthAnchor constraintLessThanOrEqualToConstant:48].active = YES;
+
+    _awakeBox = [NSButton checkboxWithTitle:@"Keep this Mac awake while the shop is open"
+                                     target:self action:@selector(toggleAwake:)];
+    _awakeBox.state = [[NSUserDefaults standardUserDefaults] boolForKey:kStayAwakeKey]
+        ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSButton *login = [NSButton checkboxWithTitle:
+                       [NSString stringWithFormat:@"Open %@ when I sign in to this Mac", kName]
+                                           target:self action:@selector(toggleLogin:)];
+    login.state = [self loginItemThere] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    self.status = statusText();
+    NSGridView *grid = formGrid(@[@[captionText(@"Records engine:"), rowOf(@[_engineValue, pushButton(@"Refresh", self, @selector(refreshEngine))])],
+                                   @[captionText(@"Open the shop:"), look],
+                                   @[captionText(@"This computer's book:"), rowOf(@[_bookValue, reveal])],
+                                   @[captionText(@"Copies:"), rowOf(@[_copiesValue, openCopies, copyNow])],
+                                   @[captionText(@"Page size:"), rowOf(@[slider, _zoomValue])],
+                                   @[captionText(@"Power:"), _awakeBox],
+                                   @[captionText(@"Sign-in:"), login]],
+                                 @[noteText(@"The book is the one file holding every job, client and payment. "
+                                            "A copy is made to the copies folder by itself each day, and one "
+                                            "can be asked for at any time."),
+                                   noteText(@"Only this computer's own records live here. The shop's shared book "
+                                            "stays on the shop's Mac."),
+                                   self.status]);
+    [self place:grid];
+}
+
+- (void)viewDidAppear {
+    [super viewDidAppear];
+    [self describeCopies];
+}
+
+// How many copies are already kept, and how much room the disk has for more: the two facts a person
+// looking at the copies folder actually wants. The count rides beside the folder; the newest copy
+// and the free space go in the line that would otherwise sit empty, and never talk over a copy the
+// person has just asked for.
+- (void)describeCopies {
+    __weak typeof(self) weak = self;
+    callEngine(@"GET", @"api/backups", nil, ^(NSDictionary *json, NSString *why) {
+        SettingsGeneral *pane = weak;
+        if (!pane || why || !json) return;
+        NSNumber *count = [json[@"copies"] isKindOfClass:[NSNumber class]] ? json[@"copies"] : @0;
+        pane->_copiesValue.stringValue = [NSString stringWithFormat:@"%@ · %@ cop%@",
+                                          shortPath(copiesFolder()), count,
+                                          count.integerValue == 1 ? @"y" : @"ies"];
+        if (pane.status.stringValue.length) return;
+        NSMutableString *words = [NSMutableString string];
+        NSString *newest = [json[@"file"] isKindOfClass:[NSString class]] ? json[@"file"] : nil;
+        if (newest.length) [words appendFormat:@"Newest %@.", newest];
+        NSNumber *room = [json[@"free_gb"] isKindOfClass:[NSNumber class]] ? json[@"free_gb"] : nil;
+        if (room) [words appendFormat:@" %@ GB free there.", room];
+        if (words.length) [pane say:words colour:nil];
+    });
+}
+
+- (BOOL)loginItemThere {
+    return [[NSFileManager defaultManager] fileExistsAtPath:[self loginPath]];
+}
+
+- (NSString *)loginPath {
+    return [NSHomeDirectory() stringByAppendingPathComponent:
+            [@"Library/LaunchAgents" stringByAppendingPathComponent:
+             [kLaunchLabel stringByAppendingString:@".plist"]]];
+}
+
+- (void)openInBrowser {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:kBase]];
+}
+
+- (void)revealBook {
+    NSString *book = bookFile();
+    NSFileManager *disk = [NSFileManager defaultManager];
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:
+     @[[disk fileExistsAtPath:book] ? [NSURL fileURLWithPath:book]
+                                       : [NSURL fileURLWithPath:supportFolder()]]];
+}
+
+- (void)openCopies {
+    NSString *folder = copiesFolder();
+    [[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES
+                                                   attributes:nil error:nil];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:folder]];
+}
+
+- (void)refreshEngine {
+    [self say:@"Asking the engine…" colour:nil];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        BOOL up = engineUp(2.0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_engineValue.stringValue = up ? kBase
+                : [kBase stringByAppendingString:@" — not answering"];
+            [self say:(up ? @"The engine is answering on this computer."
+                         : @"The engine is not answering on this port.")
+               colour:[NSColor secondaryLabelColor]];
+        });
+    });
+}
+
+- (void)copyNow {
+    [self say:@"Copying the book…" colour:nil];
+    __weak typeof(self) weak = self;
+    callEngine(@"POST", @"api/backups", @{}, ^(NSDictionary *json, NSString *why) {
+        if (why) { [weak say:why colour:[NSColor systemRedColor]]; return; }
+        [weak say:[NSString stringWithFormat:@"Copied %@ — %@", json[@"file"] ?: @"the book",
+                   json[@"note"] ?: @""]
+            colour:[NSColor systemGreenColor]];
+        [weak describeCopies];
+    });
+}
+
+- (void)moveZoom:(NSSlider *)sender {
+    double zoom = sender.doubleValue;
+    _zoomValue.stringValue = [NSString stringWithFormat:@"%d%%", (int)llround(zoom * 100)];
+    [[NSUserDefaults standardUserDefaults] setDouble:zoom forKey:kZoomKey];
+    kShopWeb.magnification = zoom;
+    [self say:@"The page will read at this size every time the shop opens." colour:nil];
+}
+
+- (void)toggleAwake:(NSButton *)sender {
+    BOOL want = sender.state == NSControlStateValueOn;
+    [[NSUserDefaults standardUserDefaults] setBool:want forKey:kStayAwakeKey];
+    holdAwakeNow(want);
+    [self say:want ? @"This Mac will stay awake while the shop is open."
+                   : @"This Mac may sleep when it is left alone." colour:nil];
+}
+
+// The sign-in item is one file the user can read, and taking the tick out removes it. Nothing is
+// loaded into the running session: the point is the next sign-in, and a launchd job started now
+// would open a second window for somebody who did not ask for one.
+- (void)toggleLogin:(NSButton *)sender {
+    BOOL want = sender.state == NSControlStateValueOn;
+    NSFileManager *disk = [NSFileManager defaultManager];
+    NSString *path = [self loginPath];
+    if (!want) {
+        [disk removeItemAtPath:path error:nil];
+        [self say:@"The app will not open by itself." colour:nil];
+        return;
+    }
+    NSString *exe = [NSBundle mainBundle].executablePath;
+    if (!exe.length) {
+        sender.state = NSControlStateValueOff;
+        [self say:@"This copy has no program of its own to open at sign-in."
+            colour:[NSColor systemRedColor]];
+        return;
+    }
+    [disk createDirectoryAtPath:[path stringByDeletingLastPathComponent]
+    withIntermediateDirectories:YES attributes:nil error:nil];
+    NSDictionary *plist = @{@"Label": kLaunchLabel,
+                            @"ProgramArguments": @[exe],
+                            @"RunAtLoad": @YES,
+                            @"LimitLoadToSessionType": @"Aqua"};
+    NSData *data = [NSPropertyListSerialization dataWithPropertyList:plist
+                                                              format:NSPropertyListXMLFormat_v1_0
+                                                             options:0 error:nil];
+    if (!data || ![data writeToFile:path atomically:YES]) {
+        sender.state = NSControlStateValueOff;
+        [self say:@"That sign-in file could not be written." colour:[NSColor systemRedColor]];
+        return;
+    }
+    [self say:@"The app will open when you next sign in to this Mac." colour:nil];
+}
+@end
+
+// -- Profile: the shop's own words, kept in the book so every sheet and every device agrees
+@interface SettingsProfile : SettingsPane
+@end
+
+@implementation SettingsProfile {
+    NSTextField *_name;
+    NSTextField *_tagline;
+    NSTextField *_phone;
+    NSTextField *_address;
+    NSTextField *_currency;
+    NSTextField *_momo;
+    NSTextField *_install;
+}
+
+- (instancetype)init {
+    if ((self = [super init])) self.paneName = @"Profile";
+    return self;
+}
+
+- (void)loadView {
+    _name = entryField(@"The name printed on every job sheet");
+    _tagline = entryField(@"Printing & Design Services");
+    _phone = entryField(@"+233 …");
+    _address = entryField(@"Where the shop is");
+    _currency = valueText(@"—");
+    _momo = valueText(@"—");
+    _install = valueText(@"—");
+
+    self.status = statusText();
+    NSGridView *grid = formGrid(@[@[captionText(@"Shop name:"), _name],
+                                   @[captionText(@"Tagline:"), _tagline],
+                                   @[captionText(@"Phone:"), _phone],
+                                   @[captionText(@"Address:"), _address],
+                                   @[captionText(@"Currency:"), _currency],
+                                   @[captionText(@"MoMo number:"), _momo],
+                                   @[captionText(@"Devices install from:"), _install],
+                                   @[captionText(@"") , rowOf(@[pushButton(@"Save", self, @selector(save)),
+                                                               pushButton(@"Load again", self, @selector(load))])]],
+                                 @[noteText(@"These are the words that go on a job sheet and out to a client."),
+                                   noteText(@"Kept in the book, so every device and every printed sheet sees "
+                                            "the same shop. Only this Mac can change them."),
+                                   self.status]);
+    [self place:grid];
+}
+
+- (void)viewDidAppear {
+    [super viewDidAppear];
+    if (!_name.stringValue.length) [self load];
+}
+
+- (void)load {
+    [self say:@"Reading the shop's words from the book…" colour:nil];
+    __weak typeof(self) weak = self;
+    callEngine(@"GET", @"api/shop", nil, ^(NSDictionary *json, NSString *why) {
+        SettingsProfile *pane = weak;
+        if (!pane) return;
+        if (why) { [pane say:why colour:[NSColor systemRedColor]]; return; }
+        NSDictionary *shop = json[@"shop"] ?: @{};
+        pane->_name.stringValue = shop[@"name"] ?: @"";
+        pane->_tagline.stringValue = shop[@"tagline"] ?: @"";
+        pane->_phone.stringValue = shop[@"phone"] ?: @"";
+        pane->_address.stringValue = shop[@"address"] ?: @"";
+        pane->_currency.stringValue = [NSString stringWithFormat:@"%@ %@",
+                                       shop[@"currency_symbol"] ?: @"", shop[@"currency"] ?: @""];
+        pane->_momo.stringValue = json[@"momo_number"] ?: @"not set";
+        pane->_install.stringValue = json[@"address"] ?: @"—";
+        [pane say:@"Loaded from the book." colour:nil];
+    });
+}
+
+- (void)save {
+    NSDictionary *body = @{@"name": _name.stringValue ?: @"",
+                           @"tagline": _tagline.stringValue ?: @"",
+                           @"phone": _phone.stringValue ?: @"",
+                           @"address": _address.stringValue ?: @""};
+    [self say:@"Saving…" colour:nil];
+    __weak typeof(self) weak = self;
+    callEngine(@"PUT", @"api/shop", body, ^(NSDictionary *json, NSString *why) {
+        SettingsProfile *pane = weak;
+        if (!pane) return;
+        if (why) { [pane say:why colour:[NSColor systemRedColor]]; return; }
+        [pane say:@"Saved. New sheets and client messages carry these words from now on."
+            colour:[NSColor systemGreenColor]];
+    });
+}
+@end
+
+// -- Updates: which build this is, and the one place anything is ever asked of the internet
+@interface SettingsUpdates : SettingsPane
+@end
+
+@implementation SettingsUpdates {
+    NSTextField *_newest;
+}
+
+- (instancetype)init {
+    if ((self = [super init])) self.paneName = @"Updates";
+    return self;
+}
+
+- (void)loadView {
+    NSDictionary *info = [NSBundle mainBundle].infoDictionary;
+    NSString *version = info[@"CFBundleShortVersionString"] ?: @"—";
+    NSString *built = info[@"ChrisphicsBuildDate"] ?: @"unknown";
+
+    _newest = statusText();
+    [_newest setStringValue:[NSString stringWithFormat:
+                             @"This build is %@, made %@.", version, built]];
+    self.status = statusText();
+
+    NSGridView *grid = formGrid(@[@[captionText(@"This build:"), valueText(version)],
+                                   @[captionText(@"Made:"), valueText(built)],
+                                   @[captionText(@"Repository:"), valueText(kRepository)],
+                                   @[captionText(@"") , rowOf(@[pushButton(@"Check for update", self,
+                                                                           @selector(check)),
+                                                               pushButton(@"Open the repository", self,
+                                                                          @selector(openRepo))])]],
+                                 @[_newest,
+                                   noteText(@"Nothing leaves this Mac unless Check is pressed: it asks GitHub "
+                                            "for the newest commit in the shop's own repository and compares "
+                                            "it with the build above."),
+                                   self.status]);
+    [self place:grid];
+}
+
+- (void)openRepo {
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:kRepository]];
+}
+
+- (void)check {
+    [_newest setStringValue:@"Asking GitHub…"];
+    NSURL *url = [NSURL URLWithString:
+                  @"https://api.github.com/repos/HowellDaniel/ChrisphicsHub/commits?per_page=1"];
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+    request.timeoutInterval = 10;
+    [request setValue:@"Chrisphics Hub/1.1" forHTTPHeaderField:@"User-Agent"];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:
+                             [NSURLSessionConfiguration ephemeralSessionConfiguration]];
+    __weak typeof(self) weak = self;
+    [[session dataTaskWithRequest:request
+               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                   NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+                   NSArray *json = data.length ? [NSJSONSerialization JSONObjectWithData:data
+                                                                                 options:0
+                                                                                   error:nil] : nil;
+                   dispatch_async(dispatch_get_main_queue(), ^{
+                       SettingsUpdates *pane = weak;
+                       if (!pane) return;
+                       if (status == 404 || status == 403) {
+                           [pane->_newest setStringValue:
+                            @"The repository does not answer without a sign-in, so this build cannot be "
+                            @"compared from here."];
+                           return;
+                       }
+                       NSDictionary *head = [json isKindOfClass:[NSArray class]] ? json.firstObject : nil;
+                       NSString *sha = head[@"sha"];
+                       if (error || status != 200 || !sha.length) {
+                           [pane->_newest setStringValue:
+                            [NSString stringWithFormat:@"GitHub could not be reached just now%@.",
+                             error ? [NSString stringWithFormat:@" (%@)", error.localizedDescription] : @""]];
+                           return;
+                       }
+                       NSString *mine = [NSBundle mainBundle].infoDictionary[@"CFBundleShortVersionString"];
+                       NSString *shortSha = [sha substringToIndex:MIN(7, sha.length)];
+                       if (!mine.length || [mine isEqualToString:@"unknown"]) {
+                           [pane->_newest setStringValue:
+                            [NSString stringWithFormat:@"This build carries no commit stamp, so it cannot be "
+                             @"compared. The newest commit is %@.", shortSha]];
+                       } else if ([sha hasPrefix:mine] || [mine hasPrefix:shortSha]) {
+                           [pane->_newest setStringValue:
+                            [NSString stringWithFormat:@"This is the newest build the repository has (%@).",
+                             shortSha]];
+                       } else {
+                           NSString *date = head[@"commit"][@"committer"][@"date"] ?: @"";
+                           [pane->_newest setStringValue:
+                            [NSString stringWithFormat:@"The repository has moved on: %@ %@. Install a "
+                             @"newer build of this app to take it in.", shortSha, date]];
+                       }
+                   });
+                   [session finishTasksAndInvalidate];
+               }] resume];
+}
+@end
+
+// ------------------------------------------------------------- the window they sit in
+@implementation ShopSettings {
+    NSWindow *_window;
+    NSTabViewController *_tabs;
+}
+
++ (ShopSettings *)shared {
+    static ShopSettings *one = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ one = [[ShopSettings alloc] init]; });
+    return one;
+}
+
++ (void)show {
+    [[self shared] open];
+}
+
+- (void)build {
+    if (_window) return;
+    _tabs = [[NSTabViewController alloc] init];
+    _tabs.tabStyle = NSTabViewControllerTabStyleToolbar;
+    NSArray *panes = @[[[SettingsGeneral alloc] init], [[SettingsProfile alloc] init],
+                       [[SettingsUpdates alloc] init]];
+    for (SettingsPane *pane in panes) {
+        NSTabViewItem *item = [[NSTabViewItem alloc] initWithIdentifier:pane.paneName];
+        item.label = pane.paneName;
+        item.viewController = pane;
+        [_tabs addTabViewItem:item];
+    }
+    _tabs.preferredContentSize = NSMakeSize(620, 460);
+
+    _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 620, 460)
+                                          styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                                                     NSWindowStyleMaskMiniaturizable)
+                                            backing:NSBackingStoreBuffered
+                                              defer:NO];
+    _window.title = [kName stringByAppendingString:@" Settings"];
+    _window.releasedWhenClosed = NO;
+    _window.tabbingMode = NSWindowTabbingModeDisallowed;
+    _window.contentViewController = _tabs;
+    [_window center];
+}
+
+- (void)open {
+    [self build];
+    [_window makeKeyAndOrderFront:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+}
+
+// ------------------------------------------------------------- describing itself
+// A settings window is the one part of a Mac app no screen grab can prove from outside: it opens
+// from a menu, and a check driving the menu needs the permissions the check itself must not ask
+// for. So, as with --window-probe, the app is allowed to say what its window holds — and to be
+// held to it: a pane that did not draw comes back one colour and no light.
++ (void)probeInto:(NSString *)folder done:(void (^)(void))done {
+    // The menu item is what a person actually uses, so the probe takes that road and not a method
+    // call: it finds the item where the menu bar holds it and sends the item's own action.
+    NSMenuItem *item = nil;
+    for (NSMenuItem *one in NSApp.mainMenu.itemArray.firstObject.submenu.itemArray)
+        if ([one.title isEqualToString:@"Settings…"]) item = one;
+    BOOL sent = item != nil && item.target != nil
+        && [NSApp sendAction:item.action to:item.target from:item];
+    ShopSettings *one = [self shared];
+    if (!one->_window) [one open];
+    NSString *menu = [NSString stringWithFormat:
+                      @"menu: %@ %@, %@, %@",
+                      item ? item.title : @"no Settings item",
+                      item && item.isEnabled ? @"enabled" : @"disabled",
+                      item.keyEquivalent.length ? [@"⌘" stringByAppendingString:item.keyEquivalent]
+                                                : @"no key",
+                      sent && one->_window.isVisible ? @"opened the window"
+                                                     : @"did not open the window"];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.9 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ [one describePanes:folder at:0 lines:
+                                                     [NSMutableArray arrayWithObject:menu] done:done]; });
+}
+
+- (void)describePanes:(NSString *)folder at:(NSInteger)index lines:(NSMutableArray *)lines
+                 done:(void (^)(void))done {
+    if (index >= (NSInteger)_tabs.tabViewItems.count) {
+        NSString *text = [[lines componentsJoinedByString:@"\n"] stringByAppendingString:@"\n"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES
+                                                   attributes:nil error:nil];
+        [text writeToFile:[folder stringByAppendingPathComponent:@"settings.txt"]
+               atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        printf("%s", [text UTF8String]);
+        fflush(stdout);
+        [_window close];
+        done ? done() : (void)0;
+        return;
+    }
+    _tabs.selectedTabViewItemIndex = index;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.7 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+                       [self snapshotPane:folder at:index lines:lines done:done checking:YES];
+                   });
+}
+
+// The update check is the one thing this app ever asks of the internet, so the probe presses the
+// button a person would press, waits for GitHub's answer, and only then describes the pane.
+- (void)snapshotPane:(NSString *)folder at:(NSInteger)index lines:(NSMutableArray *)lines
+                done:(void (^)(void))done checking:(BOOL)allowCheck {
+    NSTabViewItem *item = self->_tabs.tabViewItems[index];
+    NSView *pane = item.viewController.view;
+    [pane layoutSubtreeIfNeeded];
+    NSButton *check = allowCheck ? [self buttonTitled:@"Check for update" in:pane] : nil;
+    if (check) {
+        [NSApp sendAction:check.action to:check.target from:check];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+                           [self snapshotPane:folder at:index lines:lines done:done checking:NO];
+                       });
+        return;
+    }
+    NSMutableString *words = [NSMutableString stringWithFormat:@"%@:", item.label];
+    for (NSTextField *field in [self fieldsIn:pane]) {
+        if (!field.stringValue.length) continue;
+        [words appendFormat:@" %@=%@", field.placeholderString ?: @"value",
+         field.stringValue];
+    }
+    NSBitmapImageRep *shot = nil;
+    NSString *picture = [self capture:pane into:&shot];
+    if (shot) {
+        [[shot representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+         writeToFile:[folder stringByAppendingPathComponent:
+                    [NSString stringWithFormat:@"settings-%@.png",
+                     [item.label lowercaseString]]] atomically:YES];
+    }
+    [lines addObject:[words stringByAppendingString:
+                        [@" picture=" stringByAppendingString:picture]]];
+    [self describePanes:folder at:index + 1 lines:lines done:done];
+}
+
+- (NSButton *)buttonTitled:(NSString *)title in:(NSView *)root {
+    for (NSView *view in root.subviews) {
+        if ([view isKindOfClass:[NSButton class]] && [((NSButton *)view).title isEqualToString:title])
+            return (NSButton *)view;
+        NSButton *inner = [self buttonTitled:title in:view];
+        if (inner) return inner;
+    }
+    return nil;
+}
+
+- (NSArray<NSTextField *> *)fieldsIn:(NSView *)root {
+    NSMutableArray *found = [NSMutableArray array];
+    for (NSView *view in root.subviews) {
+        if ([view isKindOfClass:[NSTextField class]] && ((NSTextField *)view).stringValue.length)
+            [found addObject:(NSTextField *)view];
+        if (view.subviews.count) [found addObjectsFromArray:[self fieldsIn:view]];
+    }
+    return found;
+}
+
+// The pane a person is looking at is inside the window, and the window is the thing the window
+// server has actually drawn: a tab's own view can be offscreen for the first moment after it is
+// selected, and caching that gives a correct-sized, entirely black picture — which is how the
+// Updates pane came back from the first probe. So the window's content is drawn on demand and
+// photographed instead, and every pane is described by what the window showed of it.
+- (NSString *)capture:(NSView *)view into:(NSBitmapImageRep **)out {
+    NSView *target = view.window.contentView ?: view;
+    [target layoutSubtreeIfNeeded];
+    [target.window displayIfNeeded];
+    [target displayIfNeeded];
+    NSBitmapImageRep *cached = [target bitmapImageRepForCachingDisplayInRect:target.bounds];
+    if (!cached) return @"no picture";
+    [target cacheDisplayInRect:target.bounds toBitmapImageRep:cached];
+    NSData *png = [cached representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+    NSImage *image = png ? [[NSImage alloc] initWithData:png] : nil;
+    if (!image) return @"a picture that could not be read";
+
+    // The cached rep is whatever shape AppKit chose for this display, and reading its bytes directly
+    // gave a white pane that counted as one black colour. Redrawing the picture into a bitmap whose
+    // layout this code owns — the same way the window probe reads the shop's own window — makes the
+    // count mean what it says.
+    NSInteger wide = cached.pixelsWide, high = cached.pixelsHigh;
+    if (wide < 16 || high < 16)
+        return [NSString stringWithFormat:@"a picture %ld x %ld wide", (long)wide, (long)high];
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+        initWithBitmapDataPlanes:NULL pixelsWide:wide pixelsHigh:high
+                    bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+                   colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+    if (!rep) return @"a picture that could not be read";
+    [NSGraphicsContext saveGraphicsState];
+    [NSGraphicsContext setCurrentContext:[NSGraphicsContext graphicsContextWithBitmapImageRep:rep]];
+    // A settings pane paints only its controls: everywhere else the window's own background shows
+    // through, and a cached picture of it is transparent there. Drawn onto nothing, every one of
+    // those pixels counts as black — so the background is laid down first, as the window shows it.
+    [[NSColor windowBackgroundColor] setFill];
+    NSRectFill(NSMakeRect(0, 0, wide, high));
+    [image drawInRect:NSMakeRect(0, 0, wide, high)];
+    [NSGraphicsContext restoreGraphicsState];
+    unsigned char *bytes = rep.bitmapData;
+    NSInteger stride = rep.bytesPerRow, depth = rep.samplesPerPixel;
+    NSMutableSet *colours = [NSMutableSet set];
+    NSInteger least = 255, most = 0;
+    for (NSInteger y = 0; y < rep.pixelsHigh; y += 3) {
+        for (NSInteger x = 0; x < rep.pixelsWide; x += 3) {
+            unsigned char *p = bytes + y * stride + x * depth;
+            NSInteger red = p[0], green = p[1], blue = p[2];
+            [colours addObject:@(((red >> 3) << 10) | ((green >> 3) << 5) | (blue >> 3))];
+            NSInteger light = (red * 30 + green * 59 + blue * 11) / 100;
+            if (light < least) least = light;
+            if (light > most) most = light;
+        }
+    }
+    *out = rep;
+    return [NSString stringWithFormat:@"%ld x %ld, %lu colours, light %ld to %ld",
+            (long)rep.pixelsWide, (long)rep.pixelsHigh, (unsigned long)colours.count,
+            (long)least, (long)most];
+}
+@end
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--port") && i + 1 < argc) kPort = atol(argv[i + 1]);
             if (!strcmp(argv[i], "--window-probe") && i + 1 < argc)
                 kProbeTo = [NSString stringWithUTF8String:argv[i + 1]];
+            if (!strcmp(argv[i], "--settings-probe") && i + 1 < argc)
+                kSettingsProbeTo = [NSString stringWithUTF8String:argv[i + 1]];
         }
         // Made here rather than at the first write, because the picture of the window is written
         // before the text that describes it, and a write into a folder that is not there fails quietly.
         if (kProbeTo) [[NSFileManager defaultManager] createDirectoryAtPath:kProbeTo
                                                withIntermediateDirectories:YES attributes:nil error:nil];
+        if (kSettingsProbeTo) [[NSFileManager defaultManager] createDirectoryAtPath:kSettingsProbeTo
+                                                          withIntermediateDirectories:YES
+                                                                           attributes:nil error:nil];
         NSString *fromEnvironment = [NSProcessInfo processInfo].environment[@"CHRISPHICS_PORT"];
         if (kPort == 8712 && fromEnvironment.length) kPort = fromEnvironment.integerValue;
         kBase = [NSString stringWithFormat:@"http://127.0.0.1:%ld/", (long)kPort];

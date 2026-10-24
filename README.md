@@ -416,6 +416,24 @@ runtime on a Mac without Xcode ships arm64 slices only, so an Intel copy could n
 here. It starts the bundled engine, waits for the book to open, points a `WKWebView` at it over
 loopback, and closes the engine again when it is quit or killed.
 
+That window carries its own **Settings…** (`⌘,`), directly under **About Chrisphics Hub**, because a
+copy installed on another machine has no shop server to ask and no other place to change how it
+behaves:
+
+| Pane | What it holds |
+| --- | --- |
+| **General** | the engine address on this computer, with **Refresh**; **Open in browser**; this computer's book and its size, with **Show in Finder**; the copies folder with how many copies it holds and the free space left, with **Open folder** and **Copy the book now**; page size 90–140%; keep this Mac awake while the shop is open; open the app at sign-in |
+| **Profile** | the shop's name, tagline, phone and address, saved into this computer's own book; the currency, the MoMo number and the address devices install from are read out, not typed |
+| **Updates** | this build's commit and the day and time it was made, the repository, **Check for update**, and **Open the repository** |
+
+General's choices belong to this Mac and live in its own preferences (`UserDefaults`); Profile's
+belong to the shop and go through the engine into the book, so the same words reach every job sheet,
+quote and queued client message; Updates reads its stamp out of the bundle's `Info.plist`, which the
+build writes (`ChrisphicsBuildDate`) beside the commit, so two handovers can be told apart by opening
+the window. **Check for update** is the one outward call in the whole app, and it happens only when
+the button is pressed. The copies count and the free space come from the engine, so they are the
+figures the dashboard shows, not a second opinion.
+
 ```
 Chrisphics Hub for Mac (Apple silicon)/
 ├── Chrisphics Hub.app                 ← the application itself
@@ -531,7 +549,11 @@ reports on its own window
 (`--window-probe`): what the page says its title is, how many screens are in the rail, and how many
 distinct colours and how wide a spread of light the picture of the window holds — because a grab of
 the whole display comes back black whenever the display has slept, which says nothing about the
-app, and a page that arrived is not yet a page that painted. The same run then reads back the
+app, and a page that arrived is not yet a page that painted. The settings window is asked the same
+way (`--settings-probe`): the probe finds **Settings…** in the app menu and sends that item's own
+action, presses **Check for update**, then writes down what General, Profile and Updates each say,
+with a picture of each pane and its own count of colours and spread of light. The same run then
+reads back the
 `engine.log` that copy wrote for itself, because the handover folder tells a person whose window never
 appears to read that file, and it held only the request log: what the engine *said* — which book it
 opened, and whether it took the shop's — was either written over by the request log, since stdout and
@@ -1134,7 +1156,18 @@ never touches your records.
   ask permission of anything.
   A copy on this Mac is not a backup of the shop: carry one off to a USB stick, Google Drive or
   Time Machine now and then — or set the second folder and let the copying do it.
-- **Restore**: quit the app, move your backup file into that folder renamed to
+- **Look inside a copy, take it out, put it back**: **Shop & devices ▸ Copies of the book** lists
+  every copy and gives each one **Look inside** and **Take this one out**. *Look inside* reads the
+  file without writing anything: its own `integrity_check`, the shop name and figures it holds, and
+  every table counted beside the book that is open right now, so a person can see what a copy would
+  bring and what it would take away before deciding. *Take this one out* downloads that exact file
+  onto the machine you are using. On the shop's own computer only, a copy that passes both checks
+  (whole, and holding every table the open book holds) is offered as **Put this copy back over the
+  book** — pressed once it re-labels itself with the copy's name, and pressed again it swaps the
+  whole book, sign-ins and queued device writes included. The book as it stood is copied first as
+  `pre-restore-<day>-<time>.db`, so the put-back is itself undone by another put-back. A damaged
+  copy, or some other program's database, is refused with the reason rather than half-applied.
+- **Restore by hand**: quit the app, move your backup file into that folder renamed to
   `chrisphics.db`, and start again.
 - **The one thing that is not in the book**: if you register mailboxes on **Shop & devices ▸
   Email accounts**, their passwords live in `email-secrets.json` beside `chrisphics.db`, at mode
