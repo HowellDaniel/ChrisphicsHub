@@ -38,12 +38,19 @@ offline-carry devices instead.
 Owning a book is not the same as starting with an empty one, and an empty one is no use to anybody at
 the shop. So a build made on the shop's Mac reads that Mac's own book — read-only, the same way
 `tools/carry-book.py` and `server.py --backup` read it while the shop is open — and puts a copy of it
-inside every bundle. The install then opens with the shop's figures and the shop's settings: name,
-address, phone, tagline, clients, jobs, money, expenses. The rows that only mean something on the
-shop's Mac are taken out of the copy first — who is signed in, which writes its server already
-replayed, the access log, and any client message still waiting to be sent, because a second machine
-would send the client the same message a second time. And the email password never travels, because it
-was never in the book; it sits in its own file at mode 600, and typing it is the owner's job.
+inside every bundle. The install then opens as a standalone shop: **every table, row for row** — the
+clients, the jobs, the item lines, the payments, the expenses, the spoilage, the enquiry history, the
+job event trail, the messages sent to clients, the audit log, the settings — because every report this
+app draws is computed out of those rows, so a copy that holds them all answers every report the shop's
+own Mac answers. Four things are different in the copy, and the build proves each one rather than
+assuming it: who is signed in (a second machine carrying these would be somebody else at the counter),
+the writes the shop's devices queued and its server has already replayed (replaying them a second time
+into a second book would book the same money twice), the shop Mac's own backup-run and alert-reader
+status keys (they describe this Mac's disk, not the copy's), and the auto-send flag on client messages
+still waiting — those messages travel as a record of what the shop queued, but disarmed, so a second
+machine cannot send the same client the same message a second time. And the email password never
+travels, because it was never in the book; it sits in its own file at mode 600, and typing it is the
+owner's job.
 
 Every Mac bundle is **run** here — the launcher in place, then again after the installer has copied
 it into an Applications folder and again out of its own zip — because a copy can lose the symlinks
@@ -81,7 +88,10 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE = os.path.join(REPO, "runtime-cache")
 # A blank demo build must not overwrite the seeded one, so the output folder can be moved: the two
 # sets then sit apart and a person cannot send the wrong half of the shop's records by reflex.
-DIST = os.environ.get("CHRISPHICS_DIST") or os.path.join(REPO, "dist")
+# Absolutised, because a step here runs zip with cwd=DIST — a relative name would then mean
+# dist-blank/dist-blank/…, which zip answers with "unable to create a file to write to" two minutes
+# into a build that had everything else right.
+DIST = os.path.abspath(os.environ.get("CHRISPHICS_DIST") or os.path.join(REPO, "dist"))
 
 # One release of one interpreter, chosen for the widest set of machines rather than for the newest
 # number: the engine is stdlib-only and this is the release this shop's own book has been migrated on.
@@ -116,22 +126,41 @@ BOOK_COPY = re.compile(r"^(backup|manual)-\d{8}-\d{6}\.db$")
 SEED_FOLDER = os.path.join("data", "shop.db")
 MAC_SEED = os.path.join(MAC_APP, "Contents", "Resources", "data", "shop.db")
 
-# What never travels with a copy of the book. Who is signed in, which writes the shop's server has
-# already replayed and what the shop's access log says are facts about the shop's own Mac; and a
-# client message still waiting to be sent would be sent a second time by whichever machine happened
-# to install the copy.
-LEAVE_AT_HOME = ("DELETE FROM sessions",
-                 "DELETE FROM sync_requests",
-                 "DELETE FROM security_log",
-                 "DELETE FROM notifications WHERE state <> 'Sent'",
-                 "DELETE FROM app_state WHERE key IN ('last_backup_at','last_backup_file',"
-                 "'last_backup_kind','last_backup_error','last_backup_note','last_backup_mail',"
-                 "'momo_status','momo_checked')")
+# Every table in the shop's book travels into a bundle, row for row: the clients, the jobs, the item
+# lines, the payments, the expenses, the spoilage, the enquiry history, the job event trail, the
+# messages sent to clients, the audit log, the settings. That is what makes a copy a standalone shop —
+# every report this app draws is computed out of those rows, so a machine holding them answers every
+# report the shop's own Mac answers, with no internet and no second machine in reach.
+#
+# Four things are different in the copy, each named here with the reason, and `records_in_a_copy()`
+# works out what every table should then hold so the build can prove the difference rather than assume
+# it. A client message still waiting is *not* one of them: it travels as a record of what the shop
+# queued for which client, but disarmed, because a machine that inherited the shop's send flag would
+# send that client the same message a second time.
+HOUSEKEEPING_KEYS = ("last_backup_at", "last_backup_file", "last_backup_kind", "last_backup_error",
+                     "last_backup_note", "last_backup_mail", "momo_status", "momo_checked")
+LEAVE_AT_HOME = (
+    ("sessions", "DELETE FROM sessions",
+     "a second machine holding these would be signed in as somebody else at the counter"),
+    ("sync_requests", "DELETE FROM sync_requests",
+     "writes the shop's devices queued and its server already replayed — replaying them into a second "
+     "book would book the same money twice"),
+    ("app_state", "DELETE FROM app_state WHERE key IN (%s)"
+     % ",".join("'%s'" % k for k in HOUSEKEEPING_KEYS),
+     "the shop Mac's own backup runs and alert-reader ticks, which this machine did not do"),
+)
+DISARM_AT_HOME = (
+    ("notifications", "UPDATE notifications SET auto_send=0, delivery_state='Manual', "
+     "delivery_next_at=NULL WHERE delivery_state IN ('Pending','Sending')",
+     "every client message travels as the record it is; only the send flag is let go"),
+)
 FIGURES = ("jobs", "clients", "payments")
-RUNTIME_TABLES = ("sessions", "sync_requests", "security_log")
+# What tells a copy apart from the shop's live book when a machine is running: a copy has none of these.
+RUNTIME_TABLES = ("sessions", "sync_requests")
 
 # Filled in by main(): the one snapshot every bundle in this build is seeded from.
 SEEDING = {"path": None, "from": "an empty book", "figures": {t: 0 for t in FIGURES},
+           "live": {"inventory": {}, "housekeeping": 0}, "carries": {},
            "shop": {}, "settings": "", "when": ""}
 
 
@@ -190,13 +219,12 @@ export CHRISPHICS_SUPPORT="$SUPPORT"
 # shop: see legacy_book_path() in server.py.
 export CHRISPHICS_DB="$SUPPORT/shop.db"
 # The first time this app is opened on a computer, it takes the copy of the shop's book that came
-# inside it and puts it where this machine keeps its own records. After that it works only from this
-# machine's book, so reinstalling the app never overwrites what this computer has written since.
-if [ ! -f "$SUPPORT/shop.db" ] && [ -f "$CONTENTS/Resources/data/shop.db" ]; then
-  cp "$CONTENTS/Resources/data/shop.db" "$SUPPORT/shop.db"
-fi
+# inside it and puts it where this machine keeps its own records — and it takes it again on any later
+# opening whose book is still the empty one the engine made for itself, so a machine that was shown
+# the demo first does not stay blank. A book with even one record of its own is never touched: see
+# take_in_shop_copy() in app/server.py.
 exec "$CONTENTS/Resources/runtime/bin/python3" "$CONTENTS/Resources/app/server.py" \\
-     --port "$PORT" "$@"
+     --port "$PORT" --shop-copy "$CONTENTS/Resources/data/shop.db" "$@"
 """
 
 MAC_PLIST = {
@@ -255,16 +283,16 @@ if "%%CHRISPHICS_PORT%%"=="" set CHRISPHICS_PORT=8712
 set SUPPORT=%%LOCALAPPDATA%%\\CRISPprint Hub
 if not exist "%%SUPPORT%%" mkdir "%%SUPPORT%%"
 rem The first time this is started on the PC, the copy of the shop's book that came in the program
-rem folder is put where this machine keeps its own records. After that only this machine's book is
-rem opened, so reinstalling the program never overwrites what this PC has written since.
-if not exist "%%SUPPORT%%\\shop.db" if exist "%%HERE%%data\\shop.db" copy /b "%%HERE%%data\\shop.db" "%%SUPPORT%%\\shop.db" >nul
+rem folder is put where this machine keeps its own records — and again on any later start whose book
+rem is still the empty one the engine made, so a PC that was shown the demo first does not stay blank.
+rem A book with even one record of its own is never touched: see take_in_shop_copy() in app\server.py.
 echo Opening Chrisphics Hub at http://127.0.0.1:%%CHRISPHICS_PORT%%/
 echo Records: %%SUPPORT%%\\shop.db
 echo Leave this window open while you work; close it to stop the shop.
 rem Naming the book, instead of letting the engine reach its default, keeps this copy its own shop.
 set CHRISPHICS_SUPPORT=%%SUPPORT%%
 set CHRISPHICS_DB=%%SUPPORT%%\\shop.db
-"%%HERE%%runtime\\python.exe" "%%HERE%%app\\server.py" --port %%CHRISPHICS_PORT%% %%*
+"%%HERE%%runtime\\python.exe" "%%HERE%%app\\server.py" --port %%CHRISPHICS_PORT%% --shop-copy "%%HERE%%data\\shop.db" %%*
 """
 
 INSTALL_CMD_WIN = """@echo off
@@ -341,6 +369,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${CHRISPHICS_PORT:-8712}"
 export CHRISPHICS_SUPPORT="${HERE}/data"
 # Naming the book, instead of letting the engine reach its default, keeps this copy its own shop.
+# This one needs no --shop-copy: the shop's copy that came in the bundle is this file, so the records
+# and the program travel in the same folder and the first opening is already the shop's own.
 export CHRISPHICS_DB="${HERE}/data/shop.db"
 echo "Opening Chrisphics Hub at http://127.0.0.1:${PORT}/ — records in ${HERE}/data/shop.db"
 echo "Leave this window open while you work; Ctrl+C closes the shop."
@@ -407,15 +437,25 @@ LINUX_OPENING = WIN_OPENING.replace("console", "terminal")
 # one asked for with --blank — starts a shop of its own from zero, which is what somebody outside the
 # shop needs.
 SEEDED_START = """    It starts already full of the shop's records and the shop's settings — name, address, phone and
-    tagline, clients, jobs and money — as they stood on %s. The figures are in the file,
-    not on a server: this copy works with no network at all, and it needs nothing from the shop
-    Mac to run.
+    tagline, clients, jobs, the item lines on each job, money in and out, expenses, spoiled work, the
+    enquiry history, every message the shop queued to a client and the log of what happened to the book
+    — as they stood on %s. Nothing of the shop's records stays behind on the shop's Mac, so every report
+    the shop's own machine draws, this copy draws too: from its own file, with no network at all, and no
+    other machine needed for it to run.
     Where this book came from: %s.
-    Two things do not travel, and cannot. The shop's email password is never in the book, so this
-    computer cannot send the shop's mail until somebody types it in here; and the money alerts are
-    read off the shop Mac's own Messages app, so those stay with that machine.
+    Three things do not travel, and cannot. The shop's email password is never in the book, so this
+    computer cannot send the shop's mail until somebody types it in here; the money alerts are read off
+    the shop Mac's own Messages app, so those stay with that machine; and who is signed in on the shop
+    Mac does not decide who is signed in here. Client messages that had not gone out yet arrive as the
+    record they are, with the automatic-send flag let go — so this computer cannot send one client the
+    same message twice, and pressing send here still works.
     Anything written on this computer stays on this computer. If a job is also written on the shop
-    Mac, there are then two records of it and nothing joins them up."""
+    Mac, there are then two records of it and nothing joins them up.
+    If this computer already ran a copy of this program that had nothing written in it, opening this
+    one puts the shop's records into that empty book — an app that stayed blank after installing the
+    shop's copy would look like a demo, and is not one. A book with even one record in it is left
+    exactly as it is, and the empty book that got replaced is kept beside it named "shop.was-empty-…"
+    for as long as anybody wants it."""
 BLANK_START = """    It starts with an empty book, and everything you write belongs to this computer alone."""
 
 fails = []
@@ -449,7 +489,12 @@ def sha256_file(path):
 
 def book_says(path):
     """What a book actually holds, read straight out of the file. These checks exist to catch a copy
-    that quietly opens somebody else's records, and a running engine is a poor witness; the file is."""
+    that quietly opens somebody else's records, and a running engine is a poor witness; the file is.
+
+    `inventory` is every table in the book, not the three headline figures — which is what lets the
+    build answer the owner's actual question ('does the app have all the records?') with a count per
+    table instead of a promise. `armed` is the narrower thing that matters for safety: the client
+    messages a machine would send off by itself the moment it starts."""
     try:
         book = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
     except sqlite3.Error:
@@ -459,21 +504,49 @@ def book_says(path):
             "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
         if "jobs" not in tables or "app_state" not in tables:
             return None
+        count = lambda t: book.execute('SELECT COUNT(*) FROM "%s"' % t).fetchone()[0]
         got = {"integrity": book.execute("PRAGMA integrity_check").fetchone()[0],
-               "figures": {t: book.execute("SELECT COUNT(*) FROM %s" % t).fetchone()[0]
-                           for t in FIGURES if t in tables},
+               "figures": {t: count(t) for t in FIGURES if t in tables},
+               "inventory": {t: count(t) for t in sorted(tables)},
                "settings": dict(book.execute("SELECT key, value FROM app_state "
                                              "WHERE key LIKE 'shop_%'").fetchall())}
-        got["runtime"] = {t: (book.execute("SELECT COUNT(*) FROM %s" % t).fetchone()[0]
-                              if t in tables else 0) for t in RUNTIME_TABLES}
-        got["waiting"] = (book.execute("SELECT COUNT(*) FROM notifications "
-                                       "WHERE state <> 'Sent'").fetchone()[0]
-                          if "notifications" in tables else 0)
+        got["runtime"] = {t: (count(t) if t in tables else 0) for t in RUNTIME_TABLES}
+        got["armed"] = (book.execute("SELECT COUNT(*) FROM notifications WHERE auto_send=1 "
+                                     "AND state='Queued' AND delivery_state IN "
+                                     "('Pending','Sending')").fetchone()[0]
+                        if "notifications" in tables else 0)
+        got["messages"] = got["inventory"].get("notifications", 0)
+        got["housekeeping"] = book.execute(
+            "SELECT COUNT(*) FROM app_state WHERE key IN (%s)"
+            % ",".join("'%s'" % k for k in HOUSEKEEPING_KEYS)).fetchone()[0]
         return got
     except sqlite3.Error:
         return None
     finally:
         book.close()
+
+
+def records_expected(live):
+    """What a bundle's book must hold, table by table, given what the shop's book held when it was read.
+
+    Everything the shop has, the copy has — that is the point of the exercise, and it is why every
+    report works on a machine with no internet and nobody else's help. The arithmetic is only the
+    deletes named in LEAVE_AT_HOME, so a table that quietly lost rows in a packaging step shows up as
+    a mismatch instead of going unnoticed.
+    """
+    want = dict(live["inventory"])
+    want["sessions"] = 0
+    want["sync_requests"] = 0
+    want["app_state"] = want.get("app_state", 0) - live["housekeeping"]
+    return want
+
+
+def records_missing(live, said):
+    """The tables whose copy does not hold what the shop left, as {table: (shop, copy, expected)}."""
+    if not said:
+        return {"every table at once": (0, 0, 0)}
+    return {t: (live["inventory"].get(t, 0), said["inventory"].get(t, 0), want)
+            for t, want in records_expected(live).items() if said["inventory"].get(t) != want}
 
 
 def shop_book_source(argv):
@@ -522,7 +595,7 @@ def seed_book(source):
         if shop.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             return None, "the shop's book did not pass its own check"
         shop.backup(copy)
-        for statement in LEAVE_AT_HOME:
+        for _table, statement, _why in LEAVE_AT_HOME + DISARM_AT_HOME:
             copy.execute(statement)
         copy.commit()
         copy.execute("PRAGMA journal_mode=DELETE")
@@ -554,11 +627,21 @@ def seed_book(source):
 
 
 def prepare_seed(argv):
-    """Decide once, for the whole build, what every installed copy starts its book with."""
+    """Decide once, for the whole build, what every installed copy starts its book with.
+
+    The shop's book is counted here, before the copy is made, because that count is what every bundle in
+    this build is then held against, table by table. Counting the copy and comparing it with itself
+    would prove only that the tool agrees with itself.
+    """
     source = shop_book_source(argv)
     if not source:
         SEEDING["from"] = "an empty book — this Mac holds no copy of the shop's book to start from"
         note("a build with no book to copy makes empty installs", True, "--blank, or no shop book here")
+        return
+    live = book_says(source)
+    if not live:
+        SEEDING["from"] = "an empty book — the shop's book would not open to be counted"
+        note("the shop's book read to be counted", False, source)
         return
     path, why = seed_book(source)
     if not path:
@@ -566,11 +649,28 @@ def prepare_seed(argv):
         note("the shop's book copied into the installs", False, why)
         return
     said = book_says(path)
-    SEEDING.update(path=path, figures=said["figures"], shop=said["settings"],
+    SEEDING.update(path=path, figures=said["figures"], shop=said["settings"], live=live,
+                   carries=said["inventory"],
                    settings=", ".join(sorted(said["settings"])),
                    when=time.strftime("%Y-%m-%d"))
     SEEDING["from"] = ("the shop's own book, read as the build ran" if source == SHOP_BOOK
                        else "the shop's copy %s" % os.path.basename(source))
+    want = records_expected(live)
+    off = records_missing(live, said)
+    note("the copy holds every record in the shop's book, counted table by table", not off,
+         "%s — %d tables, %s rows, %s" % (
+             ", ".join(sorted("%s %d" % kv for kv in want.items() if kv[1])),
+             len(want), sum(want.values()),
+             "left at home: %s" % ", ".join(
+                 "%s %d→%d" % (t, shop, copy) for t, shop, copy in
+                 sorted((t, v[0], v[1]) for t, v in off.items())) if off else
+             "nothing of the shop's own left behind"))
+    if off:
+        fails.append("the shop's book did not travel whole: %s" % ", ".join(sorted(off)))
+    note("  and every client message travels, disarmed so this machine cannot re-send it",
+         bool(said) and not said["armed"] and said["messages"] == live["messages"],
+         "%d messages, %d of them still armed to send" % (said["messages"], said["armed"])
+         if said else "unreadable")
 
 
 
@@ -802,12 +902,20 @@ def build(key):
         note("  and it starts with a copy of the shop's book", bool(said),
              "%s — taken from %s" % (", ".join("%s %d" % kv for kv in sorted(said["figures"].items()))
                                      if said else "unreadable", SEEDING["from"]))
+        off = records_missing(SEEDING["live"], said)
+        note("    and it holds every record the shop's book holds, table by table", not off,
+             "%d tables, %d rows — clients, jobs, item lines, payments, expenses, spoilage, message "
+             "history, audit log and settings all travel, so every report answers here"
+             % (len(records_expected(SEEDING["live"])),
+                sum(records_expected(SEEDING["live"]).values())) if not off
+             else "short on: %s" % ", ".join("%s shop %d→copy %d (want %d)" % (t,) + v
+                                             for t, v in sorted(off.items())))
         note("    with the shop's own settings in it", bool(said and said["settings"]),
              ", ".join(sorted(said["settings"])) if said else "none")
-        note("    and none of the shop's sign-ins, replays or access log",
-             bool(said) and not any(said["runtime"].values()) and not said["waiting"],
-             str(said["runtime"]) + (", %d client messages still waiting to send" % said["waiting"]
-                                     if said and said["waiting"] else "") if said else "unreadable")
+        note("    and none of the shop's sign-ins or replayed device writes",
+             bool(said) and not any(said["runtime"].values()) and not said["armed"],
+             str(said["runtime"]) + (", and %d messages still armed to send" % said["armed"]
+                                     if said and said["armed"] else "") if said else "unreadable")
         note("    and it passes its own check as a book", bool(said) and said["integrity"] == "ok",
              said["integrity"] if said else "unreadable")
         note("    and it is one file, with no write-ahead sidecars",
@@ -940,11 +1048,15 @@ def book_carries(where, label):
     failure a folder check cannot see.
     """
     said = book_says(where) if where and os.path.isfile(where) else None
-    holds = bool(said) and said["figures"] == SEEDING["figures"]
-    holds = holds and not any(said["runtime"].values()) and not said["waiting"]
+    off = records_missing(SEEDING["live"], said)
+    holds = bool(said) and not off and not any(said["runtime"].values()) and not said["armed"]
     return (label, holds,
-            "%s, no sign-ins or replays — %s" % (said["figures"], SEEDING["from"])
-            if said else "no book inside what was built")
+            "%d tables, %d rows carried whole, no sign-ins or replays — %s"
+            % (len(records_expected(SEEDING["live"])), sum(records_expected(SEEDING["live"]).values()),
+               SEEDING["from"]) if holds else
+            ("short on: %s" % ", ".join("%s shop %d→%d (want %d)" % (t,) + v
+                                        for t, v in sorted(off.items())) if said
+             else "no book inside what was built"))
 
 
 def mac_dmg(bundle, target):
@@ -1086,13 +1198,15 @@ def run_bundle(key, built, port, prefix=(), says=None, home=None):
              bool(said) and said["figures"] == SEEDING["figures"],
              "no book" if said is None else "%s, expected %s"
              % (said["figures"], SEEDING["figures"]))
-        # The shop's live book holds who is signed in, which writes its server has replayed and its own
-        # access log. A copy that has those rows in front of it is not reading a copy — it is reading
-        # the shop, which is the failure this whole branch of checks exists to catch.
+        # The shop's live book holds who is signed in and the writes its server has already replayed.
+        # A copy that has those rows in front of it is not reading a copy — it is reading the shop,
+        # which is the failure this whole branch of checks exists to catch. (The audit log and the
+        # client message history *do* travel now: they are the shop's records, and the copy will add
+        # its own rows to them, so they are not a usable witness.)
         note("  and it is a copy, not the shop's live book",
-             bool(said) and not any(said["runtime"].values()) and not said["waiting"],
+             bool(said) and not any(said["runtime"].values()) and not said["armed"],
              str(said["runtime"]) if said and any(said["runtime"].values()) else
-             "no sign-ins, no replay rows, no audit trail" if said else "no book")
+             "no sign-ins, no replay rows, nothing armed to send" if said else "no book")
     if own_home:
         shutil.rmtree(shop_home, ignore_errors=True)
 
@@ -1141,6 +1255,196 @@ def prove_installed(key, built, port):
                    port, home=home, says="%s (installed)" % folder)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
+        shutil.rmtree(home, ignore_errors=True)
+
+
+SEED_RULE_PROBE = '''"""Ask the rule the shipped engine follows every question a person could bring to it, using the
+server.py and the book that are sealed inside this bundle — not a copy of the logic written again
+here, which would prove nothing about what actually installs."""
+import os, sqlite3, sys
+
+app, seed, home, expect, want_name = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
+os.environ["CHRISPHICS_DB"] = os.path.join(home, "not-the-target.db")
+os.environ["CHRISPHICS_SUPPORT"] = home
+sys.path.insert(0, app)
+import server
+
+
+def fresh(path):
+    """The book the engine leaves behind on a computer that has never had one: same schema, same
+    first-run default it stamps into app_state."""
+    server.DB_PATH = path
+    server.connect(path)
+    server._db.close()
+
+
+def read(path):
+    book = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    try:
+        return (book.execute("SELECT COUNT(*) FROM jobs").fetchone()[0],
+                (book.execute("SELECT value FROM app_state WHERE key='shop_name'").fetchone()
+                 or ["none"])[0])
+    finally:
+        book.close()
+
+
+def say(label, ok, detail):
+    print("%s|%s|%s" % (label, "ok" if ok else "no", str(detail)[:120]))
+
+
+first = os.path.join(home, "first.db")
+told = server.take_in_shop_copy(seed, first)
+say("a computer that has never run this program opens on the shop's book",
+    read(first) == (expect, want_name), "%s — %s" % (read(first), told[:40]))
+
+demo = os.path.join(home, "demo.db")
+fresh(demo)
+open(demo + "-wal", "wb").write(b"stale write-ahead junk")
+open(demo + "-shm", "wb").write(b"junk")
+aside_before = 0
+told = server.take_in_shop_copy(seed, demo)
+kept = sorted(os.path.basename(p) for p in __import__("glob").glob(demo + ".was-empty-*"))
+say("  and a computer that ran the empty demo first fills with it too",
+    read(demo) == (expect, want_name), "%s jobs" % read(demo)[0])
+say("  and the empty book it replaced is kept, not thrown away", len(kept) == 3, ", ".join(kept))
+say("  and no stale write-ahead log is left beside the new book",
+    not os.path.exists(demo + "-wal") and not os.path.exists(demo + "-shm"), "-wal moved with it")
+say("  and the shop's settings came with it", read(demo)[1] == want_name, read(demo)[1])
+before = len(kept)
+told = server.take_in_shop_copy(seed, demo)
+say("  and opening it a second time rewrites nothing",
+    read(demo) == (expect, want_name) and len(kept) == before, "%s — %s" % (read(demo), told[:40]))
+
+theirs = os.path.join(home, "theirs.db")
+fresh(theirs)
+book = sqlite3.connect(theirs)
+book.execute("INSERT INTO jobs(ref, client_id, title) VALUES('CH-THIS-MACHINE-1', 1, "
+             "'a job this computer wrote')")
+book.commit()
+book.close()
+told = server.take_in_shop_copy(seed, theirs)
+say("a book with one record of its own is never replaced", read(theirs) == (1, "none"),
+    "%s — %s" % (read(theirs), told[:40]))
+
+named = os.path.join(home, "named.db")
+fresh(named)
+book = sqlite3.connect(named)
+book.execute("INSERT INTO app_state(key, value) VALUES('shop_name', 'Some Other Shop')")
+book.commit()
+book.close()
+told = server.take_in_shop_copy(seed, named)
+say("  and one name typed on Settings protects the whole book",
+    read(named) == (0, "Some Other Shop"), "%s — %s" % (read(named), told[:40]))
+
+broken = os.path.join(home, "broken.db")
+with open(broken, "wb") as fh:
+    fh.write(b"this is not a database")
+told = server.take_in_shop_copy(seed, broken)
+same = open(broken, "rb").read() == b"this is not a database"
+say("  and a book that will not open is left exactly as it is", same, told[:60])
+
+empty_seed = os.path.join(home, "demo-bundle-book.db")
+fresh(empty_seed)
+never = os.path.join(home, "never-filled.db")
+told = server.take_in_shop_copy(empty_seed, never)
+say("a demo bundle's copy hands over nothing",
+    told == "" and not os.path.exists(never),
+    "%r; a book created where one should not appear: %s" % (told[:20], os.path.exists(never)))
+
+os.environ.pop("CHRISPHICS_DB")
+told = server.take_in_shop_copy(seed, os.path.join(home, "the-shops-own.db"))
+say("  and a server that was never told which book is its own is refused",
+    not os.path.exists(os.path.join(home, "the-shops-own.db")), told[:60])
+'''
+
+
+def bundle_resources(key, entry):
+    """Where the engine (`app/server.py`) and the copy of the shop's book (`data/shop.db`) sit inside
+    a built bundle — which is a different question on a Mac, where both live under the .app, than on
+    Windows and Linux, where they sit in the folder itself."""
+    if TARGETS[key]["kind"] == "mac":
+        return os.path.join(entry["bundle"], MAC_APP, "Contents", "Resources")
+    return entry["bundle"]
+
+
+def prove_seed_rule(built):
+    """The rule a bundle follows about the book already on the machine — asked of the engine and the
+    book inside the bundle that was just built, so what is proved is what installs.
+
+    It is the rule a person cannot see from outside: their copy has to fill an empty book (or a
+    machine that was shown the demo first stays a demo forever) and must never overwrite a book they
+    have written in. Both halves are asked here, on a throwaway folder, with nothing of the shop's
+    own records in reach.
+    """
+    key = next((k for k in built if TARGETS[k]["kind"] == "mac"), None) or (next(iter(built), None))
+    if key is None:
+        note("the rule the shipped engine follows about the book already on the machine", False,
+             "nothing was built to ask it of")
+        return
+    resources = bundle_resources(key, built[key])
+    app = os.path.join(resources, "app")
+    seed = os.path.join(resources, "data", "shop.db")
+    if not (os.path.isfile(seed) and os.path.isfile(os.path.join(app, "server.py"))):
+        note("the rule the shipped engine follows about the book already on the machine", False,
+             "no server.py and book inside %s to ask" % os.path.basename(app))
+        return
+    home = tempfile.mkdtemp(prefix="chrisphics-seedrule-")
+    try:
+        probe = write(os.path.join(scratch(), "seed-rule-probe.py"), SEED_RULE_PROBE)
+        asked = subprocess.run(
+            [sys.executable, probe, app, seed, home, str(SEEDING["figures"].get("jobs", 0)),
+             SEEDING["shop"].get("shop_name", "")],
+            capture_output=True, text=True)
+        lines = 0
+        for line in asked.stdout.splitlines():
+            parts = line.split("|", 2)
+            if len(parts) != 3:
+                continue
+            lines += 1
+            note(parts[0], parts[1] == "ok", parts[2])
+        if lines == 0 or asked.returncode != 0:
+            note("the rule the shipped engine follows about the book already on the machine", False,
+                 (asked.stderr or "it printed no verdicts")[-200:])
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def prove_seed_takes_over(key, built, port, prefix=()):
+    """The same rule asked of a whole running copy, because the checks above stop short of the app:
+    plant the empty book a machine would have left from the demo, start this bundle the way its own
+    launcher does, and see whether the shop's figures are on the screen afterwards — with this
+    machine's book, in this machine's folder, and the empty one kept beside it."""
+    folder = TARGETS[key]["folder"]
+    if held(port):
+        note("%s: onto a machine that already has an empty book" % folder, False,
+             "%d is held" % port)
+        return
+    home = tempfile.mkdtemp(prefix="chrisphics-home-")
+    try:
+        support = os.path.join(home, "Library", "Application Support", "CRISPprint Hub")
+        os.makedirs(support)
+        book = os.path.join(support, "shop.db")
+        resources = bundle_resources(key, built)
+        planted = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, %r); import server;"
+             "server.DB_PATH = %r; server.connect(%r); server._db.close()"
+             % (os.path.join(resources, "app"), book, book)],
+            capture_output=True, text=True,
+            env=dict(os.environ, HOME=home, CHRISPHICS_DB=book, CHRISPHICS_SUPPORT=support))
+        said = book_says(book) if planted.returncode == 0 else None
+        blank = bool(said) and all(rows == 0 for table, rows in said["inventory"].items()
+                                   if table != "app_state") and said["inventory"].get("app_state", 0) <= 1
+        note("%s: onto a machine that already has an empty book" % folder,
+             blank and not any(said["runtime"].values()) if said else False,
+             "%s planted — %s" % (said["inventory"], (planted.stderr or "")[:40])
+             if said else "the empty book could not be planted: %s" % (planted.stderr or "")[:80])
+        run_bundle(key, built, port, prefix, home=home, says="%s (onto an empty book)" % folder)
+        aside = sorted(os.path.basename(p) for p in os.listdir(support)
+                       if ".was-empty-" in p)
+        note("  and the empty book it found is kept beside the shop's", len(aside) >= 1,
+             ", ".join(aside) or "nothing was left behind")
+    finally:
         shutil.rmtree(home, ignore_errors=True)
 
 
@@ -1266,7 +1570,14 @@ def main():
             if TARGETS[key]["kind"] == "mac":
                 prove_installed(key, built[key], base + 2)
                 prove_window(key, built[key], base + 3, prefix)
+            # The empty-book rule asked of a whole running copy needs a spare port beyond the four
+            # above: 8820 and up never collide with 8798+index*4. It is a Mac-and-Windows question —
+            # a Linux copy works on the book inside its own folder, so it has none to take over.
+            if SEEDING["path"] and TARGETS[key]["kind"] == "mac":
+                prove_seed_takes_over(key, built[key], 8820 + index, prefix)
             proved.append(key)
+        if SEEDING["path"]:
+            prove_seed_rule(built)
         if other and other not in proved and other in built:
             print("%s: this Mac cannot start that chip's code, so it was checked by shape only"
                   % TARGETS[other]["folder"])
@@ -1286,7 +1597,7 @@ def main():
                   "somebody who will work on the shop's book"
                   if SEEDING["path"] else
                   "these copies start with an empty book — safe to hand to anybody"))
-    print("in %s/: %s" % (DIST, ", ".join(sorted(os.listdir(DIST)))))
+    print("in %s: %s" % (DIST, ", ".join(sorted(os.listdir(DIST)))))
     return 1 if fails else 0
 
 

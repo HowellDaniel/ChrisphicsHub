@@ -6,6 +6,7 @@ use the shop's configured WhatsApp Business and email providers.
 
     python3 server.py                 # start on http://127.0.0.1:8712
     python3 server.py --seed          # start and load sample records (for a demo)
+    python3 server.py --shop-copy F   # take the shop's book at F when this machine's is missing/empty
     python3 server.py --backup        # write a timestamped copy of the data and exit
 """
 from __future__ import annotations
@@ -180,6 +181,116 @@ def adopt_legacy_book(source_path):
         sys.stdout.write("Book copied from the older folder: %s\n" % source_path)
     finally:
         source.close()
+
+
+# A brand-new book is not literally empty: the first time the engine opens one it stamps a single
+# consent default into app_state. That row is this machine's own housekeeping, not a record anybody
+# wrote, so it does not keep a book from taking in the shop's copy. Any other setting — the name typed
+# on Settings ▸ Profile, a phone number, a backup schedule — is somebody's, and does.
+FRESH_KEYS = ("consent_default",)
+
+
+def book_inventory(path):
+    """What a book holds: rows per table and the settings written in it — or None when the file is not
+    a book this engine can read at all. Read-only, and never a repair attempt; the answer is only ever
+    used to decide whether a file holds anything worth protecting.
+    """
+    try:
+        book = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        tables = [name for (name,) in book.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        if "jobs" not in tables or "app_state" not in tables:
+            return None
+        counts = {name: book.execute('SELECT COUNT(*) FROM "%s"'
+                                     % name.replace('"', '""')).fetchone()[0] for name in tables}
+        keys = [key for (key,) in book.execute("SELECT key FROM app_state").fetchall()]
+        return counts, keys
+    except sqlite3.Error:
+        return None
+    finally:
+        book.close()
+
+
+def book_holds_records(path):
+    """True when a book holds something the shop or a person put there: a row in any table besides
+    app_state, or a setting beyond the one default a fresh book stamps for itself. A book that will
+    not open is answered as though it holds records, because nothing here is allowed to overwrite what
+    it cannot read."""
+    held = book_inventory(path)
+    if held is None:
+        return True
+    counts, keys = held
+    return (any(rows for name, rows in counts.items() if name != "app_state")
+            or any(key not in FRESH_KEYS for key in keys))
+
+
+def book_is_blank(path):
+    """A book that opens, has the shop's tables, and holds nothing in them but its own first-run
+    default — the book the engine makes for itself. The rule this serves is "fill an empty copy",
+    never "replace a shop".
+    """
+    return not book_holds_records(path)
+
+
+def take_in_shop_copy(source, target=None):
+    """Put the shop's book — the copy that came sealed inside this bundle — where this machine keeps
+    its own records, when this machine has nothing of its own to lose.
+
+    The first time a copy is opened it takes the book, so the shop's figures and settings are on the
+    screen before anything is typed. It also takes it on the second and the tenth time, as long as
+    what it finds is *empty*: a machine that was shown the demo build first owns a book with nothing in
+    it, and an app that stays blank after installing the shop's own copy reads as a demo and is not
+    one. A book with any record in it is never touched, so work that survived a reinstall survives this
+    too — and one setting somebody typed counts as a record.
+
+    The empty book is moved aside under its own name rather than deleted, and its write-ahead sidecars
+    go with it — a stale `-wal` left beside a different book is how SQLite reports a malformed image.
+    Returns one line saying what it did, because that line is the only record a person has when their
+    copy opens on the wrong figures.
+    """
+    if not source:
+        return ""
+    target = os.path.abspath(target or DB_PATH)
+    seed = os.path.abspath(source)
+    # A portable launcher always names the book it wants through CHRISPHICS_DB. Requiring that here
+    # means a `python3 server.py --shop-copy …` typed against the shop's own server can never be the
+    # thing that overwrites the shop's book; the default path is refused even if the flag is used.
+    if not os.environ.get("CHRISPHICS_DB"):
+        return "Refused the shop's copy: this server was not told which book is its own (CHRISPHICS_DB)."
+    if not os.path.isfile(seed):
+        # A demo bundle is built without a copy to hand over, so saying nothing here is correct — and
+        # a seeded bundle that lost its copy is caught by the build's own check of the finished
+        # package, long before a person opens it.
+        return ""
+    if os.path.exists(target) and os.path.samefile(seed, target):
+        return ""  # a Linux copy runs the book inside its own folder; there is no second file to fill
+    if book_inventory(seed) is None:
+        return ("The copy inside this bundle is not a book this engine can read (%s) — your own book "
+                "was left alone." % seed)
+    if not book_holds_records(seed):
+        return ""  # a demo bundle's copy holds no records to hand over; the engine makes its own book
+    aside, moved = "", 0
+    if os.path.exists(target):
+        if book_inventory(target) is None:
+            return ("This machine's book will not open, so nothing was put over it — ask somebody to "
+                    "look at %s before writing new records." % target)
+        if book_holds_records(target):
+            return "Left this machine's own book alone — it already holds records of its own."
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        aside = "%s.was-empty-%s" % (target, stamp)
+        for tail in ("", "-wal", "-shm"):
+            if os.path.exists(target + tail):
+                os.replace(target + tail, aside + tail)
+                moved += 1
+    with open(seed, "rb") as reader, open(target, "wb") as writer:
+        for chunk in iter(lambda: reader.read(1 << 20), b""):
+            writer.write(chunk)
+    return "Took the shop's book into %s%s." % (
+        target, " — the empty one found there is kept beside it as %s" % os.path.basename(aside)
+        if moved else "")
 
 
 def connect(path=None):
@@ -6557,6 +6668,9 @@ def main():
                     help="disable login only when bound to a private Wi-Fi IPv4 address")
     ap.add_argument("--db", default=None, help="alternative SQLite file")
     ap.add_argument("--seed", action="store_true", help="load sample records if the book is empty")
+    ap.add_argument("--shop-copy", default=None, metavar="FILE", help="the copy of the shop's book that "
+                    "came inside this bundle: take it when this machine's own book is missing or holds "
+                    "nothing at all. Only ever fills an empty book; one written row protects it.")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--keep-awake", action="store_true", default=None,
                     help="hold this Mac awake while the book is served (automatic beyond loopback)")
@@ -6565,6 +6679,13 @@ def main():
     ap.add_argument("--backup", action="store_true",
                     help="write a checked, tidied copy of the book into the backups folder and exit")
     args = ap.parse_args()
+    if args.shop_copy:
+        # Before connect(): opening a book that is not there yet would create an empty one, and an
+        # empty book is exactly what this step is allowed to replace — so the question has to be
+        # asked while the file is still the one a person left behind.
+        told = take_in_shop_copy(args.shop_copy, args.db or DB_PATH)
+        if told:
+            print(told)
     connect(args.db)
     if args.backup:
         path, counts, tidy = run_backup()

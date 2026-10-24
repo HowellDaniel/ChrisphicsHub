@@ -455,15 +455,43 @@ the person who receives it never has to import anything. The read is `mode=ro` a
 the book's fingerprint before and after, so the shop's own file is proved untouched by the copy taken
 out of it.
 
-Rows that only mean something on the shop's Mac are removed from the copy first: the sign-in
-sessions, the `sync_requests` rows the server has already replayed, the access log, any client
-message still waiting to be sent, and the backup and MoMo history keys. A second machine that carried
-those would either sign in as somebody else or send the same client the same message twice. The email
-app password never travels because it was never in the book — it sits in `email-secrets.json`, mode
-600, and typing it is the owner's job. `--book-from FILE` seeds from that copy, and `--blank` builds
-empty books for a shop that is not this one; either way the README inside the bundle says where the
-figures came from and when they were read, and the build report ends by saying which kind of set it
-just made.
+The rule the copy follows on the machine that receives it is in `take_in_shop_copy()` in `server.py`,
+and it has two halves. A computer whose book is missing **or still the empty one the engine makes for
+itself** gets the shop's book poured into it — which matters because a machine that was first shown
+the demo set would otherwise stay a demo forever, however many seeded copies were installed over it.
+A computer whose book holds even one record of its own is left exactly alone: one job booked at the
+counter, one name typed on Shop & devices, is enough to protect the whole file. A book that will not
+open at all is left byte for byte as it is and the person is told to look at it, rather than being
+handed a clean-looking shop over the top of whatever went wrong. The empty book that got replaced is
+not thrown away but moved beside the new one as `shop.db.was-empty-<time>`, its write-ahead log and
+shared-memory file along with it, so nothing is discarded and no stale log is left sitting against a
+book it did not write. The step refuses outright on a server that was not told which file is its own
+book (`CHRISPHICS_DB`), so it can never reach the shop's default path by accident, and it says nothing
+at all when there is no copy in the bundle — a demo build's `data/shop.db` is blank, and filling a
+machine with a blank is not news. Every portable launcher now passes `--shop-copy`; the copy-once
+`cp` guard that used to sit in them is gone, because the guard was the reason the second half of this
+rule could not exist.
+
+**Everything else travels, row for row.** The copy is the shop's book complete: clients, jobs, the
+item lines on each job, payments, expenses, spoiled work, the enquiry history, the whole job event
+trail, every message the shop queued to a client, the audit log and the settings. That is what makes an
+installed copy a *standalone shop* rather than a viewer for three headline figures — every report the
+app draws is computed out of those rows, so a machine with no internet and nobody else in reach answers
+every report the shop's own Mac answers. Four things are different, and the build does not take that on
+trust: it counts the shop's book table by table before copying it, then counts the book inside each
+bundle, each zip, each `.dmg` and each unpacked `.pkg` against those numbers, so a packaging step that
+quietly lost a table fails a check instead of shipping a hole. What may not travel is the sign-in
+sessions (a second machine holding them would be somebody else at the counter), the `sync_requests` the
+shop's server has already replayed (replaying them into a second book would book the same money twice)
+and the shop Mac's own backup-run and alert-reader status keys (they describe this Mac's disk, not the
+copy's). Client messages that had not gone out are the interesting case: they are the shop's record of
+what it queued for whom, so they come across — but with `auto_send` and the pending delivery state let
+go, so a second machine cannot send one client the same message twice, and pressing send there still
+works. The email app password never travels because it was never in the book — it sits in
+`email-secrets.json`, mode 600, and typing it is the owner's job. `--book-from FILE` seeds from that
+copy, and `--blank` builds empty books for a shop that is not this one; either way the README inside the
+bundle says where the figures came from and when they were read, and the build report ends by saying
+which kind of set it just made.
 
 A seeded bundle is therefore a **handover of the shop's records**, not just of a program: whoever
 receives one receives the client names, numbers and money with it. That is why `CHRISPHICS_DIST`
@@ -478,15 +506,23 @@ which is the only real test of the two things a zip can lose (the symlinks insid
 executable bit on the interpreter); again after `Install Chrisphics Hub.command` has copied it into
 a throwaway Applications folder under a throwaway `HOME`, twice so the copy it replaced is kept;
 and each time asking it for `/healthz`, the dashboard, `/app.js` and `/api/bootstrap`, then reading
-the book it opened to confirm it holds the rows the build put in it — and no sessions, replays or
-access log, which is how the copy is told apart from the shop's live book. `/api/bootstrap` is also
+the book it opened to confirm it holds the rows the build put in it — and no sign-ins or replayed device
+writes, which is how the copy is told apart from the shop's live book. (The audit log and the client
+message history *are* the shop's records and do travel, so they cannot be the witness; a running copy
+adds rows of its own to them anyway.) `/api/bootstrap` is also
 where the shop's own name is read back, and where the open book path must *not* be
 `~/Library/Application Support/Chrisphics Hub/chrisphics.db`. When the build seeds a book, the proof
 does not stop at the folder it was built in: the **zip is opened and the entry read out of it**, the
 **.dmg is mounted and the book copied off the mounted volume**, and each **.pkg is unpacked with
 `pkgutil --expand-full` the way the installer would lay it down**, and the book found inside is opened
-and counted against the seed. A packaging step that quietly dropped `data/shop.db` is exactly the
-failure a folder check cannot see, and this is the file a person actually receives. The app then
+and **counted table by table against the shop's own book** — not against the seed the tool made, which
+would only prove the tool agrees with itself. A packaging step that quietly dropped `data/shop.db`, or
+dropped a table out of it, is exactly the failure a folder check cannot see, and this is the file a
+person actually receives. The empty-book rule is asked the same way twice over: of the `server.py` and
+the book sealed inside the bundle — never a copy of the logic written again in the build tool — and then
+of a whole running copy, by planting the empty book a demo machine would have left, starting the app the
+way its own launcher does and reading the shop's figures back out of the file it opened, with the empty
+one kept beside it as `shop.db.was-empty-…`. The app then
 reports on its own window
 (`--window-probe`): what the page says its title is, how many screens are in the rail, and how many
 distinct colours and how wide a spread of light the picture of the window holds — because a grab of
