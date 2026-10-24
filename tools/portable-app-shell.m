@@ -1,11 +1,15 @@
 // Chrisphics Hub — the shop book in its own window, on its own computer.
 //
-// This is the portable install's own application shell, not the shop's. The shop's Mac app attaches
-// to the always-on Wi-Fi server and the one shared book; this one starts the engine carried inside
-// this .app (Contents/Resources/runtime + app), points its window at it over loopback, and reads and
-// writes only this computer's own book — a book that, whenever this machine does not have one yet or
-// still has the empty one it made for itself, is filled from the copy of the shop's records the build
-// put inside the app.
+// This is the portable install's own application shell, not the shop's. On any other computer it
+// starts the engine carried inside this .app (Contents/Resources/runtime + app), points its window
+// at it over loopback, and reads and writes only this computer's own book — a book that, whenever
+// this machine does not have one yet or still has the empty one it made for itself, is filled from
+// the copy of the shop's records the build put inside the app.
+//
+// On the shop's own Mac that copy is yesterday's book beside today's, so before starting anything
+// the shell asks the shop's always-on server — the same loopback door the shop's Mac app uses — and,
+// when it answers under the shop's own certificate, shows that live book instead and starts no
+// engine of its own. Every machine that is not the shop gets the standalone behaviour above.
 //
 // Objective-C rather than Swift for one reason: the command-line Swift runtime on a Mac without Xcode
 // ships arm64 slices only, so a Swift shell cannot be built here for an Intel Mac. clang links
@@ -21,6 +25,7 @@
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
 #import <WebKit/WebKit.h>
+#import <Security/Security.h>
 #import <fcntl.h>
 #import <signal.h>
 
@@ -39,6 +44,8 @@ static NSString *const kStayAwakeKey = @"ChrisphicsStayAwake";
 // The page's background, picked in Settings ▸ Appearance and kept on this computer. "plain" is the
 // shop's own paper; anything else is told to the page before it paints and held across launches.
 static NSString *const kBackgroundKey = @"crispprint-background";
+// True when the window is showing the shop's live book on this Mac rather than this computer's copy.
+static BOOL kOnShopBook = NO;
 static void holdAwakeNow(BOOL on);
 
 static NSArray<NSArray<NSString *> *> *backgroundChoices(void) {
@@ -94,24 +101,160 @@ static NSFileHandle *openForAppend(NSString *path) {
     return [[NSFileHandle alloc] initWithFileDescriptor:descriptor closeOnDealloc:YES];
 }
 
-// Is the shop already answering on this port? Bounded by the request's own timeout: an unbounded
+// ------------------------------------------------------------ the shop already serving here
+//
+// A hand-out copy owns its own book, and on the shop's own Mac that is the wrong book: the counter
+// trades in the live one, and a copy that only ever holds the day it was built quietly answers
+// yesterday's questions. So before starting anything, the shell asks the shop's always-on server on
+// the loopback door the shop's own Mac app already uses, and shows that book when it answers. A
+// second engine over the live book is the one thing that spoils it, so this never starts one beside
+// it. Every other computer this app is handed to hears nothing there and behaves as it always has.
+//
+// Nothing but the shop's own certificate is trusted: the authority this Mac keeps for its Wi-Fi
+// devices, and only under a loopback name. A stranger holding port 8834 is still refused.
+
+static BOOL onThisMac(NSString *host) {
+    return host.length > 0 &&
+           ([host isEqualToString:@"localhost"] || [host isEqualToString:@"::1"] ||
+            [host hasPrefix:@"127."]);
+}
+
+static SecCertificateRef shopAuthority(void) {
+    NSString *home = [NSProcessInfo processInfo].environment[@"HOME"];
+    if (home.length == 0) home = NSHomeDirectory();
+    NSString *path = [home stringByAppendingPathComponent:@"Library/Application Support/mkcert/rootCA.pem"];
+    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    if (!text) return NULL;
+    NSMutableString *base64 = [NSMutableString string];
+    for (NSString *line in [text componentsSeparatedByCharactersInSet:
+                                    [NSCharacterSet newlineCharacterSet]]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:
+                                     [NSCharacterSet whitespaceCharacterSet]];
+        if (trimmed.length == 0 || [trimmed hasPrefix:@"-----"]) continue;
+        [base64 appendString:trimmed];
+    }
+    NSData *der = [[NSData alloc] initWithBase64EncodedString:base64 options:0];
+    return der ? SecCertificateCreateWithData(NULL, (__bridge CFDataRef)der) : NULL;
+}
+
+// The certificate chain a server offered. The modern reader arrived in macOS 12, and this app is
+// handed to Macs older than that, so the older one carries them.
+static NSArray *shopChain(SecTrustRef trust) {
+    if (@available(macOS 12.0, *)) {
+        NSArray *modern = (__bridge_transfer NSArray *)SecTrustCopyCertificateChain(trust);
+        return modern ?: @[];
+    }
+    NSMutableArray *chain = [NSMutableArray array];
+    CFIndex count = SecTrustGetCertificateCount(trust);
+    for (CFIndex i = 0; i < count; i++) {
+        SecCertificateRef certificate = SecTrustGetCertificateAtIndex(trust, i);
+        if (certificate) [chain addObject:(__bridge id)certificate];
+    }
+    return chain;
+}
+
+static BOOL shopTrusted(SecTrustRef trust) {
+    if (@available(macOS 10.14, *)) return SecTrustEvaluateWithError(trust, NULL);
+    SecTrustResultType result = kSecTrustResultInvalid;
+    return SecTrustEvaluate(trust, &result) == errSecSuccess &&
+           (result == kSecTrustResultProceed || result == kSecTrustResultUnspecified);
+}
+
+static BOOL shopChainTrusted(SecTrustRef offered, NSString *host) {
+    if (!offered || !onThisMac(host)) return NO;
+    SecCertificateRef anchor = shopAuthority();
+    if (!anchor) return NO;
+    NSArray *chain = shopChain(offered);
+    SecPolicyRef policy = SecPolicyCreateSSL(true, (__bridge CFStringRef)host);
+    SecTrustRef checked = NULL;
+    BOOL fine = NO;
+    if (chain.count && policy &&
+        SecTrustCreateWithCertificates((__bridge CFArrayRef)chain, policy, &checked) == errSecSuccess) {
+        SecTrustSetAnchorCertificates(checked, (__bridge CFArrayRef)@[ (__bridge id)anchor ]);
+        SecTrustSetAnchorCertificatesOnly(checked, true);
+        fine = shopTrusted(checked);
+    }
+    if (checked) CFRelease(checked);
+    if (policy) CFRelease(policy);
+    CFRelease(anchor);
+    return fine;
+}
+
+// Anything whose certificate is not the shop's own is turned away rather than handed back to the
+// system's judgement. The shop Mac has its authority in the login keychain as well, so falling back
+// to the default would let a build check — which runs under a throwaway HOME with no authority of
+// its own — quietly join the live book and never start the engine it was checking.
+@interface ShopDoor : NSObject <NSURLSessionDelegate>
+@end
+
+@implementation ShopDoor
+- (void)URLSession:(NSURLSession *)session
+    didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge
+      completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+    NSURLProtectionSpace *space = challenge.protectionSpace;
+    if ([space.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        if (shopChainTrusted(space.serverTrust, space.host)) {
+            return completionHandler(NSURLSessionAuthChallengeUseCredential,
+                                     [NSURLCredential credentialForTrust:space.serverTrust]);
+        }
+        return completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+    }
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+}
+@end
+
+// One session for every call into the shop, so the certificate decision is made in one place.
+static NSURLSession *shopSession(void) {
+    static NSURLSession *session = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+        config.timeoutIntervalForRequest = 10;
+        ShopDoor *door = [[ShopDoor alloc] init];
+        session = [NSURLSession sessionWithConfiguration:config delegate:door delegateQueue:nil];
+    });
+    return session;
+}
+
+// Is the shop already answering at this address? Bounded by the request's own timeout: an unbounded
 // connect is how a check hangs instead of failing.
-static BOOL engineUp(NSTimeInterval wait) {
-    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:urlPath(@"healthz")]];
+static BOOL shopAnswers(NSURL *base, NSTimeInterval wait) {
+    if (!base) return NO;
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
+                                    [NSURL URLWithString:@"healthz" relativeToURL:base]];
     request.timeoutInterval = wait;
-    NSURLSessionConfiguration *config = [NSURLSessionConfiguration ephemeralSessionConfiguration];
-    config.timeoutIntervalForRequest = wait;
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:config];
-    __block NSString *answer = nil;
+    __block BOOL answered = NO;
     dispatch_semaphore_t settled = dispatch_semaphore_create(0);
-    [[session dataTaskWithRequest:request
-               completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-                   answer = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
-                   dispatch_semaphore_signal(settled);
-               }] resume];
+    [[shopSession() dataTaskWithRequest:request
+                     completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSString *body = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        answered = (error == nil && [(NSHTTPURLResponse *)response statusCode] == 200 &&
+                    [body rangeOfString:@"ok"].location != NSNotFound);
+        dispatch_semaphore_signal(settled);
+    }] resume];
     if (dispatch_semaphore_wait(settled, dispatch_time(DISPATCH_TIME_NOW,
                                                        (int64_t)((wait + 0.5) * NSEC_PER_SEC)))) return NO;
-    return answer && [answer rangeOfString:@"ok"].location != NSNotFound;
+    return answered;
+}
+
+static BOOL engineUp(NSTimeInterval wait) {
+    return shopAnswers([NSURL URLWithString:kBase], wait);
+}
+
+// The shop's address on this Mac, if it is serving. The environment names one — the .command and the
+// build checks use that — and otherwise it is the always-on server's own door on loopback.
+static NSURL *liveShop(void) {
+    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+    NSString *named = [NSProcessInfo processInfo].environment[@"CHRISPHICS_SHOP_URL"];
+    if (named.length) [candidates addObject:named];
+    NSString *port = [NSProcessInfo processInfo].environment[@"CHRISPHICS_SHOP_PORT"];
+    if (port.length == 0) port = @"8834";
+    [candidates addObject:[NSString stringWithFormat:@"https://127.0.0.1:%@/", port]];
+    for (NSString *text in candidates) {
+        NSURL *base = [NSURL URLWithString:text];
+        if (shopAnswers(base, 1.5)) return base;
+    }
+    return nil;
 }
 
 static NSTask *startEngine(void) {
@@ -254,7 +397,18 @@ static int runEngineOnly(void) {
     _web.magnification = (zoom >= 0.9 && zoom <= 1.4) ? zoom : 1.0;
     if ([[NSUserDefaults standardUserDefaults] boolForKey:kStayAwakeKey]) holdAwakeNow(YES);
 
-    if (!engineUp(1.0)) serving = startEngine();
+    // The shop's own Mac may already be serving the live book. Joining it is the difference between
+    // this window showing the counter's book and showing the day this copy was built. A probe is the
+    // build looking at its own work, so unless somebody names a shop to join it gets the copy it was
+    // handed, never the shop's book — that is what keeps a check hermetic on the shop's own Mac.
+    NSString *namedShop = [NSProcessInfo processInfo].environment[@"CHRISPHICS_SHOP_URL"];
+    NSURL *live = ((kProbeTo || kSettingsProbeTo) && namedShop.length == 0) ? nil : liveShop();
+    if (live) {
+        kBase = live.absoluteString;
+        kOnShopBook = YES;
+    } else if (!engineUp(1.0)) {
+        serving = startEngine();
+    }
     [self showWhenReady];
 }
 
@@ -326,6 +480,23 @@ static int runEngineOnly(void) {
     if (!kProbeTo) return;
     [self finishWith:[NSString stringWithFormat:@"the window could not load the shop: %@\n",
                                                 error.localizedDescription]];
+}
+
+// The page over the shop's loopback door arrives under the shop's own certificate. Accepting only
+// that one keeps the padlock meaningful: anything else is refused rather than judged by the system,
+// for the same reason the session above refuses it.
+- (void)webView:(WKWebView *)view
+    didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge
+      completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
+    NSURLProtectionSpace *space = challenge.protectionSpace;
+    if ([space.authenticationMethod isEqualToString:NSURLAuthenticationMethodServerTrust]) {
+        if (shopChainTrusted(space.serverTrust, space.host)) {
+            return completionHandler(NSURLSessionAuthChallengeUseCredential,
+                                     [NSURLCredential credentialForTrust:space.serverTrust]);
+        }
+        return completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+    }
+    completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
 }
 
 - (void)report {
@@ -644,8 +815,7 @@ static void callEngine(NSString *method, NSString *path, NSDictionary *body,
         request.HTTPBody = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
         [request setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     }
-    NSURLSession *session = [NSURLSession sessionWithConfiguration:
-                             [NSURLSessionConfiguration ephemeralSessionConfiguration]];
+    NSURLSession *session = shopSession();
     [[session dataTaskWithRequest:request
                completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
                    NSDictionary *json = data.length ? [NSJSONSerialization JSONObjectWithData:data
@@ -657,7 +827,6 @@ static void callEngine(NSString *method, NSString *path, NSDictionary *body,
                    else if (status >= 400) why = json[@"error"]
                        ?: [NSString stringWithFormat:@"the engine answered %ld", (long)status];
                    dispatch_async(dispatch_get_main_queue(), ^{ done(json, why); });
-                   [session finishTasksAndInvalidate];
                }] resume];
 }
 
@@ -763,8 +932,12 @@ static NSString *sizeWords(unsigned long long bytes) {
                                  @[noteText(@"The book is the one file holding every job, client and payment. "
                                             "A copy is made to the copies folder by itself each day, and one "
                                             "can be asked for at any time."),
-                                   noteText(@"Only this computer's own records live here. The shop's shared book "
-                                            "stays on the shop's Mac."),
+                                   noteText(kOnShopBook
+                                            ? @"This window is showing the shop's live book on this Mac, so "
+                                               "anything entered here is written to it. The copy this "
+                                               "computer keeps is left as it was."
+                                            : @"Only this computer's own records live here. The shop's shared "
+                                               "book stays on the shop's Mac."),
                                    self.status]);
     [self place:grid];
 }

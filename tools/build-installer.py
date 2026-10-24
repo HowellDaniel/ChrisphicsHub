@@ -848,7 +848,8 @@ def compile_shell(path, triple):
     if not shutil.which("clang"):
         return None
     done = subprocess.run(["clang", "-O2", "-target", triple, "-fobjc-arc",
-                           "-framework", "AppKit", "-framework", "WebKit", SHELL_SRC, "-o", path],
+                           "-framework", "AppKit", "-framework", "WebKit",
+                           "-framework", "Security", SHELL_SRC, "-o", path],
                           capture_output=True, text=True)
     if done.returncode:
         print("    the window shell did not compile: %s" % (done.stderr.strip()[:300] or done.stdout[:300]))
