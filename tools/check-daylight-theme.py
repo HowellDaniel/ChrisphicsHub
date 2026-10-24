@@ -355,6 +355,8 @@ WIDGET = ("(function(){function g(sel,prop){var e=document.querySelector(sel);"
           "markFg:g('.cal-cell.is-today','color'),"
           "radius:g('.today-cal','borderRadius'),box:box('.today-cal'),"
           "round:box('.cal-cell.is-today'),cols:g('.cal-grid','gridTemplateColumns'),"
+          "markClass:((document.querySelector('.cal-cell.is-today')||{}).className||''),"
+          "markSize:parseFloat(g('.cal-cell.is-today','fontSize')),"
           "headSize:parseFloat(g('.cal-mon','fontSize')),"
           "cellSize:parseFloat(g('.cal-cell','fontSize')),"
           "dowSize:parseFloat(g('.cal-dows span','fontSize')),"
@@ -695,12 +697,17 @@ def written(d):
 now = time.localtime()
 this_day = dt.date(now.tm_year, now.tm_mon, now.tm_mday)
 expected, lead = month_days(this_day)
-check("the eight colours the widget is asked to wear are all tokens the page carries",
-      all(token(light_css, n) and token(dark_css, n) for n in (
-          "--cal-mark", "--cal-mark-ink", "--cal-night-mark", "--cal-night-ink",
-          "--cal-head", "--cal-face", "--cal-ink", "--cal-soft")),
-      " / ".join("%s=%s" % (n, token(light_css, n)) for n in (
-          "--cal-mark", "--cal-head", "--cal-face")))
+marks = tuple("--cal-mark-%d" % i for i in range(7))
+mark_of_day = marks[(now.tm_mday - 1) % 7]
+check("the seven rotating roundel inks are all tokens the page carries, in both palettes",
+      all(token(light_css, n) and token(dark_css, n) for n in
+          marks + ("--cal-mark-ink", "--cal-head", "--cal-face", "--cal-ink", "--cal-soft")),
+      " / ".join("%s=%s" % (n, token(light_css, n)) for n in marks))
+# The owner's rule for the rotating roundel: the number has to read on whichever circle the date
+# puts it in, so the one white ink is measured against all seven, not just today's.
+for name in marks:
+    check("the roundel ink clears AA on %s" % name, aa("#ffffff", token(light_css, name)) >= 4.5,
+          "%.2f:1 on %s" % (aa("#ffffff", token(light_css, name)), token(light_css, name)))
 
 said, reports = run_probe("probe=13:00:00&mode=clear",
                           ["say|" + REPORT, "say|" + WIDGET, "shot|daytime-widget"], "day widget")
@@ -724,8 +731,12 @@ check("midday: the roundel sits in the right column of the right row",
 check("midday: the initials run the seven days", w.get("dows") == 7, w.get("dows"))
 check("midday: the month face is inside the day card", w.get("inside") is True, str(w.get("inside")))
 expect("midday: the clock sits beside the month, not under it", w.get("beside"), "yes")
-expect("midday: the roundel wears this palette's crimson", w.get("markBg"), token(p, "--cal-mark"))
-expect("midday: in the ink that crimson is tokened for", w.get("markFg"), token(p, "--cal-mark-ink"))
+expect("midday: the roundel wears the ink its own date is tokened for", w.get("markBg"),
+       token(p, mark_of_day))
+expect("midday: with the white number that ink is tokened for", w.get("markFg"),
+       token(p, "--cal-mark-ink"))
+expect("midday: and the cell is stamped with that day's mark",
+       "mark-%d" % ((now.tm_mday - 1) % 7) in str(w.get("markClass", "")).split(), True)
 expect("midday: the month name takes the ink its palette tokens for it", w.get("headFg"),
        token(p, "--cal-head"))
 expect("midday: the page is the shop's own surface", w.get("faceBg"), token(p, "--cal-face"))
@@ -744,6 +755,15 @@ check("midday: the month name is the loudest word on the face",
 check("midday: today's mark is a roundel, not a stripe",
       side(0, w.get("round")) == side(1, w.get("round")) and side(0, w.get("round")) >= 19,
       w.get("round"))
+# "let the day number be small in the red circle" (2026-10-24): the figure in the roundel is drawn
+# smaller than the day numerals around it, and small enough that the whole number — two digits at
+# most — sits inside the circle with room to spare.
+check("midday: the number in the roundel is smaller than the day numerals",
+      0 < w.get("markSize", 0) < w.get("cellSize", 99),
+      "%spx inside, %spx around it" % (w.get("markSize"), w.get("cellSize")))
+check("midday: and small enough to sit whole inside the circle",
+      w.get("markSize", 0) * 1.6 <= side(0, w.get("round")),
+      "%spx in a %spx circle" % (w.get("markSize"), side(0, w.get("round"))))
 check("midday: and every row is still taller than the number in it", w.get("rowH", 0) >= 19,
       "%spx rows" % w.get("rowH"))
 # "reduce the two widget and make them landscape" (2026-10-13, 21:00). The word is about the shape and
@@ -775,10 +795,10 @@ r = reports[0] if reports else {}
 w = reports[1] if len(reports) > 1 else {}
 p = palette(r.get("theme"))
 expect("eight in the evening: the page is wearing the dark palette", r.get("theme"), "dark")
-expect("eight in the evening: the roundel turns to the evening amber", w.get("markBg"),
-       token(p, "--cal-night-mark"))
-expect("eight in the evening: and to the ink that amber is tokened for", w.get("markFg"),
-       token(p, "--cal-night-ink"))
+expect("eight in the evening: the roundel keeps the ink its own date picked",
+       w.get("markBg"), token(p, mark_of_day))
+expect("eight in the evening: and the same white number on it", w.get("markFg"),
+       token(p, "--cal-mark-ink"))
 expect("eight in the evening: the month name turns with the palette", w.get("headFg"),
        token(p, "--cal-head"))
 expect("eight in the evening: the page face turns with the palette", w.get("faceBg"),

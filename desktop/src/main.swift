@@ -416,6 +416,15 @@ final class WebWindow: NSWindowController, WKNavigationDelegate, WKUIDelegate, N
             """
             config.userContentController.addUserScript(WKUserScript(source: vibrant, injectionTime: .atDocumentStart,
                                                                    forMainFrameOnly: true))
+            // The background chosen in Settings ▸ Appearance is told to the page before it paints,
+            // so the paper is right from the first frame. A job sheet never hears of it: the paper a
+            // client signs stays white.
+            let bg = Prefs.background
+            if bg != "plain" {
+                config.userContentController.addUserScript(WKUserScript(
+                    source: "document.documentElement.dataset.bg='\(bg)';",
+                    injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            }
         }
         web = WKWebView(frame: window.contentView!.bounds, configuration: config)
         web.autoresizingMask = [.width, .height]
@@ -735,6 +744,15 @@ enum Prefs {
     static var keepAwake: Bool {
         get { d.bool(forKey: awakeKey) }
         set { d.set(newValue, forKey: awakeKey) }
+    }
+
+    static let bgKey = "crispprint-background"
+
+    /// The page's background, picked in Settings ▸ Appearance. "plain" is the shop's own paper;
+    /// anything else is one of the colour papers or wallpapers the page knows by the same name.
+    static var background: String {
+        get { d.string(forKey: bgKey) ?? "plain" }
+        set { d.set(newValue, forKey: bgKey) }
     }
 
     /// The address the main window opens on. Nothing asked for means the page picks the dashboard.
@@ -1158,6 +1176,47 @@ final class ProfilePane: Pane {
     }
 }
 
+final class AppearancePane: Pane {
+    override var paneTitle: String { "Appearance" }
+    override var symbol: String { "paintpalette" }
+
+    private var pop: NSPopUpButton!
+
+    private let backgrounds: [(String, String)] = [
+        ("plain", "Plain — the shop's own paper"),
+        ("sky", "Sky"),
+        ("leaf", "Leaf"),
+        ("sand", "Sand"),
+        ("rose", "Rose"),
+        ("waves", "Waves wallpaper"),
+        ("dots", "Dots wallpaper"),
+        ("linen", "Linen wallpaper"),
+    ]
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        pop = NSPopUpButton(frame: .zero, pullsDown: false)
+        pop.addItems(withTitles: backgrounds.map { $0.1 })
+        pop.selectItem(at: max(0, backgrounds.firstIndex { $0.0 == Prefs.background } ?? 0))
+        pop.target = self
+        pop.action = #selector(pick)
+        place(form([("Background:", pop)],
+                   notes: [noteLabel("The paper behind every screen, and the pattern on it. The clock still "
+                                        + "owns day and night — this only repaints what the clock lights, and it "
+                                        + "stays on this Mac's copy of the page. The job sheet a client signs "
+                                        + "always keeps the white paper it must be.")]))
+    }
+
+    @objc private func pick(_ sender: NSPopUpButton) {
+        guard let hit = backgrounds.indices.first(where: { $0 == sender.indexOfSelectedItem }) else { return }
+        let key = backgrounds[hit].0
+        Prefs.background = key
+        Shell.main?.run("document.documentElement.dataset.bg='\(key)';")
+        say(key == "plain" ? "The page is back on the shop's own paper."
+                           : "The page now wears the \(backgrounds[hit].1) look.")
+    }
+}
+
 final class UpdatesPane: Pane {
     override var paneTitle: String { "Updates" }
     override var symbol: String { "arrow.triangle.2.circlepath" }
@@ -1184,12 +1243,25 @@ final class UpdatesPane: Pane {
                     ("Repository:", valueLabel(UpdatesPane.repository)),
                     ("", buttons)],
                    notes: [result, noteLabel("Nothing leaves this Mac unless the Check button is pressed: it asks "
-                                                + "GitHub for the newest commit in the shop's own repository and "
-                                                + "compares it with this build. Rebuilding is done on this Mac with "
-                                                + "desktop/build-app.sh.")]))
+                                                + "the shop's own repository for the newest version number and "
+                                                + "compares it with this build's. Each change to the app moves the "
+                                                + "number on — 1.0, 1.1, 1.2 — and rebuilding is done on this Mac "
+                                                + "with desktop/build-app.sh.")]))
     }
 
     static let repository = "https://github.com/HowellDaniel/ChrisphicsHub"
+
+    /// 1.2 against 1.10: every dotted part is a number, so ten is ten and never a one.
+    static func versionCompare(_ a: String, _ b: String) -> ComparisonResult {
+        var pa = a.split(separator: ".").compactMap { Int($0) }
+        var pb = b.split(separator: ".").compactMap { Int($0) }
+        while pa.count < pb.count { pa.append(0) }
+        while pb.count < pa.count { pb.append(0) }
+        for (x, y) in zip(pa, pb) where x != y {
+            return x < y ? .orderedAscending : .orderedDescending
+        }
+        return .orderedSame
+    }
 
     @objc private func openRepo() {
         if let url = URL(string: UpdatesPane.repository) { NSWorkspace.shared.open(url) }
@@ -1197,33 +1269,32 @@ final class UpdatesPane: Pane {
 
     @objc private func check() {
         result.stringValue = "Asking GitHub…"
-        guard let url = URL(string: "https://api.github.com/repos/HowellDaniel/ChrisphicsHub/commits?per_page=1")
+        guard let url = URL(string: "https://raw.githubusercontent.com/HowellDaniel/ChrisphicsHub/main/VERSION")
         else { return result.stringValue = "That address could not be built." }
         var request = URLRequest(url: url, timeoutInterval: 10)
-        request.setValue("\(kAppName)/1.1", forHTTPHeaderField: "User-Agent")
+        let mine = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+        request.setValue("\(kAppName)/\(mine)", forHTTPHeaderField: "User-Agent")
         let session = URLSession(configuration: .ephemeral)
         session.dataTask(with: request) { data, response, error in
             session.finishTasksAndInvalidate()
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let json = (try? JSONSerialization.jsonObject(with: data ?? Data())) as? [[String: Any]]
+            let remote = (data.flatMap { String(data: $0, encoding: .utf8) } ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             DispatchQueue.main.async {
-                guard error == nil, status == 200, let head = json?.first,
-                      let sha = head["sha"] as? String else {
+                guard error == nil, status == 200, !remote.isEmpty else {
                     self.result.stringValue = "GitHub could not be reached just now"
                         + "\(error.map { " (\($0.localizedDescription))" } ?? "")."
                     return
                 }
-                let mine = Bundle.main.infoDictionary?["ChrisphicsBuildCommit"] as? String ?? ""
-                let date = ((head["commit"] as? [String: Any])?["committer"] as? [String: Any])?["date"] as? String ?? ""
-                let short = String(sha.prefix(7))
-                if mine.isEmpty || mine == "unknown" {
-                    self.result.stringValue = "This build carries no commit stamp, so it cannot be compared. "
-                        + "The newest commit is \(short)."
-                } else if sha.hasPrefix(mine) || mine.hasPrefix(short) {
-                    self.result.stringValue = "This is the newest build the repository has (\(short))."
-                } else {
-                    self.result.stringValue = "The repository has moved on: \(short) \(date). "
-                        + "Rebuild with desktop/build-app.sh to take it in."
+                switch Self.versionCompare(mine, remote) {
+                case .orderedAscending:
+                    self.result.stringValue = "Version \(remote) is on the repository and this build is \(mine). "
+                        + "Rebuild with desktop/build-app.sh to take the newer version in."
+                case .orderedSame:
+                    self.result.stringValue = "This build (\(mine)) is the newest version the repository has."
+                case .orderedDescending:
+                    self.result.stringValue = "This build carries version \(mine) — the repository is still "
+                        + "on \(remote)."
                 }
             }
         }.resume()
@@ -1236,7 +1307,7 @@ final class SettingsTabs: NSTabViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         tabStyle = .toolbar
-        for pane in [GeneralPane(), ProfilePane(), UpdatesPane()] {
+        for pane in [GeneralPane(), AppearancePane(), ProfilePane(), UpdatesPane()] {
             let item = NSTabViewItem(viewController: pane)
             item.label = pane.paneTitle
             item.image = NSImage(systemSymbolName: pane.symbol, accessibilityDescription: pane.paneTitle)
@@ -1373,9 +1444,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             .separator(),
             item("Settings…", #selector(openSettings), ","),
             .separator(),
-            item("Hide \(kAppName)", #selector(NSApplication.hide(_:)), "h"),
+            routed("Hide \(kAppName)", #selector(NSApplication.hide(_:)), "h", to: NSApp),
             .separator(),
-            item("Quit \(kAppName)", #selector(NSApplication.terminate(_:)), "q"),
+            routed("Quit \(kAppName)", #selector(NSApplication.terminate(_:)), "q", to: NSApp),
         ]))
         main.addItem(submenu("File", [
             item("New Job", #selector(newJob), "n"),
@@ -1388,16 +1459,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item("Print Job Sheet", #selector(printSheet), "p"),
             item("Export Job Sheet as PDF", #selector(exportPDF)),
             .separator(),
-            item("Close Window", #selector(NSWindow.performClose(_:)), "w"),
+            item("Close Window", #selector(closeWindow(_:)), "w"),
         ]))
         main.addItem(submenu("Edit", [
-            item("Undo", Selector(("undo:")), "z"),
-            item("Redo", Selector(("redo:")), "Z"),
+            item("Undo", #selector(undoEdit(_:)), "z"),
+            item("Redo", #selector(redoEdit(_:)), "Z"),
             .separator(),
-            item("Cut", #selector(NSText.cut(_:)), "x"),
-            item("Copy", #selector(NSText.copy(_:)), "c"),
-            item("Paste", #selector(NSText.paste(_:)), "v"),
-            item("Select All", #selector(NSText.selectAll(_:)), "a"),
+            item("Cut", #selector(cutEdit(_:)), "x"),
+            item("Copy", #selector(copyEdit(_:)), "c"),
+            item("Paste", #selector(pasteEdit(_:)), "v"),
+            item("Select All", #selector(selectAllEdit(_:)), "a"),
         ]))
         main.addItem(submenu("View", [
             item("Reload", #selector(reloadPage), "R"),
@@ -1422,8 +1493,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item("Open Backup Folder", #selector(openBackups)),
         ]))
         let windowMenu = submenu("Window", [
-            item("Minimise", #selector(NSWindow.performMiniaturize(_:)), "m"),
-            item("Zoom", #selector(NSWindow.performZoom(_:))),
+            item("Minimise", #selector(minimise(_:)), "m"),
+            item("Zoom", #selector(zoomWindow(_:))),
         ])
         main.addItem(windowMenu)
         NSApp.windowsMenu = windowMenu.submenu
@@ -1432,9 +1503,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func item(_ title: String, _ action: Selector?, _ key: String = "",
                       _ mask: NSEvent.ModifierFlags = .command) -> NSMenuItem {
+        routed(title, action, key, mask, to: self)
+    }
+
+    // to: NSApp for application actions, to: nil to let the responder chain (window, WKWebView)
+    // take the action — AppKit disables any item whose target does not answer its selector.
+    private func routed(_ title: String, _ action: Selector?, _ key: String = "",
+                        _ mask: NSEvent.ModifierFlags = .command, to target: AnyObject?) -> NSMenuItem {
         let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
         i.keyEquivalentModifierMask = mask
-        if action != nil { i.target = self }
+        i.target = (action != nil) ? target : nil
         return i
     }
 
@@ -1472,6 +1550,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func printSheet() { (sheet ?? main)?.printSheet() }
     @objc func exportPDF() { (sheet ?? main)?.exportPDF() }
 
+    // The Edit menu hands its actions to whichever page the person is typing in. WKWebView keeps
+    // its own undo history and editing state, so the responder chain never sees these selectors;
+    // routing them here keeps the menu items enabled and the keys (⌘Z, ⌘C…) working.
+    private var editingWeb: WKWebView? { (WebWindow.frontmost ?? main)?.web }
+    @objc func undoEdit(_ sender: Any?) { editingWeb?.undoManager?.undo() }
+    @objc func redoEdit(_ sender: Any?) { editingWeb?.undoManager?.redo() }
+    @objc func cutEdit(_ sender: Any?) { editingWeb?.perform(#selector(NSText.cut(_:)), with: sender) }
+    @objc func copyEdit(_ sender: Any?) { editingWeb?.perform(#selector(NSText.copy(_:)), with: sender) }
+    @objc func pasteEdit(_ sender: Any?) { editingWeb?.perform(#selector(NSText.paste(_:)), with: sender) }
+    @objc func selectAllEdit(_ sender: Any?) { editingWeb?.perform(#selector(NSText.selectAll(_:)), with: sender) }
+
+    @objc func closeWindow(_ sender: Any?) { (NSApp.keyWindow ?? main?.window)?.performClose(sender) }
+    @objc func minimise(_ sender: Any?) { (NSApp.keyWindow ?? main?.window)?.performMiniaturize(sender) }
+    @objc func zoomWindow(_ sender: Any?) { (NSApp.keyWindow ?? main?.window)?.performZoom(sender) }
+
     private func go(_ route: String) { main?.run("window.location.hash='\(route)'") }
     @objc func goDashboard() { go("#/dashboard") }
     @objc func goJobs() { go("#/jobs") }
@@ -1500,7 +1593,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
-        case #selector(printSheet), #selector(exportPDF): return sheet != nil
         case #selector(newJob), #selector(newQuote), #selector(newEnquiry), #selector(newClient),
              #selector(newExpense), #selector(receivePayment),
              #selector(goDashboard), #selector(goJobs), #selector(goCollect), #selector(goClients), #selector(goLeads),

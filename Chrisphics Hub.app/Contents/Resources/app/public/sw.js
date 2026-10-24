@@ -1,11 +1,12 @@
 'use strict';
 
-/* Bumped with the queue-fold build: a device that only ever reads its own cached copy of /app.js
-   would go on running the old one, and the old one cannot show what it has itself written. The new
-   worker prefills the shell from the shop, so this lands while the Mac is answering — and if it is
-   asked for during an outage the install simply fails, leaving the device on the copy it already
-   has rather than on nothing. */
-const CACHE_NAME = 'crispprint-shell-v8';
+/* Bumped with the copies-of-the-book build: the buttons that open a copy, take it out and put it back
+   live in /app.js, and a device still running its own cached copy of the old one would simply not have
+   them — a click that does nothing is worse than a screen that says it is out of date. The new worker
+   prefills the shell from the shop, so this lands while the Mac is answering — and if it is asked for
+   during an outage the install simply fails, leaving the device on the copy it already has rather than
+   on nothing. */
+const CACHE_NAME = 'crispprint-shell-v10';
 const APP_SHELL = [
   '/',
   '/index.html',

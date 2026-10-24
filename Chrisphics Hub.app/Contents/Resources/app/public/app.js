@@ -1563,11 +1563,13 @@ function clockHtml(d) {
 }
 /* The calendar the way an iPhone's medium widget draws it: the whole month on one face, six rows of
    seven, the week opening on Monday as every date in this shop's strings does, the days belonging to
-   the neighbouring months kept in the quiet ink, and today set in a crimson roundel. The pass before
-   it carried a single day number, which is the iPhone's *small* widget — "let the calendar widget be
-   the medium type with all the days on it, not small". Always forty-two cells, whatever the month, so
-   the face never changes height under the clock. */
+   the neighbouring months kept in the quiet ink, and today set in a roundel whose colour its own date
+   picks — the seven inks turn with the days, and the number rides small and white in whatever circle
+   it lands on. The pass before it carried a single day number, which is the iPhone's *small* widget —
+   "let the calendar widget be the medium type with all the days on it, not small". Always forty-two
+   cells, whatever the month, so the face never changes height under the clock. */
 const CAL_DOW = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+const CAL_MARKS = 7;
 function monthCells(now) {
   const lead = (new Date(now.getFullYear(), now.getMonth(), 1).getDay() + 6) % 7;
   const count = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -1578,7 +1580,8 @@ function monthCells(now) {
     const inMonth = n >= 1 && n <= count;
     const today = inMonth && n === now.getDate();
     const label = n < 1 ? before + n : (n > count ? n - count : n);
-    out += '<span class="cal-cell' + (inMonth ? '' : ' edge') + (today ? ' is-today' : '') + '"' +
+    const mark = today ? ' is-today mark-' + ((n - 1) % CAL_MARKS) : '';
+    out += '<span class="cal-cell' + (inMonth ? '' : ' edge') + mark + '"' +
       (today ? ' id="todayNum"' : '') + '>' + label + '</span>';
   }
   return out;
@@ -2333,14 +2336,78 @@ function cadenceWords(hours) {
   return every % 24 === 0 ? plural(every / 24, 'day') : plural(every, 'hour');
 }
 
+function copyKindWords(kind) {
+  return kind === 'manual' ? 'asked for'
+    : kind === 'pre-restore' ? 'before a put-back' : 'by itself';
+}
+
+/* One copy of the book, opened and read out. The figures of the copy and of the book that is live sit
+   side by side on purpose: a person deciding whether to put an older state back needs to see what it
+   would take away, not only what it would bring. Nothing here has written anything yet — and the put-
+   back button only appears once this look has been taken, which is the first half of naming the copy
+   twice. */
+function copyLookout(look) {
+  const box = $('#copyLook');
+  if (!box) return;
+  const shopMac = !!((S.session || {}).this_is_the_shop_computer);
+  const cell = (v) => (v === null || v === undefined ? '<span class="muted">not in it</span>' : v);
+  const rows = (look.tables || []).map((t) =>
+    '<tr><td class="ref">' + esc(t.table) + '</td><td class="num">' + cell(t.copy) +
+    '</td><td class="num">' + cell(t.live) + '</td></tr>').join('');
+  const same = (look.tables || []).filter((t) => t.copy !== null && t.live !== null &&
+    t.copy !== t.live).length;
+  box.innerHTML = '<p class="hint"><b>' + esc(look.name) + '</b> — ' + esc(look.at) + ', ' +
+    Math.round((look.bytes || 0) / 1024) + ' kB in <code>' + esc(look.folder) + '</code>.</p>' +
+    (look.integrity === 'ok'
+      ? '<p class="hint">It opens, and it passes its own check.</p>'
+      : '<p class="err">It does not pass its own check: ' + esc(look.integrity) +
+        '. Nothing is counted out of a file that says it is broken, and it cannot be put back.</p>') +
+    (look.integrity === 'ok'
+      ? '<p class="hint">It says the shop was <b>' + esc(look.figures.shop_name || 'nameless') +
+        '</b>, with ' + plural(look.figures.jobs, 'job') + ', ' + plural(look.figures.clients, 'client') +
+        ' and ' + money(look.figures.payments_total) + ' written into its payments' +
+        (look.figures.newest_job ? ', newest job ' + esc(look.figures.newest_job) : '') + '.</p>' +
+        '<p class="hint">The book open now has ' + plural(look.live_figures.jobs, 'job') + ', ' +
+        plural(look.live_figures.clients, 'client') + ' and ' + money(look.live_figures.payments_total) +
+        ' — so putting this back ' + (same ? 'changes ' + plural(same, 'table') + '.'
+          : 'leaves every count where it is.') + '</p>' +
+        (look.extra.length
+          ? '<p class="hint">It holds tables this book has never heard of: ' + esc(look.extra.join(', ')) +
+            '. They come along with it.</p>'
+          : '')
+      : '') +
+    (rows ? '<div class="tablewrap"><table><thead><tr><th>Table</th>' +
+      '<th class="num">In this copy</th><th class="num">In the book now</th></tr></thead><tbody>' +
+      rows + '</tbody></table></div>' : '') +
+    (look.restorable && shopMac
+      ? '<button class="btn sm danger" data-action="put-back" data-name="' + esc(look.name) +
+        '">Put this copy back over the book</button>' +
+        '<p class="hint">Every record, who is signed in and what the devices have queued go back to' +
+        ' ' + esc(look.at) + '. The book as it stands first gets its own copy, named' +
+        ' “before a put-back”, so this can be put back the same way.</p>'
+      : '') +
+    (look.restorable && !shopMac
+      ? '<p class="hint">This copy would go back cleanly, but the book is only ever put back on the' +
+        ' shop’s own computer.</p>'
+      : '') +
+    (!look.restorable && look.reasons.length
+      ? '<p class="err">It will not go back: ' + esc(look.reasons.join('; ')) + '.</p>' : '') +
+    '<button class="btn sm ghost" data-action="close-copy">Close the look</button>';
+  box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
 function copiesCard(copy, shopMac) {
   const every = copy.every_hours || 24;
   const cadence = cadenceWords(every);
   const recent = (copy.recent || []).map((r) =>
     '<tr><td class="ref">' + esc(r.at) + '</td>' +
-    '<td>' + (r.kind === 'manual' ? 'asked for' : 'by itself') + '</td>' +
+    '<td>' + copyKindWords(r.kind) + '</td>' +
     '<td class="num">' + Math.round((r.bytes || 0) / 1024) + ' kB</td>' +
-    '<td class="ref">' + esc(r.name) + '</td></tr>').join('');
+    '<td class="ref">' + esc(r.name) + '</td>' +
+    '<td class="num"><button class="btn sm ghost" data-action="open-copy" data-name="' +
+    esc(r.name) + '">Look inside</button> ' +
+    '<button class="btn sm ghost" data-action="take-copy" data-name="' + esc(r.name) +
+    '">Take this one out</button></td></tr>').join('');
   return '<div class="card"><h3>Copies of the book<span class="spacer"></span>' +
     '<button class="btn sm ghost" data-action="book-copy">Copy it now</button>' +
     '<button class="btn sm ghost" data-action="backup">Take a copy out</button></h3><div class="card-b">' +
@@ -2409,8 +2476,18 @@ function copiesCard(copy, shopMac) {
         '<button class="btn primary">Save the copying</button></form>'
       : '<p class="hint">How often the book is copied, and where the copies go, is settled on the' +
         ' shop’s own computer.</p>') +
+    (copy.restored_at
+      ? '<p class="hint">Last time the book was put back: <b>' + esc(copy.restored_at) + '</b>' +
+        (copy.restored_note ? ' — ' + esc(copy.restored_note) : '') + '.</p>'
+      : '') +
     (recent ? '<div class="tablewrap"><table><thead><tr><th>When</th><th>Why</th><th class="num">Size</th>' +
-      '<th>File</th></tr></thead><tbody>' + recent + '</tbody></table></div>' : '') +
+      '<th>File</th><th></th></tr></thead><tbody>' + recent + '</tbody></table></div>' +
+      '<p class="hint">“Look inside” opens one copy and reads it out table by table beside the book' +
+      ' that is open now, without changing anything. “Take this one out” saves that same file onto the' +
+      ' computer you are using. Putting a copy back over the book is only offered on the shop’s own' +
+      ' computer, and only from inside the look — because it replaces every record at once, and the' +
+      ' book it replaces is copied first so it can always be undone.</p>' : '') +
+    '<div id="copyLook"></div>' +
     '</div></div>';
 }
 
@@ -4392,6 +4469,48 @@ const ACTIONS = {
       toast('The book was copied and counted against itself', 'good');
       await render();
     } catch (err) { fail(err); }
+  },
+  /* A copy is a whole book in one file, and the only honest way to decide about it is to read it out.
+     This GET writes nothing, so it is offered from any machine — and what it says back is what decides
+     whether the put-back control appears, so the card never offers what the engine would refuse. */
+  async 'open-copy'(el) {
+    try {
+      copyLookout(await api('/api/backup-copy?name=' + encodeURIComponent(el.dataset.name)));
+    } catch (err) { fail(err); }
+  },
+  'take-copy'(el) {
+    window.location = '/api/backup?name=' + encodeURIComponent(el.dataset.name);
+    toast('Taking ' + el.dataset.name + ' out of the shop — it lands in this machine’s downloads',
+          'good');
+  },
+  /* Putting a copy back replaces every record at once, so the file has to be named twice: the first
+     press only re-labels the button with the copy it means, and the second sends that name as the
+     confirmation the engine asks for. The engine copies the book as it stands before it swaps, so a
+     put-back is always undoable by another put-back. */
+  async 'put-back'(el) {
+    const name = el.dataset.name;
+    if (el.dataset.sure !== '1') {
+      el.dataset.sure = '1';
+      el.textContent = 'Yes — put ' + name + ' back over the book';
+      return;
+    }
+    el.disabled = true;
+    try {
+      const answer = await api('/api/backup-restore', {
+        method: 'POST', body: JSON.stringify({name: name, confirm: name})
+      });
+      toast(answer.note || 'The book was put back the way that copy held it.', 'good');
+      await render();
+    } catch (err) {
+      el.disabled = false;
+      el.dataset.sure = '';
+      el.textContent = 'Put this copy back over the book';
+      fail(err);
+    }
+  },
+  'close-copy'() {
+    const box = $('#copyLook');
+    if (box) box.innerHTML = '';
   },
   /* The other half of a hand-asked copy: "Copy it now" writes onto the shop's own disk, which is
      worth nothing to the machine you are sitting at once that Mac is switched off. This walk is what

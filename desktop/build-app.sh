@@ -75,15 +75,18 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 
 # Settings ▸ Updates compares this build against the repository, so the bundle has to carry the
-# commit and the moment it was built. Both come from the tree being built, never from a hand edit.
+# version, the commit and the moment it was built. The version is the one number the shop sees, kept
+# in one file at the top of the tree and moved on whenever the app changes: 1.0, 1.1, 1.2…
+# The commit and the date come from the tree being built, never from a hand edit.
+VERSION="$(tr -d '[:space:]' < "$PROJECT/VERSION" 2>/dev/null || echo 1.0)"
 COMMIT="$(git -C "$PROJECT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 BUILT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 PLIST="$APP/Contents/Info.plist"
-plutil -replace CFBundleShortVersionString -string 1.1 "$PLIST"
-plutil -replace CFBundleVersion -string 1.1 "$PLIST"
+plutil -replace CFBundleShortVersionString -string "$VERSION" "$PLIST"
+plutil -replace CFBundleVersion -string "$VERSION" "$PLIST"
 plutil -replace ChrisphicsBuildCommit -string "$COMMIT" "$PLIST"
 plutil -replace ChrisphicsBuildDate -string "$BUILT" "$PLIST"
-echo "   stamped: version 1.1, commit $COMMIT, built $BUILT"
+echo "   stamped: version $VERSION, commit $COMMIT, built $BUILT"
 
 echo "4/5 compiling the Swift shell"
 swiftc -O -swift-version 5 -framework Cocoa -framework WebKit -framework PDFKit \

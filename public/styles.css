@@ -61,14 +61,20 @@
   --wash-warn: rgba(255, 206, 124, .66);
   --r-glass: 18px;
   /* the dashboard's calendar widget: the month on its own face, in the shop's own colours rather
-     than somebody else's red. Every pair is measured — today's roundel is white on crimson at 7.11:1
-     by day, the numerals 16.62:1 on the page, the quiet edge days 5.43:1 — and the month name is the
-     one ink that has to move with the palette, because the dark brand would fail on the dark face.
-     tools/check-daylight-theme.py re-measures all of them out of these tokens. */
-  --cal-mark: var(--brand);
+     than somebody else's red. Today's roundel rotates through the seven inks below as the date
+     moves — a different circle every day, crimson, blue, black, green, brown and the rest — and the
+     number always rides in white, which clears 7:1 on the darkest of them. The quiet edge days read
+     5.43:1 and the month name is the one ink that has to move with the palette, because the dark
+     brand would fail on the dark face. tools/check-daylight-theme.py re-measures all of them out of
+     these tokens. */
+  --cal-mark-0: #ab1f23;
+  --cal-mark-1: #1f4e8c;
+  --cal-mark-2: #1c1517;
+  --cal-mark-3: #1a6e3c;
+  --cal-mark-4: #7a4a21;
+  --cal-mark-5: #5b2a86;
+  --cal-mark-6: #0f6b6b;
   --cal-mark-ink: #ffffff;
-  --cal-night-mark: var(--warn);
-  --cal-night-ink: #ffffff;
   --cal-head: var(--brand);
   --cal-face: var(--surface);
   --cal-ink: var(--text);
@@ -147,15 +153,18 @@
   --wash-brand: rgba(240, 92, 108, .46);
   --wash-cool: rgba(96, 186, 236, .38);
   --wash-warn: rgba(246, 186, 92, .32);
-  /* The widget on the dark palette: the roundel brightens with the rest of the brand and keeps white
-     type (5.05:1), but the evening mark is a light amber and white on it reads 2.46:1 — so the amber
-     keeps a dark ink instead, at 7.70:1. The month name cannot wear this palette's brand (3.22:1 on
-     the lifted face), so it takes the brightened link red at 6.74:1. The face lifts off black, not to
-     white, and the numerals ride on it at 13.26:1. */
-  --cal-mark: var(--brand);
+  /* The widget on the dark palette: the roundel wears the same seven rotating inks as by day —
+     they are deep enough to hold white type on the lifted face too — and the month name cannot wear
+     this palette's brand (3.22:1 on the lifted face), so it takes the brightened link red at 6.74:1.
+     The face lifts off black, not to white, and the numerals ride on it at 13.26:1. */
+  --cal-mark-0: #ab1f23;
+  --cal-mark-1: #1f4e8c;
+  --cal-mark-2: #1c1517;
+  --cal-mark-3: #1a6e3c;
+  --cal-mark-4: #7a4a21;
+  --cal-mark-5: #5b2a86;
+  --cal-mark-6: #0f6b6b;
   --cal-mark-ink: #ffffff;
-  --cal-night-mark: var(--warn);
-  --cal-night-ink: #131011;
   --cal-head: var(--link);
   --cal-face: var(--surface-2);
   --cal-ink: var(--text);
@@ -176,6 +185,39 @@
   --shadow-lg: 0 24px 60px rgba(0,0,0,.6);
   --bar-top: #e06066;
   --bar-bot: #a8262c;
+}
+/* The page's background, chosen in the app's Settings ▸ Appearance, then written onto the page by
+   the shell. The clock still owns day and night — these only repaint the paper and the top bar, or
+   hang a quiet wallpaper behind them. Plain is the shop's own look and stays the default: nothing
+   changes until a choice is made. The papers below were measured first — the quiet ink reads 4.7:1
+   on every one of them by day, and the night pairings sit above 6:1. */
+:root[data-bg="sky"] { --paper: #eaf2f8; --topbar: rgba(234, 242, 248, .88); }
+:root[data-bg="leaf"] { --paper: #ecf3ec; --topbar: rgba(236, 243, 236, .88); }
+:root[data-bg="sand"] { --paper: #f5efe5; --topbar: rgba(245, 239, 229, .88); }
+:root[data-bg="rose"] { --paper: #f8ecec; --topbar: rgba(248, 236, 236, .88); }
+:root[data-bg="sky"][data-theme="dark"] { --paper: #0c141a; --topbar: rgba(12, 20, 26, .88); }
+:root[data-bg="leaf"][data-theme="dark"] { --paper: #101812; --topbar: rgba(16, 24, 18, .88); }
+:root[data-bg="sand"][data-theme="dark"] { --paper: #171310; --topbar: rgba(23, 19, 16, .88); }
+:root[data-bg="rose"][data-theme="dark"] { --paper: #1a1213; --topbar: rgba(26, 18, 19, .88); }
+/* Wallpapers hang off the paper in its own ink at a whisper, so the measured text pairings do not
+   move — they are texture, not colour, and they follow the palette as the clock turns. */
+:root { --wall-ink: rgba(34, 29, 31, .045); }
+:root[data-theme="dark"] { --wall-ink: rgba(236, 231, 231, .05); }
+:root[data-bg="waves"] body {
+  background-image:
+    radial-gradient(ellipse 90% 55% at 15% 8%, var(--wall-ink), transparent 62%),
+    radial-gradient(ellipse 80% 50% at 85% 92%, var(--wall-ink), transparent 60%),
+    radial-gradient(ellipse 60% 40% at 60% 45%, var(--wall-ink), transparent 65%);
+  background-attachment: fixed;
+}
+:root[data-bg="dots"] body {
+  background-image: radial-gradient(var(--wall-ink) 1.1px, transparent 1.2px);
+  background-size: 24px 24px;
+}
+:root[data-bg="linen"] body {
+  background-image:
+    repeating-linear-gradient(45deg, var(--wall-ink) 0 1px, transparent 1px 9px),
+    repeating-linear-gradient(-45deg, var(--wall-ink) 0 1px, transparent 1px 9px);
 }
 * { box-sizing: border-box; }
 /* .drawer/.modal set display, which would otherwise beat the UA's [hidden] rule. */
@@ -383,7 +425,6 @@ input::placeholder { color: var(--placeholder); }
   border-radius: 22px; box-shadow: var(--shadow); padding: 10px 10px 7px;
   font-variant-numeric: tabular-nums;
 }
-.card.today.night .today-cal { --cal-mark: var(--cal-night-mark); --cal-mark-ink: var(--cal-night-ink); }
 .cal-head { display: flex; align-items: baseline; gap: 6px; padding: 0 2px 4px; }
 .cal-mon { font-size: clamp(15px, .8vw + 9px, 18px); font-weight: 600; letter-spacing: -.015em;
   color: var(--cal-head); }
@@ -398,8 +439,20 @@ input::placeholder { color: var(--placeholder); }
 /* The days belonging to the months on either side, so the rows read as a real month. Quieter by
    token, not by opacity: opacity would make the contrast this shop measures a lie. */
 .cal-cell.edge { color: var(--cal-soft); font-weight: 400; }
-.cal-cell.is-today { background: var(--cal-mark); color: var(--cal-mark-ink); font-weight: 600;
-  border-radius: 50%; aspect-ratio: 1; width: auto; margin: 0 auto; }
+/* Today wears one of the seven inks below, the one its date is tokened for, so the circle changes
+   colour as the days move on. The number is drawn smaller than the other numerals so the whole
+   figure sits inside the circle with room to spare, and it is always the same white — measured at
+   7:1 or better on every one of the seven inks, day and night alike. */
+.cal-cell.is-today { background: var(--cal-mark-0); color: var(--cal-mark-ink); font-weight: 600;
+  border-radius: 50%; aspect-ratio: 1; width: auto; margin: 0 auto;
+  font-size: clamp(9px, .24vw + 7.5px, 11px); line-height: 1; }
+.cal-cell.is-today.mark-0 { background: var(--cal-mark-0); }
+.cal-cell.is-today.mark-1 { background: var(--cal-mark-1); }
+.cal-cell.is-today.mark-2 { background: var(--cal-mark-2); }
+.cal-cell.is-today.mark-3 { background: var(--cal-mark-3); }
+.cal-cell.is-today.mark-4 { background: var(--cal-mark-4); }
+.cal-cell.is-today.mark-5 { background: var(--cal-mark-5); }
+.cal-cell.is-today.mark-6 { background: var(--cal-mark-6); }
 /* ---------- the weather, beside the month, the same size ----------
    "Add the weather after the calendar widget in the same size like the calendar" (2026-10-13). The tile
    is the calendar's twin by construction rather than by eye: the identical width clamp, the same

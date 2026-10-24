@@ -1563,11 +1563,13 @@ function clockHtml(d) {
 }
 /* The calendar the way an iPhone's medium widget draws it: the whole month on one face, six rows of
    seven, the week opening on Monday as every date in this shop's strings does, the days belonging to
-   the neighbouring months kept in the quiet ink, and today set in a crimson roundel. The pass before
-   it carried a single day number, which is the iPhone's *small* widget — "let the calendar widget be
-   the medium type with all the days on it, not small". Always forty-two cells, whatever the month, so
-   the face never changes height under the clock. */
+   the neighbouring months kept in the quiet ink, and today set in a roundel whose colour its own date
+   picks — the seven inks turn with the days, and the number rides small and white in whatever circle
+   it lands on. The pass before it carried a single day number, which is the iPhone's *small* widget —
+   "let the calendar widget be the medium type with all the days on it, not small". Always forty-two
+   cells, whatever the month, so the face never changes height under the clock. */
 const CAL_DOW = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+const CAL_MARKS = 7;
 function monthCells(now) {
   const lead = (new Date(now.getFullYear(), now.getMonth(), 1).getDay() + 6) % 7;
   const count = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -1578,7 +1580,8 @@ function monthCells(now) {
     const inMonth = n >= 1 && n <= count;
     const today = inMonth && n === now.getDate();
     const label = n < 1 ? before + n : (n > count ? n - count : n);
-    out += '<span class="cal-cell' + (inMonth ? '' : ' edge') + (today ? ' is-today' : '') + '"' +
+    const mark = today ? ' is-today mark-' + ((n - 1) % CAL_MARKS) : '';
+    out += '<span class="cal-cell' + (inMonth ? '' : ' edge') + mark + '"' +
       (today ? ' id="todayNum"' : '') + '>' + label + '</span>';
   }
   return out;
