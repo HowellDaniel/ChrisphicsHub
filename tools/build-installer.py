@@ -57,8 +57,9 @@ it into an Applications folder and again out of its own zip — because a copy c
 inside a runtime or the interpreter's executable bit, and only starting it proves it kept them. The
 window is proved too, by asking the app to describe its own window (`--window-probe`): what the page
 says it is, and how many distinct colours the picture of it holds. The settings window is proved the
-same way (`--settings-probe`): its General, Profile and Updates panes must each draw, the menu item
-must open it, and the Updates pane must name the day this build was made. Windows and Linux can be
+same way (`--settings-probe`): its General, Appearance, Profile and Updates panes must each draw,
+the menu item must open it, and the Updates pane must name the day this build was made and compare
+its version number with the repository's. Windows and Linux can be
 checked by shape from here and the report names which is which.
 
 Usage:
@@ -170,6 +171,20 @@ def git_stamp():
     """The build the person installs is traceable to the commit it came from."""
     return subprocess.run(["git", "-C", REPO, "rev-parse", "--short", "HEAD"],
                           capture_output=True, text=True).stdout.strip() or "unknown"
+
+
+# The version a person is told to look for when they press Check for update. One file at the repo
+# root names it, so the Mac app, the portable copies and GitHub's raw VERSION all answer the same
+# number: 1.0, then 1.1, 1.2, moving on with each change.
+VERSION_FILE = os.path.join(REPO, "VERSION")
+
+
+def version_number():
+    try:
+        text = open(VERSION_FILE, encoding="utf-8").read().strip()
+        return text or "unknown"
+    except OSError:
+        return "unknown"
 
 
 def build_date():
@@ -839,7 +854,7 @@ def build(key):
             launcher_text = open(exe).read()
             note("the app's executable is a shell script that opens a browser tab", True,
                  "no clang here, so the window shell could not be built")
-        plist = dict(MAC_PLIST, CFBundleShortVersionString=git_stamp(), CFBundleVersion=git_stamp(),
+        plist = dict(MAC_PLIST, CFBundleShortVersionString=version_number(), CFBundleVersion=git_stamp(),
                      ChrisphicsBuildDate=build_date())
         with open(os.path.join(app, "Contents", "Info.plist"), "wb") as fh:
             plistlib.dump(plist, fh)
@@ -1562,7 +1577,7 @@ def prove_settings(key, built, port, prefix=()):
         note("%s: the app menu's Settings… opens the settings window" % folder,
              bool(menu) and menu.group(1) == "enabled" and menu.group(3) == "opened",
              "⌘, under About" if menu else (said or "no report came back").strip()[:70])
-        for pane in ("General", "Profile", "Updates"):
+        for pane in ("General", "Appearance", "Profile", "Updates"):
             line = re.search(r"^%s: (.*)$" % pane, said or "", re.M)
             painted = re.search(r"(\d+) colours, light (\d+) to (\d+)", line.group(1)) if line else None
             note("  and %s drew its own pane" % pane,
@@ -1573,10 +1588,12 @@ def prove_settings(key, built, port, prefix=()):
         note("  and it says when this build was made",
              bool(made) and made.group(1) != "unknown",
              made.group(1) if made else "no build date in the bundle")
-        # The one outward call in the app. It may answer with a newer commit or with a refusal to
+        # The one outward call in the app. It may answer with the newest version or with a refusal to
         # reach GitHub — both prove the button returned; only silence does not.
-        asked = re.search(r"value=(This is the newest build[^\n]*|The repository has moved on[^\n]*|"
-                          r"GitHub could not be reached[^\n]*)", said or "")
+        asked = re.search(r"value=(This build \([^)]*\) is the newest version[^\n]*|"
+                          r"Version [^\n]* is on the repository[^\n]*|"
+                          r"This build carries version[^\n]*|GitHub could not be reached[^\n]*)",
+                          said or "")
         note("  Check for update answers, and only when pressed",
              bool(asked) and "Asking GitHub" not in (said or ""),
              asked.group(1)[:64] if asked else "no answer came back")

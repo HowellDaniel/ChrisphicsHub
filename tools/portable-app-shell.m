@@ -36,7 +36,26 @@ static WKWebView *kShopWeb = nil;
 static NSTask *keepingAwake = nil;
 static NSString *const kZoomKey = @"ChrisphicsPageSize";
 static NSString *const kStayAwakeKey = @"ChrisphicsStayAwake";
+// The page's background, picked in Settings ▸ Appearance and kept on this computer. "plain" is the
+// shop's own paper; anything else is told to the page before it paints and held across launches.
+static NSString *const kBackgroundKey = @"crispprint-background";
 static void holdAwakeNow(BOOL on);
+
+static NSArray<NSArray<NSString *> *> *backgroundChoices(void) {
+    return @[ @[ @"plain", @"Plain — the shop's own paper" ],
+              @[ @"sky", @"Sky" ],
+              @[ @"leaf", @"Leaf" ],
+              @[ @"sand", @"Sand" ],
+              @[ @"rose", @"Rose" ],
+              @[ @"waves", @"Waves wallpaper" ],
+              @[ @"dots", @"Dots wallpaper" ],
+              @[ @"linen", @"Linen wallpaper" ] ];
+}
+
+static NSString *chosenBackground(void) {
+    NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:kBackgroundKey];
+    return saved.length ? saved : @"plain";
+}
 
 // Where a portable install keeps its records: this user's own folder, and a book we name. The name
 // matters — server.py only goes looking for an older book when it is left to pick its own path, and
@@ -210,7 +229,19 @@ static int runEngineOnly(void) {
     [_window center];
     [_window setFrameAutosaveName:@"Chrisphics Hub window"];
 
-    _web = [[WKWebView alloc] initWithFrame:_window.contentView.bounds];
+    // The background chosen in Settings ▸ Appearance is told to the page before it paints, so a
+    // relaunch opens already wearing it and never flashes the shop's own paper first.
+    WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+    NSString *background = chosenBackground();
+    if (![background isEqualToString:@"plain"]) {
+        WKUserContentController *controller = [[WKUserContentController alloc] init];
+        [controller addUserScript:[[WKUserScript alloc]
+            initWithSource:[NSString stringWithFormat:@"document.documentElement.dataset.bg='%@';",
+                                                      background]
+            injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
+        config.userContentController = controller;
+    }
+    _web = [[WKWebView alloc] initWithFrame:_window.contentView.bounds configuration:config];
     _web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _web.navigationDelegate = self;
     [_window.contentView addSubview:_web];
@@ -421,14 +452,23 @@ static int runEngineOnly(void) {
     appItem.submenu = appMenu;
 
     // Without an Edit menu the standard shortcuts do not reach the web view, and a cashier who cannot
-    // paste a client's phone number into the counter reasonably calls that broken.
+    // paste a client's phone number into the counter reasonably calls that broken. Each item is
+    // aimed at this shell rather than left to the responder chain: a nil target lets AppKit grey an
+    // item out whenever the page holds no selection or no focused field, and a menu that goes grey
+    // reads as broken to the person looking at it. The shell forwards to the web view, which knows
+    // what Cut, Copy and Paste mean inside a page.
     NSMenuItem *editItem = [[NSMenuItem alloc] init];
     [main addItem:editItem];
     NSMenu *edit = [[NSMenu alloc] initWithTitle:@"Edit"];
-    [edit addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
-    [edit addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
-    [edit addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
-    [edit addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+    NSMenuItem *cut = [edit addItemWithTitle:@"Cut" action:@selector(cutEdit:) keyEquivalent:@"x"];
+    cut.target = self;
+    NSMenuItem *copy = [edit addItemWithTitle:@"Copy" action:@selector(copyEdit:) keyEquivalent:@"c"];
+    copy.target = self;
+    NSMenuItem *paste = [edit addItemWithTitle:@"Paste" action:@selector(pasteEdit:) keyEquivalent:@"v"];
+    paste.target = self;
+    NSMenuItem *selectAll = [edit addItemWithTitle:@"Select All" action:@selector(selectAllEdit:)
+                                     keyEquivalent:@"a"];
+    selectAll.target = self;
     editItem.submenu = edit;
 
     NSMenuItem *windowItem = [[NSMenuItem alloc] init];
@@ -440,6 +480,22 @@ static int runEngineOnly(void) {
 
     NSApp.mainMenu = main;
     NSApp.windowsMenu = windows;
+}
+
+// The Edit menu's items are aimed here so AppKit never greys them; the web view itself knows what
+// each one means inside a page, so the shell just hands them on. WKWebView does not declare these
+// selectors, so they go through performSelector — the same road the shop's own Mac app takes.
+- (void)cutEdit:(id)sender {
+    if ([kShopWeb respondsToSelector:@selector(cut:)]) [kShopWeb performSelector:@selector(cut:) withObject:sender];
+}
+- (void)copyEdit:(id)sender {
+    if ([kShopWeb respondsToSelector:@selector(copy:)]) [kShopWeb performSelector:@selector(copy:) withObject:sender];
+}
+- (void)pasteEdit:(id)sender {
+    if ([kShopWeb respondsToSelector:@selector(paste:)]) [kShopWeb performSelector:@selector(paste:) withObject:sender];
+}
+- (void)selectAllEdit:(id)sender {
+    if ([kShopWeb respondsToSelector:@selector(selectAll:)]) [kShopWeb performSelector:@selector(selectAll:) withObject:sender];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)app { return YES; }
@@ -459,9 +515,10 @@ static int runEngineOnly(void) {
 
 // ------------------------------------------------------------ settings
 // Everything a person changes about this copy without leaving it: where its book and copies are,
-// how big the page reads, whether it opens by itself and stays awake, the shop's own words that go
-// on every sheet, and which build this is. A window with three panes rather than a web screen,
-// because two of the three are about the shell itself — the half a page cannot reach.
+// how big the page reads, whether it opens by itself and stays awake, the paper behind every
+// screen, the shop's own words that go on every sheet, and which build this is. A window with
+// four panes rather than a web screen, because three of the four are about the shell itself —
+// the half a page cannot reach.
 static NSString *const kRepository = @"https://github.com/HowellDaniel/ChrisphicsHub";
 static NSString *const kLaunchLabel = @"com.crispprint.chrisphicshub.portable";
 
@@ -848,6 +905,59 @@ static NSString *sizeWords(unsigned long long bytes) {
 }
 @end
 
+// -- Appearance: the paper behind every screen, picked here and kept on this computer
+@interface SettingsAppearance : SettingsPane
+@end
+
+@implementation SettingsAppearance {
+    NSPopUpButton *_pop;
+}
+
+- (instancetype)init {
+    if ((self = [super init])) self.paneName = @"Appearance";
+    return self;
+}
+
+- (void)loadView {
+    _pop = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    for (NSArray<NSString *> *choice in backgroundChoices())
+        [_pop addItemWithTitle:choice[1]];
+    NSArray<NSArray<NSString *> *> *choices = backgroundChoices();
+    NSString *now = chosenBackground();
+    NSInteger hit = 0;
+    for (NSInteger i = 0; i < (NSInteger)choices.count; i++)
+        if ([choices[i][0] isEqualToString:now]) hit = i;
+    [_pop selectItemAtIndex:hit];
+    _pop.target = self;
+    _pop.action = @selector(pick);
+
+    self.status = statusText();
+    NSGridView *grid = formGrid(@[ @[ captionText(@"Background:"), _pop ] ],
+                                @[ noteText(@"The paper behind every screen, and the pattern on it. "
+                                            "The clock still owns day and night — this only repaints what the "
+                                            "clock lights, and it stays on this Mac's copy of the page. The job "
+                                            "sheet a client signs always keeps the white paper it must be."),
+                                   self.status ]);
+    [self place:grid];
+}
+
+- (void)pick {
+    NSArray<NSArray<NSString *> *> *choices = backgroundChoices();
+    NSInteger hit = _pop.indexOfSelectedItem;
+    if (hit < 0 || hit >= (NSInteger)choices.count) return;
+    NSString *key = choices[hit][0];
+    [[NSUserDefaults standardUserDefaults] setObject:key forKey:kBackgroundKey];
+    if (kShopWeb) {
+        [kShopWeb evaluateJavaScript:[NSString stringWithFormat:
+            @"document.documentElement.dataset.bg='%@';", key] completionHandler:nil];
+    }
+    [self say:[key isEqualToString:@"plain"]
+             ? @"The page is back on the shop's own paper."
+             : [NSString stringWithFormat:@"The page now wears the %@ look.", choices[hit][1]]
+        colour:nil];
+}
+@end
+
 // -- Profile: the shop's own words, kept in the book so every sheet and every device agrees
 @interface SettingsProfile : SettingsPane
 @end
@@ -951,6 +1061,7 @@ static NSString *sizeWords(unsigned long long bytes) {
 - (void)loadView {
     NSDictionary *info = [NSBundle mainBundle].infoDictionary;
     NSString *version = info[@"CFBundleShortVersionString"] ?: @"—";
+    NSString *commit = info[@"CFBundleVersion"] ?: @"unknown";
     NSString *built = info[@"ChrisphicsBuildDate"] ?: @"unknown";
 
     _newest = statusText();
@@ -959,6 +1070,7 @@ static NSString *sizeWords(unsigned long long bytes) {
     self.status = statusText();
 
     NSGridView *grid = formGrid(@[@[captionText(@"This build:"), valueText(version)],
+                                   @[captionText(@"Commit:"), valueText(commit)],
                                    @[captionText(@"Made:"), valueText(built)],
                                    @[captionText(@"Repository:"), valueText(kRepository)],
                                    @[captionText(@"") , rowOf(@[pushButton(@"Check for update", self,
@@ -967,8 +1079,9 @@ static NSString *sizeWords(unsigned long long bytes) {
                                                                           @selector(openRepo))])]],
                                  @[_newest,
                                    noteText(@"Nothing leaves this Mac unless Check is pressed: it asks GitHub "
-                                            "for the newest commit in the shop's own repository and compares "
-                                            "it with the build above."),
+                                            "for the newest version number in the shop's own repository and "
+                                            "compares it with the build above. Each change to the app moves "
+                                            "the number on — 1.0, 1.1, 1.2."),
                                    self.status]);
     [self place:grid];
 }
@@ -977,54 +1090,67 @@ static NSString *sizeWords(unsigned long long bytes) {
     [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:kRepository]];
 }
 
+// 1.2 against 1.10: every dotted part is a number, so ten is ten and never a one.
+static NSComparisonResult compareVersions(NSString *a, NSString *b) {
+    NSArray<NSString *> *pa = [a componentsSeparatedByString:@"."];
+    NSArray<NSString *> *pb = [b componentsSeparatedByString:@"."];
+    NSInteger steps = MAX(pa.count, pb.count);
+    for (NSInteger i = 0; i < steps; i++) {
+        NSInteger x = i < pa.count ? pa[i].integerValue : 0;
+        NSInteger y = i < pb.count ? pb[i].integerValue : 0;
+        if (x < y) return NSOrderedAscending;
+        if (x > y) return NSOrderedDescending;
+    }
+    return NSOrderedSame;
+}
+
 - (void)check {
     [_newest setStringValue:@"Asking GitHub…"];
     NSURL *url = [NSURL URLWithString:
-                  @"https://api.github.com/repos/HowellDaniel/ChrisphicsHub/commits?per_page=1"];
+                  @"https://raw.githubusercontent.com/HowellDaniel/ChrisphicsHub/main/VERSION"];
     NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
     request.timeoutInterval = 10;
-    [request setValue:@"Chrisphics Hub/1.1" forHTTPHeaderField:@"User-Agent"];
+    NSString *mine = [NSBundle mainBundle].infoDictionary[@"CFBundleShortVersionString"] ?: @"0";
+    [request setValue:[NSString stringWithFormat:@"%@/%@", kName, mine] forHTTPHeaderField:@"User-Agent"];
     NSURLSession *session = [NSURLSession sessionWithConfiguration:
                              [NSURLSessionConfiguration ephemeralSessionConfiguration]];
     __weak typeof(self) weak = self;
     [[session dataTaskWithRequest:request
                completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
                    NSInteger status = [(NSHTTPURLResponse *)response statusCode];
-                   NSArray *json = data.length ? [NSJSONSerialization JSONObjectWithData:data
-                                                                                 options:0
-                                                                                   error:nil] : nil;
+                   NSString *remote = data.length
+                       ? [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+                          stringByTrimmingCharactersInSet:
+                          [NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"";
                    dispatch_async(dispatch_get_main_queue(), ^{
                        SettingsUpdates *pane = weak;
                        if (!pane) return;
-                       if (status == 404 || status == 403) {
-                           [pane->_newest setStringValue:
-                            @"The repository does not answer without a sign-in, so this build cannot be "
-                            @"compared from here."];
-                           return;
-                       }
-                       NSDictionary *head = [json isKindOfClass:[NSArray class]] ? json.firstObject : nil;
-                       NSString *sha = head[@"sha"];
-                       if (error || status != 200 || !sha.length) {
+                       if (error || status != 200 || !remote.length) {
                            [pane->_newest setStringValue:
                             [NSString stringWithFormat:@"GitHub could not be reached just now%@.",
-                             error ? [NSString stringWithFormat:@" (%@)", error.localizedDescription] : @""]];
+                             error ? [NSString stringWithFormat:@" (%@)",
+                                      error.localizedDescription] : @""]];
                            return;
                        }
-                       NSString *mine = [NSBundle mainBundle].infoDictionary[@"CFBundleShortVersionString"];
-                       NSString *shortSha = [sha substringToIndex:MIN(7, sha.length)];
-                       if (!mine.length || [mine isEqualToString:@"unknown"]) {
-                           [pane->_newest setStringValue:
-                            [NSString stringWithFormat:@"This build carries no commit stamp, so it cannot be "
-                             @"compared. The newest commit is %@.", shortSha]];
-                       } else if ([sha hasPrefix:mine] || [mine hasPrefix:shortSha]) {
-                           [pane->_newest setStringValue:
-                            [NSString stringWithFormat:@"This is the newest build the repository has (%@).",
-                             shortSha]];
-                       } else {
-                           NSString *date = head[@"commit"][@"committer"][@"date"] ?: @"";
-                           [pane->_newest setStringValue:
-                            [NSString stringWithFormat:@"The repository has moved on: %@ %@. Install a "
-                             @"newer build of this app to take it in.", shortSha, date]];
+                       NSString *local = [NSBundle mainBundle].infoDictionary[
+                           @"CFBundleShortVersionString"] ?: @"0";
+                       switch (compareVersions(local, remote)) {
+                           case NSOrderedAscending:
+                               [pane->_newest setStringValue:
+                                [NSString stringWithFormat:@"Version %@ is on the repository and this "
+                                 @"build is %@. Install a newer build of this app to take it in.",
+                                 remote, local]];
+                               break;
+                           case NSOrderedSame:
+                               [pane->_newest setStringValue:
+                                [NSString stringWithFormat:@"This build (%@) is the newest version the "
+                                 @"repository has.", local]];
+                               break;
+                           case NSOrderedDescending:
+                               [pane->_newest setStringValue:
+                                [NSString stringWithFormat:@"This build carries version %@ — the "
+                                 @"repository is still on %@.", local, remote]];
+                               break;
                        }
                    });
                    [session finishTasksAndInvalidate];
@@ -1053,8 +1179,8 @@ static NSString *sizeWords(unsigned long long bytes) {
     if (_window) return;
     _tabs = [[NSTabViewController alloc] init];
     _tabs.tabStyle = NSTabViewControllerTabStyleToolbar;
-    NSArray *panes = @[[[SettingsGeneral alloc] init], [[SettingsProfile alloc] init],
-                       [[SettingsUpdates alloc] init]];
+    NSArray *panes = @[[[SettingsGeneral alloc] init], [[SettingsAppearance alloc] init],
+                       [[SettingsProfile alloc] init], [[SettingsUpdates alloc] init]];
     for (SettingsPane *pane in panes) {
         NSTabViewItem *item = [[NSTabViewItem alloc] initWithIdentifier:pane.paneName];
         item.label = pane.paneName;
