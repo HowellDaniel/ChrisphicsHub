@@ -397,6 +397,55 @@ function watchOfflineBook() {
   setTimeout(warmOfflineBook, 4000);
   setInterval(() => { if (document.visibilityState !== 'hidden') warmOfflineBook(); }, WARM_EVERY);
 }
+/* A shop is one book with several counters on it. Each screen asks whether the book moved and, when
+   it did, paints its own screen again — except under somebody's hands: an open form, an open job
+   sheet, or a box with the caret in it is never rewritten mid-entry. Coming back to a window asks
+   at once, so the Mac somebody just walked up to shows the counter's book, not the one it saw at
+   breakfast. */
+const BOOK_WATCH_MS = 10000;
+let bookWatchRev = '';
+let bookWatchBusy = false;
+function bookIsUnderHands() {
+  if ($('#modal') && !$('#modal').hidden) return true;
+  if ($('#drawer') && !$('#drawer').hidden) return true;
+  const el = document.activeElement;
+  // A closed form leaves its last box as the active element; a box nobody can see is nobody's hands.
+  if (!el || el.offsetParent === null) return false;
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return true;
+  return !!el.isContentEditable;
+}
+async function checkBookChanged() {
+  if (bookWatchBusy || document.visibilityState === 'hidden') return;
+  bookWatchBusy = true;
+  try {
+    const response = await fetch('/api/book-rev', { cache: 'no-store' });
+    if (!response.ok) return;
+    const answer = await response.json();
+    const rev = String(answer.rev || '');
+    if (!rev) return;
+    if (!bookWatchRev) { bookWatchRev = rev; return; }
+    if (rev === bookWatchRev) return;
+    // The change is not lost by waiting: the next look still sees a different revision.
+    if (bookIsUnderHands()) return;
+    bookWatchRev = rev;
+    const at = window.scrollY;
+    await refreshChrome();
+    await render();
+    window.scrollTo(0, at);
+  } catch (_) {
+    /* The shop is out of reach; the page's own reads already say so. */
+  } finally {
+    bookWatchBusy = false;
+  }
+}
+function watchBook() {
+  checkBookChanged();
+  setInterval(checkBookChanged, BOOK_WATCH_MS);
+  window.addEventListener('focus', checkBookChanged);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkBookChanged();
+  });
+}
 function replaceTemporaryIds(value, map) {
   if (typeof value === 'number' && value < 0 && map[String(value)]) return map[String(value)];
   if (typeof value === 'string' && /^-\d+$/.test(value) && map[value]) return map[value];
@@ -1826,6 +1875,13 @@ function watchToday() {
 /* --------------------------------------------------------------- dashboard */
 async function viewDashboard() {
   const d = await api('/api/dashboard');
+  /* The open-work cards are honest zeros in a shop whose work is finished, and a row of zeros
+     reads as an empty program. So the book's own totals — and the last finished jobs, with
+     their clients and money — are put on the screen beside them. */
+  const counts = (S.boot && S.boot.counts) || {};
+  const onFile = Object.values(counts).reduce((a, b) => a + b, 0);
+  const delivered = counts.Delivered || 0;
+  const finished = delivered ? await api('/api/jobs?status=Delivered') : [];
   watchShopHours();
   watchToday();
   const k = d.kpi;
@@ -1841,12 +1897,44 @@ async function viewDashboard() {
   }).join('');
   const maxMix = Math.max.apply(null, d.mix.map((m) => m.billed).concat([1]));
   const maxSpend = Math.max.apply(null, d.spend.map((m) => m.amount).concat([1]));
+  const shown = finished.slice(0, 8);
+  const finishedRows = shown.map((j) => '<tr data-open="jobs/' + j.id + '"><td class="strong">' +
+    esc(j.title || 'Untitled job') + '<div class="ref">' + esc(j.ref) + ' · ' + esc(j.category) + '</div></td>' +
+    '<td>' + esc(j.client || 'Walk-in') + (j.client_phone ? '<div class="ref">' + esc(j.client_phone) + '</div>' : '') + '</td>' +
+    '<td class="num">' + money(j.total) + '</td>' +
+    '<td class="when">' + esc(day10(j.updated_at)) + '</td>' +
+    '<td class=num><a class="btn sm" href="#/jobs/' + j.id + '">Open</a></td></tr>').join('');
+  /* With no quote out, the dead "no open quotes" table is the emptiest thing on the screen; the
+     shop's finished work is far more useful in its place. */
+  const firstSplit = d.quotes.length
+    ? cardTable('Quotes waiting on an answer', '<a href="#/jobs?kind=Quote" class="btn sm ghost">All quotes</a>',
+      d.quotes.map((q) => '<tr data-open="jobs/' + q.id + '"><td class="strong">' +
+        qe('jobs/' + q.id + '/title', q.title, esc(q.title)) +
+        '<div class="ref">' + esc(q.ref) + ' · ' + esc(q.client) + '</div></td>' +
+        '<td class="num">' + money(q.total) + '</td>' +
+        '<td class="when">' + qe('jobs/' + q.id + '/valid_until', day10(q.valid_until), validityLabel(q)) + '</td>' +
+        '<td class=num><a class="btn sm" href="#/jobs/' + q.id + '">Open</a></td></tr>').join(''),
+      ['Quote', 'Worth', 'Price holds', ''])
+    : finishedRows
+      ? cardTable('Finished work — the last ' + shown.length + ' of ' + delivered,
+        '<a href="#/jobs?status=Delivered" class="btn sm ghost">All ' + delivered + ' delivered</a>',
+        finishedRows, ['Job', 'Client', 'Total', 'Finished', ''])
+      : cardTable('Quotes waiting on an answer', '<a href="#/jobs?kind=Quote" class="btn sm ghost">All quotes</a>',
+        '<tr><td colspan="4" class="hint">No open quotes. Anything asked for has been booked or nothing is waiting.</td></tr>',
+        ['Quote', 'Worth', 'Price holds', '']);
 
   topbar('Dashboard', '', filtersBar('dashboard', []));
   $('#view').innerHTML = '<p class="hint editable-hint">Anything underlined you can click: move a due date, change a status, ' +
     'reprice an enquiry — it saves as soon as you press Enter.</p>' +
     todayCard() +
     hoursCard(d.hours) +
+    '<div class="card bookband" role="status" aria-label="What the book holds">' +
+    '<span><b>' + onFile + '</b>jobs on file</span>' +
+    '<span><b>' + delivered + '</b>finished</span>' +
+    '<span><b>' + (k.open_jobs || 0) + '</b>open</span>' +
+    '<span><b>' + k.clients + '</b>clients</span>' +
+    '<span><b>' + money(k.billed_month) + '</b>billed this month</span>' +
+    '</div>' +
     '<div class="grid kpis">' +
     stat('Collected today', money(k.collected_today), k.collected_today > 0 ? 'payments entered' : 'nothing entered yet', 'amt good',
       '#/accounts', 'Click to see money in and out') +
@@ -1859,15 +1947,20 @@ async function viewDashboard() {
       '#/accounts', 'Click to work the balances') +
     '</div>' +
     '<div class="grid kpis">' +
-    stat('Open jobs', k.open_jobs, statusLine(d.by_status) + ' in the pipeline', '', '#/jobs', 'Click to see the queue') +
-    stat('Ready for pickup', k.ready_jobs, 'waiting to be collected', '', '#/jobs?status=Ready', 'Click to see what is ready') +
-    stat('Overdue', k.overdue_jobs, 'past their due date', k.overdue_jobs ? 'warn' : '', '#/jobs?overdue=1', 'Click to chase late work') +
-    stat('Clients on file', k.clients, 'registered', '', '#/clients', 'Click for the client book') +
+    stat('Open jobs', k.open_jobs, k.open_jobs ? statusLine(d.by_status) + ' in the pipeline'
+      : delivered + ' on file, all finished — nothing waiting', '', '#/jobs', 'Click to see the queue') +
+    stat('Ready for pickup', k.ready_jobs, k.ready_jobs ? 'waiting to be collected'
+      : 'nothing waiting — every job has gone out', '', '#/jobs?status=Ready', 'Click to see what is ready') +
+    stat('Overdue', k.overdue_jobs, k.overdue_jobs ? 'past their due date' : 'none past their due date',
+      k.overdue_jobs ? 'warn' : '', '#/jobs?overdue=1', 'Click to chase late work') +
+    stat('Clients on file', k.clients, 'registered, with their jobs and balances', '', '#/clients', 'Click for the client book') +
     '</div>' +
     '<div class="grid kpis">' +
-    stat('Quotes waiting', k.open_quotes, money(k.quoted_value) + ' priced, not booked', '', '#/jobs?kind=Quote', 'Click to see open quotes') +
-    stat('Enquiries to chase', k.open_leads, k.leads_due ? k.leads_due + ' due today' : money(k.pipeline_value) + ' of work out there',
-      k.leads_due ? 'warn' : '', '#/leads', 'Click to work the pipeline') +
+    stat('Quotes waiting', k.open_quotes, k.open_quotes ? money(k.quoted_value) + ' priced, not booked' : 'nothing priced and waiting',
+      '', '#/jobs?kind=Quote', 'Click to see open quotes') +
+    stat('Enquiries to chase', k.open_leads, k.open_leads
+      ? (k.leads_due ? k.leads_due + ' due today' : money(k.pipeline_value) + ' of work out there')
+      : 'nothing to chase', k.leads_due ? 'warn' : '', '#/leads', 'Click to work the pipeline') +
     stat('Spent this month', money(k.spent_month), 'paper, ink, rent and the rest', 'amt', '#/expenses', 'Click to see money out') +
     stat('Profit this month', money(k.profit_month), 'of ' + money(k.billed_month) + ' billed',
       'amt ' + (k.profit_month < 0 ? 'warn' : 'good'), '#/reports', 'Click for the full picture') +
@@ -1887,15 +1980,7 @@ async function viewDashboard() {
     '</div></div>' +
     '</div>' +
     '<div class="grid split">' +
-    cardTable('Quotes waiting on an answer', '<a href="#/jobs?kind=Quote" class="btn sm ghost">All quotes</a>',
-      d.quotes.length ? d.quotes.map((q) => '<tr data-open="jobs/' + q.id + '"><td class="strong">' +
-        qe('jobs/' + q.id + '/title', q.title, esc(q.title)) +
-        '<div class="ref">' + esc(q.ref) + ' · ' + esc(q.client) + '</div></td>' +
-        '<td class="num">' + money(q.total) + '</td>' +
-        '<td class="when">' + qe('jobs/' + q.id + '/valid_until', day10(q.valid_until), validityLabel(q)) + '</td>' +
-        '<td class=num><a class="btn sm" href="#/jobs/' + q.id + '">Open</a></td></tr>').join('')
-        : '<tr><td colspan="4" class="hint">No open quotes. Anything asked for has been booked or nothing is waiting.</td></tr>',
-      ['Quote', 'Worth', 'Price holds', '']) +
+    firstSplit +
     cardTable('Enquiries to chase', '<a href="#/leads" class="btn sm ghost">All enquiries</a>',
       d.follow_ups.length ? d.follow_ups.map((l) => '<tr data-open-lead="' + l.id + '"><td class="strong">' + esc(l.name) +
         '<div class="ref">' + esc(l.phone || 'no phone') + ' · ' + esc(l.source) + '</div>' +
@@ -5040,6 +5125,7 @@ window.chrisphics = {
     if (!location.hash) location.hash = '#/dashboard';
     await render();
     watchOfflineBook();
+    watchBook();
     let remembered = '';
     try {
       remembered = sessionStorage.getItem('chrisphics-note') || '';

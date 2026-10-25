@@ -159,6 +159,11 @@ SERVE = {"host": "127.0.0.1", "port": 8712, "tls": False}
 KEEP_AWAKE = False      # true while caffeinate is holding this Mac open for the shop Wi-Fi
 _notification_wakeup = threading.Event()
 _backup_wakeup = threading.Event()
+# Every counter on the shop's Wi-Fi reads the same book, so each screen has to be able to hear that
+# another one changed it — otherwise a job booked on the cashier's Mac stays invisible at the front
+# desk until somebody reopens the page. Writes that come through this process are counted here;
+# commits made by a second engine on the same file are counted by SQLite's own data_version.
+_book_writes = {"count": 0}
 # Reentrant: route() holds this while the handlers below take it again.
 _lock = threading.RLock()
 
@@ -193,10 +198,11 @@ def adopt_legacy_book(source_path):
 
 
 # A brand-new book is not literally empty: the first time the engine opens one it stamps a single
-# consent default into app_state. That row is this machine's own housekeeping, not a record anybody
-# wrote, so it does not keep a book from taking in the shop's copy. Any other setting — the name typed
-# on Settings ▸ Profile, a phone number, a backup schedule — is somebody's, and does.
-FRESH_KEYS = ("consent_default",)
+# consent default into app_state. Bookkeeping rows — settings, sign-ins and the audit trail — are not
+# shop records either: a book that holds nothing but those has nothing a person typed at the counter
+# to lose, and is exactly the book a freshly installed copy should fill with the shop's own figures.
+# The old file is kept beside the new one, so even a name typed on Settings is not thrown away.
+BOOKKEEPING_TABLES = ("app_state", "sessions", "security_log", "brought_over")
 
 
 def book_inventory(path):
@@ -224,16 +230,17 @@ def book_inventory(path):
 
 
 def book_holds_records(path):
-    """True when a book holds something the shop or a person put there: a row in any table besides
-    app_state, or a setting beyond the one default a fresh book stamps for itself. A book that will
-    not open is answered as though it holds records, because nothing here is allowed to overwrite what
-    it cannot read."""
+    """True when a book holds something the shop or a person put there: a row in any table that keeps
+    shop records. Settings, sign-ins and the audit trail are this machine's bookkeeping, not records —
+    a book with no clients, jobs, payments, expenses or enquiries is an empty copy even when somebody
+    typed the shop's name into it, and the installer's job is to fill that copy, not leave it blank.
+    A book that will not open is answered as though it holds records, because nothing here is allowed
+    to overwrite what it cannot read."""
     held = book_inventory(path)
     if held is None:
         return True
-    counts, keys = held
-    return (any(rows for name, rows in counts.items() if name != "app_state")
-            or any(key not in FRESH_KEYS for key in keys))
+    counts, _keys = held
+    return any(rows for name, rows in counts.items() if name not in BOOKKEEPING_TABLES)
 
 
 def book_is_blank(path):
@@ -252,8 +259,10 @@ def take_in_shop_copy(source, target=None):
     screen before anything is typed. It also takes it on the second and the tenth time, as long as
     what it finds is *empty*: a machine that was shown the demo build first owns a book with nothing in
     it, and an app that stays blank after installing the shop's own copy reads as a demo and is not
-    one. A book with any record in it is never touched, so work that survived a reinstall survives this
-    too — and one setting somebody typed counts as a record.
+    one. A book with any shop record in it — a client, a job, a payment, an expense, an enquiry, a
+    queued message, a mailbox, a machine — is never touched, so work that survived a reinstall
+    survives this too. A book that holds nothing but settings or sign-in history is an empty copy
+    however it got that way, and it is filled, with the old file kept beside it.
 
     The empty book is moved aside under its own name rather than deleted, and its write-ahead sidecars
     go with it — a stale `-wal` left beside a different book is how SQLite reports a malformed image.
@@ -1920,12 +1929,18 @@ def watch_notifications(interval=15):
             except Exception as error:  # Do not stop the server; retain an explicit log.
                 sys.stderr.write("Notification delivery worker failed: %s: %s\n" %
                                  (type(error).__name__, error))
+            # Only a channel that can actually send earns a short wait. A queue that is due but
+            # unconfigured would otherwise keep `wait(0)` returning at once and pin a core.
+            ready = [name for name in ("WhatsApp", "Email") if not notification_config_error(name)]
             due = one("""
               SELECT min(delivery_next_at) AS due FROM notifications
               WHERE auto_send=1 AND state='Queued'
                 AND delivery_state IN ('Pending','Sending') AND delivery_next_at IS NOT NULL
-            """)
-            delay = max(0, min(interval, due["due"] - time.time())) if due and due["due"] else interval
+                AND channel IN (%s)
+            """ % ",".join("?" * len(ready)), tuple(ready)) if ready else None
+            delay = interval
+            if due and due["due"]:
+                delay = max(1, min(interval, due["due"] - time.time()))
             _notification_wakeup.wait(delay)
     threading.Thread(target=loop, daemon=True, name="notification-delivery").start()
 
@@ -5140,6 +5155,11 @@ class Handler(BaseHTTPRequestHandler):
                             return self.send(409, {"error": "This record changed on another device.",
                                                    "current": current[1], "etag": current_tag})
                 result = self.dispatch(method, path, params)
+                # A change the shop accepted is what the other counters need to hear about; a
+                # refusal (a stale edit, a bad figure) changed nothing. Signing in is not the book.
+                if (method != "GET" and result is not None and path.startswith("/api/")
+                        and result[0] < 300 and path not in ("/api/login", "/api/logout")):
+                    _book_writes["count"] += 1
             if result is not None:
                 code, payload = result
                 headers = dict(self.response_headers)
@@ -5427,6 +5447,18 @@ class Handler(BaseHTTPRequestHandler):
             raise LookupError("Unknown route " + path)
         rest = seg[1:]
         head = rest[0] if rest else ""
+
+        if method == "GET" and head == "book-rev":
+            # Cheap on purpose: every counter on the Wi-Fi asks this a few times a minute, and a
+            # question about whether the book moved must not read the book. This process's writes
+            # are counted as they are made; a second engine's commits appear in data_version.
+            try:
+                seen = one("PRAGMA data_version")
+                other = int(seen["data_version"]) if seen else 0
+            except (sqlite3.Error, TypeError, ValueError):
+                other = 0
+            return 200, {"rev": "%d.%d" % (_book_writes["count"], other),
+                         "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
         if method == "GET" and head == "bootstrap":
             return 200, {"shop": SHOP, "statuses": STATUSES, "categories": CATEGORIES,
@@ -5838,6 +5870,26 @@ class Handler(BaseHTTPRequestHandler):
                 with os.fdopen(handle, "wb") as fh:
                     fh.write(raw)
                 return 200, carry_book_over(temp)
+            finally:
+                try:
+                    os.remove(temp)
+                except OSError:
+                    pass
+        if head == "bring-over":
+            # A Mac that has been keeping its own book sends that whole file here, and what it holds
+            # arrives in the shop's book without overwriting a thing. It is a different question from
+            # import-book: that one replaces an empty book, this one joins a working one.
+            if method != "POST":
+                return 405, {"error": "Use POST with the book copy itself as the body"}
+            raw = self.raw_body(IMPORT_MAX_BYTES)
+            if len(raw) < 4096 or raw[:15] != b"SQLite format 3":
+                return 400, {"error": "What arrived is not a copy of the book"}
+            handle, temp = tempfile.mkstemp(prefix="chrisphics-bring-", suffix=".db")
+            try:
+                with os.fdopen(handle, "wb") as fh:
+                    fh.write(raw)
+                return 200, bring_over_book(temp, params.get("label", [""])[0][:120],
+                                            self.client_ip())
             finally:
                 try:
                     os.remove(temp)
@@ -6740,8 +6792,347 @@ def carry_book_over(source_path):
         source.close()
 
 
-CAFFEINATE = "/usr/bin/caffeinate"
+# ------------------------------------------------------------------ bringing a Mac's own book in
+# A Mac handed the app keeps its own book until it joins the shop's. The day it joins, the day's work
+# has to arrive without either side losing a row and without anybody retyping it, so this merge only
+# ever adds. A client the shop already knows — by phone, or by the same name — is the same client; a
+# job the shop already holds is left exactly as it is, and is only given the next free number when
+# the two books had issued the same one; money, costs, spoiled work, enquiries, history and queued
+# messages arrive only where the shop's book has no such row. Nothing typed on either side is
+# overwritten, and the file that arrived is only ever read.
 
+BROUGHT_TABLES = ("clients", "jobs", "job_items", "payments", "expenses", "spoiled_work",
+                  "leads", "job_events", "notifications")
+BROUGHT_ADDED = ("clients", "jobs", "payments", "expenses", "spoiled_work", "leads",
+                 "job_events", "notifications")
+
+
+def _book_digest(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _phone_key(value):
+    """The one number a client is known by. A fragment is not a phone number, so it matches nothing."""
+    digits = wa_number(value)
+    return digits if len(digits) >= 9 else ""
+
+
+def _name_key(value):
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _next_free_ref(prefix, year, taken):
+    number = 1
+    head = "%s-%d-" % (prefix, year)
+    for ref in taken:
+        if ref.startswith(head):
+            try:
+                number = max(number, int(ref.rsplit("-", 1)[1]) + 1)
+            except (ValueError, IndexError):
+                pass
+    while "%s-%d-%04d" % (prefix, year, number) in taken:
+        number += 1
+    return "%s-%d-%04d" % (prefix, year, number)
+
+
+def _add_row(table, columns, row):
+    _db.execute("INSERT INTO %s (%s) VALUES (%s)"
+                % (table, ", ".join(columns), ", ".join("?" * len(columns))),
+                [row[c] for c in columns])
+    return _db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def _merge_book(source, tables, label, address, digest):
+    """The merge itself, already inside the writer's lock and its transaction."""
+    added = {name: 0 for name in BROUGHT_ADDED}
+    updated = {"jobs": 0, "job_items": 0}
+    left_out = {}
+    renumbered = []
+    held_columns = {name: [r[1] for r in source.execute("PRAGMA table_info(%s)" % name)]
+                    for name in BROUGHT_TABLES if name in tables}
+
+    def columns(table):
+        # Only what both books know: a copy made by an older build is missing the newest columns, and
+        # its own values for those are the defaults anyway. The number is the shop book's to issue —
+        # a row that arrived wearing another book's number would either collide or point at the
+        # wrong client, so every row is inserted without one and keeps its place through the maps.
+        mine = {r[1] for r in _db.execute("PRAGMA table_info(%s)" % table)}
+        return [c for c in held_columns.get(table, []) if c in mine and c != "id"]
+
+    def skip(table):
+        left_out[table] = left_out.get(table, 0) + 1
+
+    # -- clients: the same person, by number first and by name second
+    by_phone, by_name = {}, {}
+    for row in _db.execute("SELECT id, name, phone, whatsapp FROM clients").fetchall():
+        for field in ("phone", "whatsapp"):
+            key = _phone_key(row[field])
+            if key:
+                by_phone.setdefault(key, row["id"])
+        key = _name_key(row["name"])
+        if key:
+            by_name.setdefault(key, row["id"])
+    client_map, client_columns = {}, columns("clients")
+    for row in source.execute("SELECT * FROM clients ORDER BY id"):
+        key = next((k for k in (_phone_key(row[f]) for f in ("phone", "whatsapp")) if k), "")
+        name = _name_key(row["name"])
+        found = by_phone.get(key) if key else None
+        if found is None and name:
+            found = by_name.get(name)
+        if found is None:
+            found = _add_row("clients", client_columns, row)
+            added["clients"] += 1
+            if name:
+                by_name.setdefault(name, found)
+        if key:
+            by_phone.setdefault(key, found)
+        client_map[row["id"]] = found
+
+    # -- jobs: the same job is found by its number first, then by client, title and booking time.
+    #    A job the other Mac changed more recently replaces the shop's copy; an older copy never
+    #    does. That is the difference between carrying somebody's work forward and walking the
+    #    shop's own work backwards.
+    existing_refs = {r[0] for r in _db.execute("SELECT ref FROM jobs").fetchall()}
+    job_map, job_columns = {}, columns("jobs")
+    job_writes = [c for c in job_columns if c not in ("ref", "client_id", "created_at")]
+    refreshed_lines = set()
+
+    def stamp(row):
+        """When the other book last touched a job, in the same local-time text the engine stores."""
+        try:
+            return row["updated_at"] or row["created_at"] or ""
+        except (IndexError, KeyError):
+            return row["created_at"] or ""
+
+    for row in source.execute("SELECT * FROM jobs ORDER BY id"):
+        client = client_map.get(row["client_id"])
+        if not client:
+            skip("jobs")
+            continue
+        ref = (row["ref"] or "").strip()
+        held = None
+        if ref:
+            # A number is unique inside one book, but two books that both issued it for different
+            # jobs would collide: the client or the title has to agree as well.
+            held = _db.execute(
+                "SELECT id, coalesce(updated_at, created_at, '') AS stamp FROM jobs"
+                " WHERE ref = ? AND (client_id = ? OR lower(trim(title)) = lower(trim(?)))"
+                " LIMIT 1", (ref, client, row["title"])).fetchone()
+        if held is None:
+            held = _db.execute(
+                "SELECT id, coalesce(updated_at, created_at, '') AS stamp FROM jobs"
+                " WHERE client_id = ? AND lower(trim(title)) = lower(trim(?))"
+                " AND created_at = ? LIMIT 1",
+                (client, row["title"], row["created_at"])).fetchone()
+        if held:
+            job_map[row["id"]] = held["id"]
+            if stamp(row) > (held["stamp"] or ""):
+                _db.execute("UPDATE jobs SET %s WHERE id = ?"
+                            % ", ".join("%s = ?" % c for c in job_writes),
+                            tuple(row[c] for c in job_writes) + (held["id"],))
+                # The lines are part of the job, so the newer version's lines are the ones that
+                # stand. They are re-read below, and counted as brought up to date rather than new.
+                _db.execute("DELETE FROM job_items WHERE job_id = ?", (held["id"],))
+                refreshed_lines.add(held["id"])
+                updated["jobs"] += 1
+            continue
+        want = ref
+        if not want or want in existing_refs:
+            prefix = "Q" if (row["kind"] or "") == "Quote" else "CH"
+            parts = want.rsplit("-", 2)
+            year = int(parts[1]) if len(parts) == 3 and parts[1].isdigit() else dt.date.today().year
+            fresh = _next_free_ref(prefix, year, existing_refs)
+            if want:
+                renumbered.append({"from": want, "to": fresh, "title": row["title"]})
+            want = fresh
+        job_map[row["id"]] = _add_row("jobs", job_columns,
+                                      dict(row, ref=want, client_id=client))
+        existing_refs.add(want)
+        added["jobs"] += 1
+
+    # -- lines: a job that was already here keeps its own lines unless the newer version of the job
+    #    above replaced them, and otherwise gains only one it never had
+    item_columns = columns("job_items")
+    for row in source.execute("SELECT * FROM job_items ORDER BY job_id, position, id"):
+        job = job_map.get(row["job_id"])
+        if not job:
+            continue
+        if _db.execute("SELECT 1 FROM job_items WHERE job_id = ? AND position = ? AND title = ?"
+                       " LIMIT 1", (job, row["position"], row["title"])).fetchone():
+            continue
+        _add_row("job_items", item_columns, dict(row, job_id=job))
+        if job in refreshed_lines:
+            updated["job_items"] = updated.get("job_items", 0) + 1
+        else:
+            added["job_items"] = added.get("job_items", 0) + 1
+
+    # -- money in
+    payment_columns = columns("payments")
+    for row in source.execute("SELECT * FROM payments ORDER BY id"):
+        client = client_map.get(row["client_id"])
+        if not client:
+            skip("payments")
+            continue
+        job = job_map.get(row["job_id"]) if row["job_id"] else None
+        same = _db.execute(
+            "SELECT id FROM payments WHERE client_id = ? AND coalesce(job_id, 0) = ?"
+            " AND round(amount, 2) = round(?, 2) AND kind = ? AND method = ? AND paid_at = ?"
+            " AND coalesce(reference, '') = coalesce(?, '') LIMIT 1",
+            (client, job or 0, row["amount"], row["kind"], row["method"], row["paid_at"],
+             row["reference"])).fetchone()
+        if same:
+            continue
+        _add_row("payments", payment_columns, dict(row, client_id=client, job_id=job))
+        added["payments"] += 1
+
+    # -- money out; a cost whose job could not be placed is still a cost of the shop
+    expense_columns = columns("expenses")
+    expense_map = {}
+    for row in source.execute("SELECT * FROM expenses ORDER BY id"):
+        job = job_map.get(row["job_id"]) if row["job_id"] else None
+        same = _db.execute(
+            "SELECT id FROM expenses WHERE spent_on = ? AND category = ?"
+            " AND round(amount, 2) = round(?, 2) AND coalesce(payee, '') = coalesce(?, '')"
+            " AND coalesce(reference, '') = coalesce(?, '') AND coalesce(job_id, 0) = ? LIMIT 1",
+            (row["spent_on"], row["category"], row["amount"], row["payee"], row["reference"],
+             job or 0)).fetchone()
+        if same:
+            expense_map[row["id"]] = same["id"]
+            continue
+        expense_map[row["id"]] = _add_row("expenses", expense_columns, dict(row, job_id=job))
+        added["expenses"] += 1
+
+    # -- spoiled work, which is a loss of the shop's and never a cost of the job's
+    spoiled_columns = columns("spoiled_work")
+    for row in source.execute("SELECT * FROM spoiled_work ORDER BY id"):
+        job, expense = job_map.get(row["job_id"]), expense_map.get(row["expense_id"])
+        if not job or not expense:
+            skip("spoiled_work")
+            continue
+        if _db.execute("SELECT 1 FROM spoiled_work WHERE expense_id = ?", (expense,)).fetchone():
+            continue
+        _add_row("spoiled_work", spoiled_columns, dict(row, job_id=job, expense_id=expense))
+        added["spoiled_work"] += 1
+
+    # -- enquiries
+    lead_columns = columns("leads")
+    for row in source.execute("SELECT * FROM leads ORDER BY id"):
+        same = _db.execute(
+            "SELECT id FROM leads WHERE lower(trim(name)) = lower(trim(?))"
+            " AND coalesce(phone, '') = coalesce(?, '') AND created_at = ? LIMIT 1",
+            (row["name"], row["phone"], row["created_at"])).fetchone()
+        if same:
+            continue
+        _add_row("leads", lead_columns,
+                 dict(row, client_id=client_map.get(row["client_id"]) if row["client_id"] else None,
+                      job_id=job_map.get(row["job_id"]) if row["job_id"] else None))
+        added["leads"] += 1
+
+    # -- what happened to a job, then the words queued about it
+    event_columns = columns("job_events")
+    for row in source.execute("SELECT * FROM job_events ORDER BY id"):
+        job = job_map.get(row["job_id"])
+        if not job:
+            continue
+        if _db.execute("SELECT 1 FROM job_events WHERE job_id = ? AND type = ? AND detail = ?"
+                       " AND created_at = ? LIMIT 1",
+                       (job, row["type"], row["detail"], row["created_at"])).fetchone():
+            continue
+        _add_row("job_events", event_columns, dict(row, job_id=job))
+        added["job_events"] += 1
+
+    notification_columns = columns("notifications")
+    for row in source.execute("SELECT * FROM notifications ORDER BY id"):
+        job, client = job_map.get(row["job_id"]), client_map.get(row["client_id"])
+        if not job or not client:
+            skip("notifications")
+            continue
+        if _db.execute("SELECT 1 FROM notifications WHERE job_id = ? AND event = ? AND channel = ?"
+                       " LIMIT 1", (job, row["event"], row["channel"])).fetchone():
+            continue
+        # A message the other book already sent stays sent. One it had not sent arrives as something
+        # to hand to a person, never as a message this merge is allowed to send by itself.
+        sent = row["state"] == "Sent" or row["delivery_state"] == "Sent"
+        _add_row("notifications", notification_columns, dict(
+            row, job_id=job, client_id=client, auto_send=0,
+            delivery_state="Sent" if sent else "Manual",
+            delivery_next_at=row["delivery_next_at"] if sent else None))
+        added["notifications"] += 1
+
+    records = {"added": {name: count for name, count in added.items() if count},
+               "updated": {name: count for name, count in updated.items() if count},
+               "left_out": left_out, "renumbered": renumbered,
+               "matched": {"clients": len(client_map), "jobs": len(job_map)}}
+    _db.execute("INSERT OR REPLACE INTO brought_over (digest, from_label, address, records)"
+                " VALUES (?, ?, ?, ?)",
+                (digest, (label or "")[:120], address or "",
+                 json.dumps(records, ensure_ascii=False)))
+    return records
+
+
+def bring_over_book(source_path, label="", address=""):
+    """Add the records of another copy of this shop's book to the book serving here.
+
+    The copy is only read. The shop's book is written once, in one transaction, after a copy of it has
+    been taken; and the digest of what arrived is kept, so asking twice — a person clicking the button
+    again because the screen went quiet — adds nothing the second time.
+    """
+    digest = _book_digest(source_path)
+    seen = one("SELECT records, from_label, created_at FROM brought_over WHERE digest = ?", (digest,))
+    if seen:
+        return {"merged": False, "already_brought_in": True, "at": seen["created_at"],
+                "from": seen["from_label"], "records": json.loads(seen["records"] or "{}"),
+                "digest": digest}
+    # The upload lands as a single private file, so open it plainly: a `mode=ro` URI is refused for
+    # a WAL-mode copy sitting under macOS's TMPDIR ("unable to open database file"). Nothing in this
+    # function writes to the copy — every insert goes into the shop's own book.
+    source = sqlite3.connect(source_path)
+    source.row_factory = sqlite3.Row
+    try:
+        verdict = source.execute("PRAGMA integrity_check").fetchone()[0]
+        if verdict != "ok":
+            raise ValueError("That copy does not pass its own check (%s)" % verdict)
+        tables = {r[0] for r in source.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if not {"jobs", "clients"} <= tables:
+            raise ValueError("That file is not a Chrisphics book — it holds no jobs or clients")
+        held = {name: source.execute("SELECT count(*) FROM %s" % name).fetchone()[0]
+                for name in BROUGHT_TABLES if name in tables}
+        if not sum(held.values()):
+            raise ValueError("That copy holds no records, so there is nothing to bring in")
+        # The name in the book is the shop's own word about itself. Two different names are two
+        # different shops, and one shop's records do not go into another's book.
+        if "app_state" in tables:
+            theirs = source.execute(
+                "SELECT value FROM app_state WHERE key = 'shop_name'").fetchone()
+            ours = one("SELECT value FROM app_state WHERE key = 'shop_name'")
+            if (theirs and theirs[0] and ours and ours["value"]
+                    and _name_key(theirs[0]) != _name_key(ours["value"])):
+                raise ValueError("That book belongs to a different shop (%s), so its records were "
+                                 "not brought in" % theirs[0])
+        backup = write_backup("pre-restore")
+        with _lock:
+            try:
+                records = _merge_book(source, tables, label, address, digest)
+                _db.commit()
+            except Exception:
+                _db.rollback()
+                raise
+    finally:
+        source.close()
+    note_security("book_brought_in", address, label,
+                  "%s records added and %s jobs brought up to date from a copy of the book"
+                  % (sum(records.get("added", {}).values()),
+                     records.get("updated", {}).get("jobs", 0)))
+    return {"merged": True, "records": records, "digest": digest,
+            "backup": os.path.basename(backup)}
+
+
+CAFFEINATE = "/usr/bin/caffeinate"
 
 def keep_mac_awake():
     """A phone can only reach the book while this Mac is awake. While the shop server listens

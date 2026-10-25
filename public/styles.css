@@ -371,6 +371,10 @@ input::placeholder { color: var(--placeholder); }
 .stat .k { font-size: .78em; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; }
 .stat .v { font-size: clamp(21px, 1.5vw + 13px, 30px); font-weight: 600; letter-spacing: -.025em; font-variant-numeric: tabular-nums; }
 .stat .n { font-size: .82em; color: var(--muted); }
+/* The book's own totals in one line: a shop with nothing open still sees what it holds. */
+.bookband { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 28px; padding: 11px 16px; }
+.bookband span { font-size: .82em; color: var(--muted); }
+.bookband b { font-size: 1.4em; font-weight: 600; color: var(--text); margin-right: 6px; font-variant-numeric: tabular-nums; }
 .stat.warn .v { color: var(--bad); }
 .stat.good .v { color: var(--ok); }
 .stat.amt .v { font-family: var(--num); font-weight: 600; }

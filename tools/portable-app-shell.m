@@ -84,8 +84,10 @@ static NSString *urlPath(NSString *tail) {
 // to the engine with --shop-copy and the engine decides, once, in one place shared with the .command,
 // the Windows .bat and the installer. It takes the copy whenever this machine's own book is missing or
 // still the empty one the engine made for itself — so a Mac that was shown the demo build first does
-// not stay blank after installing the shop's copy — and never touches a book that holds so much as one
-// setting somebody typed. After that this machine writes its own book and the shop Mac writes its own.
+// not stay blank after installing the shop's copy — and never touches a book that holds a client, a
+// job, a payment or any other shop record. Settings and sign-in history alone do not protect a book
+// with no records: that is the copy an installer should fill. After that this machine writes its own
+// book and the shop Mac writes its own.
 static NSString *shopCopyInsideBundle(void) {
     return [[NSBundle mainBundle].resourcePath stringByAppendingPathComponent:@"data/shop.db"];
 }
@@ -110,8 +112,11 @@ static NSFileHandle *openForAppend(NSString *path) {
 // second engine over the live book is the one thing that spoils it, so this never starts one beside
 // it. Every other computer this app is handed to hears nothing there and behaves as it always has.
 //
-// Nothing but the shop's own certificate is trusted: the authority this Mac keeps for its Wi-Fi
-// devices, and only under a loopback name. A stranger holding port 8834 is still refused.
+// Nothing but the shop's own certificate is trusted. The authority lives in two places: this Mac's
+// copy under Application Support, and the copy a hand-out bundle carries beside its engine. The
+// second is what lets an iMac on the shop's Wi-Fi trust the shop's one book without anyone visiting
+// Keychain Access. It is the same authority either way, and the address is not what makes a server
+// the shop — a certificate this authority did not issue is refused wherever it is offered.
 
 static BOOL onThisMac(NSString *host) {
     return host.length > 0 &&
@@ -119,11 +124,20 @@ static BOOL onThisMac(NSString *host) {
             [host hasPrefix:@"127."]);
 }
 
-static SecCertificateRef shopAuthority(void) {
+static NSString *bundleResource(NSString *name) {
+    NSString *path = [[NSBundle mainBundle].resourcePath stringByAppendingPathComponent:name];
+    return [[NSFileManager defaultManager] fileExistsAtPath:path] ? path : nil;
+}
+
+static NSString *homePath(NSString *tail) {
     NSString *home = [NSProcessInfo processInfo].environment[@"HOME"];
     if (home.length == 0) home = NSHomeDirectory();
-    NSString *path = [home stringByAppendingPathComponent:@"Library/Application Support/mkcert/rootCA.pem"];
-    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    return [home stringByAppendingPathComponent:tail];
+}
+
+static SecCertificateRef certificateFromPEM(NSString *path) {
+    NSString *text = path ? [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding
+                                                         error:nil] : nil;
     if (!text) return NULL;
     NSMutableString *base64 = [NSMutableString string];
     for (NSString *line in [text componentsSeparatedByCharactersInSet:
@@ -135,6 +149,12 @@ static SecCertificateRef shopAuthority(void) {
     }
     NSData *der = [[NSData alloc] initWithBase64EncodedString:base64 options:0];
     return der ? SecCertificateCreateWithData(NULL, (__bridge CFDataRef)der) : NULL;
+}
+
+static SecCertificateRef shopAuthority(void) {
+    SecCertificateRef anchor = certificateFromPEM(
+        homePath(@"Library/Application Support/mkcert/rootCA.pem"));
+    return anchor ?: certificateFromPEM(bundleResource(@"shop-ca.pem"));
 }
 
 // The certificate chain a server offered. The modern reader arrived in macOS 12, and this app is
@@ -161,7 +181,7 @@ static BOOL shopTrusted(SecTrustRef trust) {
 }
 
 static BOOL shopChainTrusted(SecTrustRef offered, NSString *host) {
-    if (!offered || !onThisMac(host)) return NO;
+    if (!offered || host.length == 0) return NO;
     SecCertificateRef anchor = shopAuthority();
     if (!anchor) return NO;
     NSArray *chain = shopChain(offered);
@@ -241,17 +261,80 @@ static BOOL engineUp(NSTimeInterval wait) {
     return shopAnswers([NSURL URLWithString:kBase], wait);
 }
 
-// The shop's address on this Mac, if it is serving. The environment names one — the .command and the
-// build checks use that — and otherwise it is the always-on server's own door on loopback.
-static NSURL *liveShop(void) {
-    NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+// The address a person chose for the shop on this Mac, kept across launches. Empty means this Mac
+// has not joined one and keeps its own book.
+static NSString *const kShopAddressKey = @"ChrisphicsShopAddress";
+// Somebody who asked for this Mac's own book keeps it on the next launch too; without this, the
+// shop found on the Wi-Fi would quietly take the window back.
+static NSString *const kOwnBookKey = @"ChrisphicsOwnBook";
+
+static NSString *savedShopAddress(void) {
+    NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:kShopAddressKey];
+    return saved.length ? saved : @"";
+}
+
+static void rememberShop(NSString *address) {
+    if (address.length) [[NSUserDefaults standardUserDefaults] setObject:address
+                                                                forKey:kShopAddressKey];
+    else [[NSUserDefaults standardUserDefaults] removeObjectForKey:kShopAddressKey];
+}
+
+// The shop's own answers, in the order this copy tries them: the one named in the environment (the
+// build checks and the .command use that), the one chosen here, this Mac's loopback door for the
+// shop Mac itself, and the addresses the installer carried — written from the shop's own answer
+// when the bundle was built, so an iMac on the shop's Wi-Fi finds it without anyone typing an IP.
+static NSArray<NSString *> *shopCandidates(void) {
+    NSMutableArray<NSString *> *found = [NSMutableArray array];
     NSString *named = [NSProcessInfo processInfo].environment[@"CHRISPHICS_SHOP_URL"];
-    if (named.length) [candidates addObject:named];
+    if (named.length) [found addObject:named];
+    if (savedShopAddress().length) [found addObject:savedShopAddress()];
     NSString *port = [NSProcessInfo processInfo].environment[@"CHRISPHICS_SHOP_PORT"];
     if (port.length == 0) port = @"8834";
-    [candidates addObject:[NSString stringWithFormat:@"https://127.0.0.1:%@/", port]];
-    for (NSString *text in candidates) {
-        NSURL *base = [NSURL URLWithString:text];
+    [found addObject:[NSString stringWithFormat:@"https://127.0.0.1:%@/", port]];
+    NSString *listed = bundleResource(@"shop-urls.txt");
+    if (listed) {
+        NSString *text = [NSString stringWithContentsOfFile:listed encoding:NSUTF8StringEncoding
+                                                      error:nil];
+        for (NSString *line in [text componentsSeparatedByCharactersInSet:
+                                        [NSCharacterSet newlineCharacterSet]]) {
+            NSString *url = [line stringByTrimmingCharactersInSet:
+                                    [NSCharacterSet whitespaceCharacterSet]];
+            if (url.length == 0 || [url hasPrefix:@"#"] || ![url hasPrefix:@"https://"]) continue;
+            if (![url hasSuffix:@"/"]) url = [url stringByAppendingString:@"/"];
+            if (![found containsObject:url]) [found addObject:url];
+        }
+    }
+    return found;
+}
+
+static NSURL *shopAt(NSString *address) {
+    if (address.length == 0) return nil;
+    if (![address hasSuffix:@"/"]) address = [address stringByAppendingString:@"/"];
+    NSURL *base = [NSURL URLWithString:address];
+    return base.host.length ? base : nil;
+}
+
+// The hosts this copy calls the shop's own: its loopback door and every address it tries. A page
+// asking one of these must present the shop's certificate, never a stranger's. Everything else the
+// page asks for — the forecast service — is the system's judgement, the same as in a browser; the
+// shell used to turn every other host away, which silenced the weather on every installed Mac.
+static BOOL shopOwnHost(NSString *host) {
+    if (host.length == 0) return NO;
+    NSString *asked = host.lowercaseString;
+    if ([asked isEqualToString:@"localhost"] || [asked isEqualToString:@"127.0.0.1"] ||
+        [asked isEqualToString:@"::1"]) return YES;
+    for (NSString *address in shopCandidates()) {
+        NSString *candidate = shopAt(address).host.lowercaseString;
+        if (candidate.length && [candidate isEqualToString:asked]) return YES;
+    }
+    return NO;
+}
+
+// The shop, if it is serving. A copy that has not joined one finds it on the shop Mac's own door or
+// at an address that came with the installer; a copy that has joined knows where to look first.
+static NSURL *liveShop(void) {
+    for (NSString *address in shopCandidates()) {
+        NSURL *base = shopAt(address);
         if (shopAnswers(base, 1.5)) return base;
     }
     return nil;
@@ -295,6 +378,51 @@ static NSTask *startEngine(void) {
     NSError *failure = nil;
     if (![child launchAndReturnError:&failure] || failure) return nil;
     return child;
+}
+
+// ------------------------------------------------------------ one book, or this Mac's own
+// Which book the window shows is decided once at launch and can be changed in Settings: the shop's
+// one book over the shop's Wi-Fi, or a book this Mac keeps to itself. A copy left on the shop's
+// address while the shop cannot be reached is not a broken copy — the page's own queue holds what is
+// typed until the shop answers again, and nothing is written into a second book that would later
+// have to be brought in by hand.
+
+static NSString *localBase(void) {
+    return [NSString stringWithFormat:@"http://127.0.0.1:%ld/", (long)kPort];
+}
+
+static void openInWindow(NSString *base) {
+    kBase = base;
+    if (kShopWeb) [kShopWeb loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:kBase]]];
+}
+
+static void joinShop(NSString *address) {
+    if (serving) { [serving terminate]; serving = nil; }
+    NSURL *base = shopAt(address);
+    if (!base) return;
+    rememberShop(base.absoluteString);
+    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kOwnBookKey];
+    kOnShopBook = YES;
+    openInWindow(base.absoluteString);
+}
+
+static void showLocalWhenReady(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        for (int attempt = 0; attempt < 40 && !engineUp(0.5); attempt++) usleep(250000);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!kOnShopBook) openInWindow(localBase());
+        });
+    });
+}
+
+static void useOwnBook(void) {
+    rememberShop(@"");
+    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kOwnBookKey];
+    if (serving) { [serving terminate]; serving = nil; }
+    kOnShopBook = NO;
+    kBase = localBase();
+    if (!engineUp(1.0)) serving = startEngine();
+    showLocalWhenReady();
 }
 
 // Whatever ends this process ends the shop it started with it. A person closing the window, a
@@ -402,9 +530,22 @@ static int runEngineOnly(void) {
     // build looking at its own work, so unless somebody names a shop to join it gets the copy it was
     // handed, never the shop's book — that is what keeps a check hermetic on the shop's own Mac.
     NSString *namedShop = [NSProcessInfo processInfo].environment[@"CHRISPHICS_SHOP_URL"];
-    NSURL *live = ((kProbeTo || kSettingsProbeTo) && namedShop.length == 0) ? nil : liveShop();
+    BOOL probing = (kProbeTo || kSettingsProbeTo) && namedShop.length == 0;
+    BOOL ownOnly = [NSProcessInfo processInfo].environment[@"CHRISPHICS_OWN_BOOK"].boolValue;
+    BOOL choseOwn = [[NSUserDefaults standardUserDefaults] boolForKey:kOwnBookKey];
+    NSURL *live = (probing || ownOnly || choseOwn) ? nil : liveShop();
+    NSString *joined = savedShopAddress();
     if (live) {
         kBase = live.absoluteString;
+        kOnShopBook = YES;
+        // Keep the address that answered, so tomorrow's launch — with the shop Mac asleep — stays on
+        // the shop's book and lets the page's queue hold the work, rather than opening a second book.
+        if (![joined isEqualToString:kBase]) rememberShop(kBase);
+    } else if (!probing && !ownOnly && !choseOwn && joined.length) {
+        // A Mac that has joined the shop stays on the shop's address even when the shop cannot be
+        // reached right now. Starting its own book instead would put the day's work in a second
+        // ledger, which is exactly what somebody would then have to bring in by hand.
+        kBase = shopAt(joined).absoluteString ?: joined;
         kOnShopBook = YES;
     } else if (!engineUp(1.0)) {
         serving = startEngine();
@@ -419,7 +560,9 @@ static int runEngineOnly(void) {
 // The engine takes a second or two to open its book; the window asks again until it answers rather
 // than painting a connection error at someone who did nothing wrong.
 - (void)showWhenReady {
-    if (engineUp(1.0) || ++_tries > 120) {
+    // The shop's own page knows how to open from its cache while the shop is away; only an engine
+    // started on this Mac needs the wait.
+    if (kOnShopBook || engineUp(1.0) || ++_tries > 120) {
         BOOL timedOut = _tries > 120;
         dispatch_async(dispatch_get_main_queue(), ^{ [self openShop:timedOut]; });
         return;
@@ -483,8 +626,9 @@ static int runEngineOnly(void) {
 }
 
 // The page over the shop's loopback door arrives under the shop's own certificate. Accepting only
-// that one keeps the padlock meaningful: anything else is refused rather than judged by the system,
-// for the same reason the session above refuses it.
+// that one keeps the padlock meaningful, and the shop's own address presented with anything else is
+// still refused. A page's requests to any other host — the forecast service — are the system's
+// judgement, as they are in a browser; refusing those silenced the weather on every installed Mac.
 - (void)webView:(WKWebView *)view
     didReceiveAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge
       completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition, NSURLCredential *))completionHandler {
@@ -494,7 +638,10 @@ static int runEngineOnly(void) {
             return completionHandler(NSURLSessionAuthChallengeUseCredential,
                                      [NSURLCredential credentialForTrust:space.serverTrust]);
         }
-        return completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+        if (shopOwnHost(space.host)) {
+            return completionHandler(NSURLSessionAuthChallengeCancelAuthenticationChallenge, nil);
+        }
+        return completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
     }
     completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
 }
@@ -861,16 +1008,40 @@ static void callEngine(NSString *method, NSString *path, NSDictionary *body,
 }
 @end
 
-// -- General: this copy's own book, copies, page size, staying awake and opening at sign-in
+// -- General: which book is shown, copies, page size, staying awake and opening at sign-in
 @interface SettingsGeneral : SettingsPane
 @end
+
+// A copy of the book that is whole. `.backup` is the online backup the engine itself uses; a file
+// simply read while the engine has it open can be missing the newest commits still in the
+// write-ahead log, and those are exactly the entries somebody wants brought in.
+static NSString *wholeCopyOfBook(NSString *book) {
+    NSString *temp = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                      [NSString stringWithFormat:@"chrisphics-bring-%d.db", (int)getpid()]];
+    [[NSFileManager defaultManager] removeItemAtPath:temp error:nil];
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/sqlite3"];
+    task.arguments = @[book, [NSString stringWithFormat:@".backup '%@'", temp]];
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    if (![task launchAndReturnError:NULL]) return nil;
+    [task waitUntilExit];
+    if (task.terminationStatus != 0 || ![[NSFileManager defaultManager] fileExistsAtPath:temp])
+        return nil;
+    return temp;
+}
 
 @implementation SettingsGeneral {
     NSTextField *_engineValue;
     NSTextField *_bookValue;
     NSTextField *_copiesValue;
     NSTextField *_zoomValue;
+    NSTextField *_whereValue;
+    NSTextField *_bookNote;
     NSButton *_awakeBox;
+    NSButton *_joinButton;
+    NSButton *_ownButton;
+    NSButton *_bringButton;
 }
 
 - (instancetype)init {
@@ -894,6 +1065,14 @@ static NSString *sizeWords(unsigned long long bytes) {
     _bookValue.toolTip = book;
     _copiesValue = valueText(shortPath(copiesFolder()));
     _copiesValue.toolTip = copiesFolder();
+
+    // Which book this window is showing, and the one action that changes it. A copy that has joined
+    // the shop shows where the shop is; its own book is still on the disk, untouched, and can be
+    // brought into the shop's book on the day it joins.
+    _whereValue = valueText(@"");
+    _joinButton = pushButton(@"Join the shop's book", self, @selector(joinTheShop));
+    _ownButton = pushButton(@"Use this Mac's own book", self, @selector(comeBackToThisMac));
+    _bringButton = pushButton(@"Bring this Mac's entries in…", self, @selector(bringThisMacIn));
 
     NSButton *look = pushButton(@"Open in browser", self, @selector(openInBrowser));
     NSButton *reveal = pushButton(@"Show in Finder", self, @selector(revealBook));
@@ -922,7 +1101,10 @@ static NSString *sizeWords(unsigned long long bytes) {
     login.state = [self loginItemThere] ? NSControlStateValueOn : NSControlStateValueOff;
 
     self.status = statusText();
+    _bookNote = noteText(@"");
     NSGridView *grid = formGrid(@[@[captionText(@"Records engine:"), rowOf(@[_engineValue, pushButton(@"Refresh", self, @selector(refreshEngine))])],
+                                   @[captionText(@"Book shown:"), rowOf(@[_whereValue, _joinButton, _ownButton])],
+                                   @[captionText(@"Entries from this Mac:"), _bringButton],
                                    @[captionText(@"Open the shop:"), look],
                                    @[captionText(@"This computer's book:"), rowOf(@[_bookValue, reveal])],
                                    @[captionText(@"Copies:"), rowOf(@[_copiesValue, openCopies, copyNow])],
@@ -932,14 +1114,41 @@ static NSString *sizeWords(unsigned long long bytes) {
                                  @[noteText(@"The book is the one file holding every job, client and payment. "
                                             "A copy is made to the copies folder by itself each day, and one "
                                             "can be asked for at any time."),
-                                   noteText(kOnShopBook
-                                            ? @"This window is showing the shop's live book on this Mac, so "
-                                               "anything entered here is written to it. The copy this "
-                                               "computer keeps is left as it was."
-                                            : @"Only this computer's own records live here. The shop's shared "
-                                               "book stays on the shop's Mac."),
+                                   _bookNote,
                                    self.status]);
     [self place:grid];
+    [self refreshBookRows];
+}
+
+// What the two book rows say, and which of their buttons makes sense at this moment. On the shop
+// Mac itself there is nothing to join and nothing to bring in — the book it keeps is the shop's.
+- (void)refreshBookRows {
+    BOOL shop = kOnShopBook;
+    BOOL here = shop && onThisMac([[NSURL URLWithString:kBase] host] ?: @"");
+    _whereValue.stringValue = shop
+        ? [NSString stringWithFormat:@"The shop's one book · %@", kBase]
+        : [NSString stringWithFormat:@"This Mac's own book · %@", shortPath(bookFile())];
+    _joinButton.hidden = shop;
+    _ownButton.hidden = !shop || here;
+
+    NSNumber *size = [[[NSFileManager defaultManager] attributesOfItemAtPath:bookFile()
+                                                                      error:nil] objectForKey:NSFileSize];
+    BOOL hasOwn = size.unsignedLongLongValue > 8192;
+    _bringButton.enabled = hasOwn && !here;
+    _bringButton.toolTip = here ? @"This Mac is the shop: its book is already the shop's book."
+        : !hasOwn ? @"This Mac has not kept a book of its own yet."
+        : @"Adds what this Mac's book holds to the shop's book. Nothing on this Mac is changed.";
+
+    _bookNote.stringValue = here
+        ? @"This window is showing the shop's live book on this Mac, so anything entered here is "
+           "written to it. The copy this computer keeps is left as it was."
+        : shop
+        ? @"This window shows the shop's one book over the shop's Wi-Fi. Anything entered here is "
+           "written to it and appears on every other Mac. When the shop cannot be reached, what is "
+           "typed is held on this Mac and goes in when it answers again."
+        : @"Only this computer's own records live here. The shop's shared book stays on the shop's "
+           "Mac; joining it puts this window on that book, and bringing this Mac's entries in adds "
+           "what it holds without changing anything here.";
 }
 
 - (void)viewDidAppear {
@@ -967,6 +1176,177 @@ static NSString *sizeWords(unsigned long long bytes) {
         NSNumber *room = [json[@"free_gb"] isKindOfClass:[NSNumber class]] ? json[@"free_gb"] : nil;
         if (room) [words appendFormat:@" %@ GB free there.", room];
         if (words.length) [pane say:words colour:nil];
+    });
+}
+
+// ------------------------------------------------------------ joining, leaving, bringing in
+
+- (void)joinTheShop {
+    [self say:@"Looking for the shop…" colour:nil];
+    __weak typeof(self) weak = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSURL *shop = liveShop();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            SettingsGeneral *pane = weak;
+            if (!pane) return;
+            if (!shop) {
+                [pane say:@"The shop's book is not answering. Check that the shop Mac is awake and "
+                           "that this Mac is on the shop's Wi-Fi."
+                   colour:[NSColor systemRedColor]];
+                return;
+            }
+            joinShop(shop.absoluteString);
+            pane->_engineValue.stringValue = kBase;
+            [pane refreshBookRows];
+            [pane say:[NSString stringWithFormat:@"This window now shows the shop's book at %@.",
+                       shop.absoluteString] colour:[NSColor systemGreenColor]];
+        });
+    });
+}
+
+- (void)comeBackToThisMac {
+    NSAlert *ask = [[NSAlert alloc] init];
+    ask.messageText = @"Show this Mac's own book again?";
+    ask.informativeText = @"Anything entered after this is written here, not to the shop's shared "
+                           "book, and will not appear on the other Macs. Entries already in the "
+                           "shop's book stay there.";
+    [ask addButtonWithTitle:@"Use this Mac's own book"];
+    [ask addButtonWithTitle:@"Cancel"];
+    if ([ask runModal] != NSAlertFirstButtonReturn) return;
+    useOwnBook();
+    [self refreshBookRows];
+    [self say:@"This window is back on this Mac's own book." colour:nil];
+}
+
+- (void)bringThisMacIn {
+    NSNumber *size = [[[NSFileManager defaultManager] attributesOfItemAtPath:bookFile()
+                                                                      error:nil]
+                      objectForKey:NSFileSize];
+    if (size.unsignedLongLongValue <= 8192) {
+        [self say:@"This Mac has not kept a book of its own, so there is nothing to bring in."
+           colour:[NSColor systemRedColor]];
+        return;
+    }
+    NSAlert *ask = [[NSAlert alloc] init];
+    ask.messageText = @"Bring this Mac's entries into the shop's book?";
+    ask.informativeText = @"The book on this Mac is read, and every update in it reaches the shop's "
+                           "book: new clients (matched by phone), jobs, payments, expenses, spoiled "
+                           "work, enquiries and the history that goes with them, and a job this Mac "
+                           "changed after the shop did replaces the shop's older copy of that job, "
+                           "lines included. An older copy never replaces a newer one. A job number "
+                           "is changed only when the shop has already issued it. A copy of the "
+                           "shop's book is taken first, and this Mac's own book is not changed."
+                           "\n\nIf anything here is marked \"Held on this device\", let it reach "
+                           "this Mac's book before bringing it in.";
+    [ask addButtonWithTitle:@"Bring them in"];
+    [ask addButtonWithTitle:@"Cancel"];
+    if ([ask runModal] != NSAlertFirstButtonReturn) return;
+
+    [self say:@"Reading this Mac's book…" colour:nil];
+    __weak typeof(self) weak = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSURL *shop = liveShop();
+        NSString *snapshot = wholeCopyOfBook(bookFile());
+        NSData *raw = snapshot ? [NSData dataWithContentsOfFile:snapshot]
+                               : [NSData dataWithContentsOfFile:bookFile()];
+        if (snapshot) [[NSFileManager defaultManager] removeItemAtPath:snapshot error:nil];
+        if (!shop) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weak say:@"The shop's book is not answering, so nothing was brought in. Check that "
+                          @"the shop Mac is awake and that this Mac is on the shop's Wi-Fi."
+                    colour:[NSColor systemRedColor]];
+            });
+            return;
+        }
+        if (raw.length < 4096) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weak say:@"This Mac's book could not be read, so nothing was brought in."
+                    colour:[NSColor systemRedColor]];
+            });
+            return;
+        }
+        NSString *label = [[[NSProcessInfo processInfo] hostName]
+                           stringByReplacingOccurrencesOfString:@".local" withString:@""];
+        NSString *query = [label stringByAddingPercentEncodingWithAllowedCharacters:
+                           [NSCharacterSet URLQueryAllowedCharacterSet]] ?: @"";
+        NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:
+            [NSURL URLWithString:[@"api/bring-over?label=" stringByAppendingString:query]
+                    relativeToURL:shop]];
+        request.HTTPMethod = @"POST";
+        request.timeoutInterval = 120;
+        request.HTTPBody = raw;
+        [request setValue:@"application/x-sqlite3" forHTTPHeaderField:@"Content-Type"];
+        [[shopSession() dataTaskWithRequest:request
+                          completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSDictionary *json = data.length ? [NSJSONSerialization JSONObjectWithData:data
+                                                                              options:0
+                                                                                error:nil] : nil;
+            NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                SettingsGeneral *pane = weak;
+                if (!pane) return;
+                if (error || status >= 400) {
+                    NSString *why = json[@"error"] ?: error.localizedDescription
+                        ?: [NSString stringWithFormat:@"the shop answered %ld", (long)status];
+                    [pane say:why colour:[NSColor systemRedColor]];
+                    return;
+                }
+                joinShop(shop.absoluteString);
+                pane->_engineValue.stringValue = kBase;
+                [pane refreshBookRows];
+                NSDictionary *records = [json[@"records"] isKindOfClass:[NSDictionary class]]
+                    ? json[@"records"] : @{};
+                NSDictionary *added = [records[@"added"] isKindOfClass:[NSDictionary class]]
+                    ? records[@"added"] : @{};
+                NSDictionary *updated = [records[@"updated"] isKindOfClass:[NSDictionary class]]
+                    ? records[@"updated"] : @{};
+                NSArray *renumbered = [records[@"renumbered"] isKindOfClass:[NSArray class]]
+                    ? records[@"renumbered"] : @[];
+                if ([json[@"already_brought_in"] boolValue]) {
+                    [pane say:[NSString stringWithFormat:
+                               @"This copy of the book was already brought in on %@, so nothing "
+                               @"was added again. This window now shows the shop's book.",
+                               json[@"at"] ?: @"an earlier day"]
+                       colour:[NSColor systemGreenColor]];
+                    return;
+                }
+                NSDictionary *nouns = @{@"clients": @"client", @"jobs": @"job",
+                                        @"job_items": @"line", @"payments": @"payment",
+                                        @"expenses": @"expense", @"spoiled_work": @"spoiled record",
+                                        @"leads": @"enquiry", @"job_events": @"history note",
+                                        @"notifications": @"message"};
+                NSMutableArray *parts = [NSMutableArray array];
+                for (NSString *key in [added.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+                    NSInteger count = [added[key] integerValue];
+                    if (count) [parts addObject:[NSString stringWithFormat:@"%ld %@%@", (long)count,
+                                                 nouns[key] ?: key, count == 1 ? @"" : @"s"]];
+                }
+                NSMutableArray *fresh = [NSMutableArray array];
+                for (NSString *key in [updated.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+                    NSInteger count = [updated[key] integerValue];
+                    if (count) [fresh addObject:[NSString stringWithFormat:@"%ld %@%@", (long)count,
+                                                 nouns[key] ?: key, count == 1 ? @"" : @"s"]];
+                }
+                NSMutableString *words = [NSMutableString string];
+                if (parts.count) [words appendFormat:@"Brought in %@ from this Mac.",
+                                  [parts componentsJoinedByString:@", "]];
+                if (fresh.count) {
+                    if (words.length) [words appendString:@" "];
+                    [words appendFormat:@"Brought %@ up to date from this Mac.",
+                     [fresh componentsJoinedByString:@", "]];
+                }
+                if (!words.length) [words appendString:@"Nothing on this Mac was newer than the "
+                                                    @"shop's book."];
+                if (renumbered.count) {
+                    NSDictionary *first = renumbered.firstObject;
+                    [words appendFormat:@" %lu clashing job number%@ renumbered (the first: %@ → %@).",
+                     (unsigned long)renumbered.count, renumbered.count == 1 ? @"" : @"s",
+                     first[@"from"] ?: @"?", first[@"to"] ?: @"?"];
+                }
+                [words appendString:@" This window now shows the shop's book."];
+                [pane say:words colour:[NSColor systemGreenColor]];
+            });
+        }] resume];
     });
 }
 

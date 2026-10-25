@@ -212,6 +212,18 @@ CREATE TABLE IF NOT EXISTS sync_requests (
   created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+-- A hand-out Mac keeps its own book until somebody joins it to the shop's. The day it does, its
+-- entries are brought in rather than retyped. This is the shop book's note of that having happened:
+-- the digest of the file it was handed, so the same copy asked for twice adds nothing the second
+-- time, and a line saying what arrived. One row per book brought in, never per record.
+CREATE TABLE IF NOT EXISTS brought_over (
+  digest      TEXT PRIMARY KEY,                     -- SHA-256 of the book file that arrived
+  from_label  TEXT NOT NULL DEFAULT '',             -- the machine's own name, as it sent it
+  address     TEXT NOT NULL DEFAULT '',             -- where the request came from
+  records     TEXT NOT NULL DEFAULT '',             -- JSON: what was added, left out, renumbered
+  created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
 -- Who is signed in to the shop book right now. The cookie's SHA-256 is kept rather than the
 -- cookie itself, so a read of the book cannot impersonate a device. Stored in the file rather
 -- than in memory because the always-on server restarts and a phone should not have to sign in

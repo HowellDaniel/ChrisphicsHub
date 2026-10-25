@@ -31,9 +31,10 @@ The whole point is that each install owns its records. They go in *this computer
 `Chrisphics Hub` folder, and the launcher names the book file rather than letting the engine choose
 it — because the engine only looks for an older book in `~/Library` when it is left to pick its own
 path, and a portable copy that found the shop's old records would print one print shop's takings on
-another company's screens. Two installs are two books: nothing merges them. That is the fork this
-design chose. For one book several machines reach, there is the always-on shop server and the
-offline-carry devices instead.
+another company's screens. That is the shape a copy keeps when it stands alone. A Mac that can reach
+the shop's own server joins the shop's live book instead and remembers it, so the counters at the
+shop read and write one book; Windows and Linux copies, and a Mac that chose its own book, stay on
+their own file.
 
 Owning a book is not the same as starting with an empty one, and an empty one is no use to anybody at
 the shop. So a build made on the shop's Mac reads that Mac's own book — read-only, the same way
@@ -74,11 +75,14 @@ Usage:
         # shop's seeded one
 """
 import hashlib
+import json
 import os
 import plistlib
 import re
 import shutil
+import socket
 import sqlite3
+import ssl
 import struct
 import subprocess
 import sys
@@ -129,6 +133,14 @@ BOOK_COPY = re.compile(r"^(backup|manual)-\d{8}-\d{6}\.db$")
 SEED_FOLDER = os.path.join("data", "shop.db")
 MAC_SEED = os.path.join(MAC_APP, "Contents", "Resources", "data", "shop.db")
 
+# The shop's own certificate authority, and the door its one book is served on. A hand-out Mac gets
+# both inside its bundle: the authority is what lets it trust the shop's book over the shop's Wi-Fi
+# without anybody visiting Keychain Access, and the addresses are what save the person at the counter
+# from typing an IP into a form. Nothing else is trusted — a server presenting any other certificate
+# is refused, whatever address it answers on.
+SHOP_CA = os.path.expanduser("~/Library/Application Support/mkcert/rootCA.pem")
+SHOP_PORT = 8834
+
 # Every table in the shop's book travels into a bundle, row for row: the clients, the jobs, the item
 # lines, the payments, the expenses, the spoilage, the enquiry history, the job event trail, the
 # messages sent to clients, the audit log, the settings. That is what makes a copy a standalone shop —
@@ -148,6 +160,8 @@ LEAVE_AT_HOME = (
     ("sync_requests", "DELETE FROM sync_requests",
      "writes the shop's devices queued and its server already replayed — replaying them into a second "
      "book would book the same money twice"),
+    ("brought_over", "DELETE FROM brought_over",
+     "the shop's own record of which machines it has already taken in — a copy has joined nothing"),
     ("app_state", "DELETE FROM app_state WHERE key IN (%s)"
      % ",".join("'%s'" % k for k in HOUSEKEEPING_KEYS),
      "the shop Mac's own backup runs and alert-reader ticks, which this machine did not do"),
@@ -434,10 +448,11 @@ RUN IT
 YOUR RECORDS
 %(records)s
 %(starts)s
-    Nothing here reads or writes any other computer's book. Two computers running this keep two books
-    and nothing merges them: what you write on one does not appear on the other, and it never will.
-    That is the deal a standalone copy makes so it can work with the network down and the shop Mac
-    switched off. To move records, copy that file. To back this computer up, copy that folder.
+    A copy that keeps its own book reads and writes nothing else. That is the deal a standalone copy
+    makes so it can work with the network down and the shop Mac switched off. Two such copies keep
+    two books, and what is written on one does not appear on the other. To move records, use the Mac's
+    "Bring this Mac's entries in…" action (see YOUR RECORDS) or copy that file. To back this computer
+    up, copy that folder.
 
 MAKE IT FEEL LIKE AN APP ON THE PHONE
     The browser can keep this address as an installed app, and the last figures you were shown still
@@ -453,9 +468,27 @@ because nothing outside this computer can reach it.
 """
 
 MAC_RECORDS = """    They live in "~/Library/Application Support/CRISPprint Hub/shop.db" — the folder this
-    computer's own copy keeps. It is NOT the shop's "Chrisphics Hub" folder, and the app never opens
-    that one: the shop's book was copied into this app when it was built, and this file is the only
-    book it reads or writes."""
+    computer's own copy keeps. It is NOT the shop's "Chrisphics Hub" folder: the shop's book was
+    copied into this app when it was built, and this file is the book it reads when it is keeping
+    its own.
+
+    ON THE SHOP'S WI-FI, ONE BOOK FOR EVERY MACHINE
+    When this Mac can reach the shop's own server, the app does not keep its own book at all. It
+    recognises the shop from the certificate and addresses built into it, shows the shop's live
+    book, and remembers that shop on the next launch — even with the shop Mac asleep, when work
+    typed here is held on this Mac and lands in the shop's book as soon as the shop answers. Every
+    machine that has joined therefore reads the same book, and an entry made at one counter appears
+    on the others within a few seconds.
+
+    Settings (⌘,) ▸ General names the book this window is showing and carries the three choices:
+        Join the shop's book          for a copy that has been keeping a book of its own
+        Bring this Mac's entries in…  adds that book's clients, jobs, payments and expenses to the
+                                      shop's book once; clients are matched by phone, only a job
+                                      number that clashes is renumbered, a job this Mac changed
+                                      after the shop did replaces the shop's older copy, an older
+                                      copy never replaces a newer one, and the old file stays on
+                                      disk
+        Use this Mac's own book       leaves the shop on purpose, and the choice survives relaunch"""
 
 WIN_RECORDS = """    They live in "%LOCALAPPDATA%\\CRISPprint Hub\\shop.db" — this user's own copy.
     Uninstalling leaves that file where it is, so the records outlive the program."""
@@ -493,8 +526,9 @@ SEEDED_START = """    It starts already full of the shop's records and the shop'
     Mac does not decide who is signed in here. Client messages that had not gone out yet arrive as the
     record they are, with the automatic-send flag let go — so this computer cannot send one client the
     same message twice, and pressing send here still works.
-    Anything written on this computer stays on this computer. If a job is also written on the shop
-    Mac, there are then two records of it and nothing joins them up.
+    What is written here goes into the book named above. On the shop's Wi-Fi a Mac opens the shop's
+    live book instead, so its entries are the shop's; a copy that is not on that Wi-Fi keeps its own,
+    and moving its records across is the "Bring this Mac's entries in…" action described above.
     If this computer already ran a copy of this program that had nothing written in it, opening this
     one puts the shop's records into that empty book — an app that stayed blank after installing the
     shop's copy would look like a demo, and is not one. A book with even one record in it is left
@@ -608,6 +642,7 @@ def records_expected(live):
     want = dict(live["inventory"])
     want["sessions"] = 0
     want["sync_requests"] = 0
+    want["brought_over"] = 0
     want["app_state"] = want.get("app_state", 0) - live["housekeeping"]
     return want
 
@@ -858,6 +893,67 @@ def compile_shell(path, triple):
     return path
 
 
+def pinned_answer(url, ca, wait=4.0):
+    """Ask one address over TLS with only the shop's own authority trusted, and nothing else."""
+    try:
+        context = ssl.create_default_context(cafile=ca)
+        request = urllib.request.Request(url, headers={"User-Agent": "Chrisphics build"})
+        with urllib.request.urlopen(request, context=context, timeout=wait) as answer:
+            return answer.status == 200, answer.read(8192).decode("utf-8", "replace")
+    except Exception:
+        return False, ""
+
+
+def shop_addresses():
+    """The addresses the shop answers at, each one checked with the shop's own certificate before it
+    is written into a bundle. The shop's own answer is preferred — it reports the number its Wi-Fi
+    gave it and the name its certificate was made for — and this Mac's name and number are tried as
+    well, so a build still finds the shop when the server is not up long enough to be asked.
+
+    Loopback is left out on purpose: every app already tries that door itself, and writing it into a
+    hand-out would tell an iMac to look at itself."""
+    ca = SHOP_CA
+    if not os.path.isfile(ca):
+        return [], "no shop certificate on this Mac (%s)" % ca
+    candidates, why = [], ""
+    ok, body = pinned_answer("https://127.0.0.1:%d/api/shop" % SHOP_PORT, ca)
+    if ok:
+        try:
+            said = json.loads(body)
+        except ValueError:
+            said = {}
+        for key in ("address", "address_other"):
+            url = str(said.get(key) or "").strip()
+            if url:
+                candidates.append(url)
+    else:
+        why = "the shop's server did not answer on %d" % SHOP_PORT
+    host = socket.gethostname()
+    if host:
+        candidates.append("https://%s:%d/" % (host if host.endswith(".local") else host + ".local",
+                                               SHOP_PORT))
+    try:
+        # A connected UDP socket sends nothing: it only asks the routing table which interface
+        # would carry the traffic, which is this Mac's number on the shop's Wi-Fi.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("192.0.2.1", 9))
+        candidates.append("https://%s:%d/" % (probe.getsockname()[0], SHOP_PORT))
+        probe.close()
+    except OSError:
+        pass
+    found = []
+    for url in candidates:
+        url = url if url.endswith("/") else url + "/"
+        if not url.startswith("https://") or url in found:
+            continue
+        answered, said = pinned_answer(url + "healthz", ca)
+        if answered and "ok" in said:
+            found.append(url)
+    if not found:
+        return [], (why + " and no other address answered with the shop's own certificate").strip()
+    return found, ""
+
+
 def build(key):
     target = TARGETS[key]
     bundle = os.path.join(DIST, target["folder"])
@@ -913,6 +1009,22 @@ def build(key):
         icns = make_icns(resources)
         note("the app carries the shop's own icon", os.path.getsize(icns) > 10_000,
              "%.0f KB .icns" % (os.path.getsize(icns) / 1024.0))
+        # What lets this copy join the shop's one book instead of keeping a book of its own. Only a
+        # seeded set carries them: a demo build is meant to stand alone.
+        if SEEDING["path"]:
+            carried_ca = os.path.join(resources, "shop-ca.pem")
+            if os.path.isfile(SHOP_CA):
+                shutil.copy2(SHOP_CA, carried_ca)
+                os.chmod(carried_ca, 0o644)
+            addresses, why = shop_addresses()
+            if addresses:
+                write(os.path.join(resources, "shop-urls.txt"), "\n".join(addresses) + "\n")
+                SEEDING["addresses"] = addresses
+            note("    and it carries the shop's own certificate, so it may join the shop's one book",
+                 os.path.isfile(carried_ca), "shop-ca.pem" if os.path.isfile(carried_ca)
+                 else "no %s on this Mac" % SHOP_CA)
+            note("    and the shop's addresses on its Wi-Fi, so nobody has to type one",
+                 bool(addresses), "; ".join(addresses) if addresses else why)
         run_name, install_name = "Start Chrisphics Hub.command", "Install Chrisphics Hub.command"
         write(os.path.join(bundle, run_name), RUN_SH_MAC % {"app": MAC_APP}, mode=0o755)
         write(os.path.join(bundle, install_name),
@@ -983,7 +1095,7 @@ def build(key):
              "history, audit log and settings all travel, so every report answers here"
              % (len(records_expected(SEEDING["live"])),
                 sum(records_expected(SEEDING["live"]).values())) if not off
-             else "short on: %s" % ", ".join("%s shop %d→copy %d (want %d)" % (t,) + v
+             else "short on: %s" % ", ".join("%s shop %d→copy %d (want %d)" % ((t,) + tuple(v))
                                              for t, v in sorted(off.items())))
         note("    with the shop's own settings in it", bool(said and said["settings"]),
              ", ".join(sorted(said["settings"])) if said else "none")
@@ -1461,8 +1573,11 @@ book.execute("INSERT INTO app_state(key, value) VALUES('shop_name', 'Some Other 
 book.commit()
 book.close()
 told = server.take_in_shop_copy(seed, named)
-say("  and one name typed on Settings protects the whole book",
-    read(named) == (0, "Some Other Shop"), "%s — %s" % (read(named), told[:40]))
+kept_named = sorted(os.path.basename(p) for p in __import__("glob").glob(named + ".was-empty-*"))
+say("a book with a name typed on it but no records is filled too",
+    read(named) == (expect, want_name), "%s — %s" % (read(named), told[:40]))
+say("  and the settings-only book it replaced is kept beside it", len(kept_named) == 3,
+    ", ".join(kept_named))
 
 broken = os.path.join(home, "broken.db")
 with open(broken, "wb") as fh:
