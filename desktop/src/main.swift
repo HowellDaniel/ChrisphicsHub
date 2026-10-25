@@ -1191,6 +1191,12 @@ final class AppearancePane: Pane {
         ("waves", "Waves wallpaper"),
         ("dots", "Dots wallpaper"),
         ("linen", "Linen wallpaper"),
+        ("violet", "Violet lines"),
+        ("beams", "Teal beams"),
+        ("circuit", "Circuit"),
+        ("constellation", "Constellation"),
+        ("dusk", "Dusk"),
+        ("bloom", "Bloom"),
     ]
 
     override func viewDidLoad() {

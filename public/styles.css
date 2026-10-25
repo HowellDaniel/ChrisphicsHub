@@ -219,6 +219,46 @@
     repeating-linear-gradient(45deg, var(--wall-ink) 0 1px, transparent 1px 9px),
     repeating-linear-gradient(-45deg, var(--wall-ink) 0 1px, transparent 1px 9px);
 }
+/* The six pictures the shop picked hang behind a wash of the palette's own paper instead of
+   replacing it, so the measured text pairings still stand on paper and the job sheet a client signs
+   is untouched. The wash follows the clock: lighter by day, heavier after dark, because a bright
+   photograph behind night text is how a screen ends up unreadable at the counter. */
+:root { --wall-veil: rgba(246, 245, 245, .80); }
+:root[data-theme="dark"] { --wall-veil: rgba(19, 16, 17, .88); }
+:root[data-bg="violet"] body, :root[data-bg="beams"] body, :root[data-bg="circuit"] body,
+:root[data-bg="constellation"] body, :root[data-bg="dusk"] body, :root[data-bg="bloom"] body {
+  background-size: cover, cover;
+  background-position: center, center;
+  background-attachment: fixed, fixed;
+  background-repeat: no-repeat, no-repeat;
+}
+:root[data-bg="violet"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-violet.png");
+}
+:root[data-bg="beams"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-beams.png");
+}
+:root[data-bg="circuit"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-circuit.png");
+}
+:root[data-bg="constellation"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-constellation.png");
+}
+:root[data-bg="dusk"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-dusk.png");
+}
+:root[data-bg="bloom"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-bloom.png");
+}
+/* A picture's bright corners lift the washed paper and pull the quiet ink down with them: measured
+   over these six, the ordinary `--muted` falls to 3.12:1 by day, which is unreadable at the counter.
+   The on-wash ink — the darker quiet colour already kept for the day cards — holds 4.69:1 or better
+   on every pixel of all six, in both halves of the clock. So a picture theme repaints the quiet ink
+   as well as the paper, and the pictures themselves stay as bright as they were picked. */
+:root[data-bg="violet"], :root[data-bg="beams"], :root[data-bg="circuit"],
+:root[data-bg="constellation"], :root[data-bg="dusk"], :root[data-bg="bloom"] {
+  --muted: var(--muted-on-wash);
+}
 * { box-sizing: border-box; }
 /* .drawer/.modal set display, which would otherwise beat the UA's [hidden] rule. */
 [hidden] { display: none !important; }

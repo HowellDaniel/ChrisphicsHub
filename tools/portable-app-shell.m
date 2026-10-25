@@ -56,7 +56,13 @@ static NSArray<NSArray<NSString *> *> *backgroundChoices(void) {
               @[ @"rose", @"Rose" ],
               @[ @"waves", @"Waves wallpaper" ],
               @[ @"dots", @"Dots wallpaper" ],
-              @[ @"linen", @"Linen wallpaper" ] ];
+              @[ @"linen", @"Linen wallpaper" ],
+              @[ @"violet", @"Violet lines" ],
+              @[ @"beams", @"Teal beams" ],
+              @[ @"circuit", @"Circuit" ],
+              @[ @"constellation", @"Constellation" ],
+              @[ @"dusk", @"Dusk" ],
+              @[ @"bloom", @"Bloom" ] ];
 }
 
 static NSString *chosenBackground(void) {
@@ -77,6 +83,12 @@ static NSString *supportFolder(void) {
 static NSString *urlPath(NSString *tail) {
     return [kBase stringByAppendingString:tail];
 }
+
+// The menu's actions are written beside the menu, above the helpers they lean on.
+static NSString *bookFile(void);
+static NSString *copiesFolder(void);
+static void callEngine(NSString *method, NSString *path, NSDictionary *body,
+                       void (^done)(NSDictionary *json, NSString *why));
 
 // A copy built by the shop's own build tool arrives with the shop's records inside it, at
 // Contents/Resources/data/shop.db, so the first screen a person sees holds the shop's figures and the
@@ -743,6 +755,95 @@ static int runEngineOnly(void) {
     exit(0);
 }
 
+// ------------------------------------------------------------- the menu's own work
+// The menu bar is the same one the shop's Swift app has always had: the page is the same page, and a
+// counter that learned ⌘N for a new job on one Mac should not find it missing on another. Everything
+// here either asks the page to do the thing (window.chrisphics.act) or asks the engine the way the
+// Settings pane already does, so no menu item is a promise the shell cannot keep.
+- (void)runPage:(NSString *)js {
+    if (kShopWeb) [kShopWeb evaluateJavaScript:js completionHandler:nil];
+}
+
+- (void)pageAct:(NSString *)name {
+    [self runPage:[NSString stringWithFormat:@"window.chrisphics && window.chrisphics.act('%@')", name]];
+}
+
+- (void)newJob { [self pageAct:@"new-job"]; }
+- (void)newQuote { [self pageAct:@"new-quote"]; }
+- (void)newEnquiry { [self pageAct:@"new-lead"]; }
+- (void)newClient { [self pageAct:@"new-client"]; }
+- (void)receivePayment { [self pageAct:@"receive-payment"]; }
+- (void)newExpense { [self pageAct:@"new-expense"]; }
+
+- (void)reloadPage { [kShopWeb reload]; }
+
+- (void)goPage:(NSString *)hash {
+    [self runPage:[NSString stringWithFormat:@"window.location.hash='%@'", hash]];
+}
+- (void)goDashboard { [self goPage:@"#/dashboard"]; }
+- (void)goJobs { [self goPage:@"#/jobs"]; }
+- (void)goCollect { [self goPage:@"#/collect"]; }
+- (void)goClients { [self goPage:@"#/clients"]; }
+- (void)goLeads { [self goPage:@"#/leads"]; }
+- (void)goAccounts { [self goPage:@"#/accounts"]; }
+- (void)goExpenses { [self goPage:@"#/expenses"]; }
+- (void)goReports { [self goPage:@"#/reports"]; }
+- (void)goSpoiled { [self goPage:@"#/spoiled"]; }
+- (void)goSync { [self goPage:@"#/sync"]; }
+- (void)goShop { [self goPage:@"#/shop"]; }
+
+- (void)undoEdit:(id)sender {
+    if (kShopWeb) [kShopWeb.undoManager undo];
+}
+- (void)redoEdit:(id)sender {
+    if (kShopWeb) [kShopWeb.undoManager redo];
+}
+- (void)closeWindow:(id)sender { [_window performClose:sender]; }
+- (void)enterFullScreen:(id)sender { [_window toggleFullScreen:sender]; }
+
+- (void)backupNow:(id)sender {
+    __weak typeof(self) weak = self;
+    callEngine(@"POST", @"api/backups", @{}, ^(NSDictionary *json, NSString *why) {
+        NSAlert *answer = [[NSAlert alloc] init];
+        answer.messageText = why ? @"The book was not copied"
+                                 : @"The book was copied";
+        answer.informativeText = why ?: [NSString stringWithFormat:@"%@ %@",
+                                         json[@"file"] ?: @"A copy was made.",
+                                         json[@"note"] ?: @""];
+        [answer addButtonWithTitle:@"OK"];
+        ShopWindow *strong = weak;
+        if (strong) [answer beginSheetModalForWindow:strong->_window completionHandler:nil];
+    });
+}
+
+- (void)revealBook:(id)sender {
+    NSString *book = bookFile();
+    NSFileManager *disk = [NSFileManager defaultManager];
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:
+     @[[disk fileExistsAtPath:book] ? [NSURL fileURLWithPath:book]
+                                       : [NSURL fileURLWithPath:supportFolder()]]];
+}
+
+- (void)openCopies:(id)sender {
+    NSString *folder = copiesFolder();
+    [[NSFileManager defaultManager] createDirectoryAtPath:folder withIntermediateDirectories:YES
+                                                   attributes:nil error:nil];
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:folder]];
+}
+
+- (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action key:(NSString *)key {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:action keyEquivalent:key];
+    item.target = self;
+    return item;
+}
+
+- (NSMenuItem *)menuItem:(NSString *)title action:(SEL)action
+                     key:(NSString *)key mask:(NSEventModifierFlags)mask {
+    NSMenuItem *item = [self menuItem:title action:action key:key];
+    item.keyEquivalentModifierMask = mask;
+    return item;
+}
+
 - (void)setMenu {
     NSMenu *main = [[NSMenu alloc] init];
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
@@ -769,6 +870,20 @@ static int runEngineOnly(void) {
                        action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
 
+    NSMenuItem *fileItem = [[NSMenuItem alloc] init];
+    [main addItem:fileItem];
+    NSMenu *file = [[NSMenu alloc] initWithTitle:@"File"];
+    [file addItem:[self menuItem:@"New Job" action:@selector(newJob) key:@"n"]];
+    [file addItem:[self menuItem:@"New Quote" action:@selector(newQuote) key:@"N"
+                           mask:(NSEventModifierFlagCommand | NSEventModifierFlagShift)]];
+    [file addItem:[self menuItem:@"New Enquiry" action:@selector(newEnquiry) key:@"i"]];
+    [file addItem:[self menuItem:@"New Client" action:@selector(newClient) key:@"k"]];
+    [file addItem:[self menuItem:@"Receive Payment" action:@selector(receivePayment) key:@"r"]];
+    [file addItem:[self menuItem:@"Record Money Out" action:@selector(newExpense) key:@"e"]];
+    [file addItem:[NSMenuItem separatorItem]];
+    [file addItem:[self menuItem:@"Close Window" action:@selector(closeWindow:) key:@"w"]];
+    fileItem.submenu = file;
+
     // Without an Edit menu the standard shortcuts do not reach the web view, and a cashier who cannot
     // paste a client's phone number into the counter reasonably calls that broken. Each item is
     // aimed at this shell rather than left to the responder chain: a nil target lets AppKit grey an
@@ -778,6 +893,10 @@ static int runEngineOnly(void) {
     NSMenuItem *editItem = [[NSMenuItem alloc] init];
     [main addItem:editItem];
     NSMenu *edit = [[NSMenu alloc] initWithTitle:@"Edit"];
+    [edit addItem:[self menuItem:@"Undo" action:@selector(undoEdit:) key:@"z"]];
+    [edit addItem:[self menuItem:@"Redo" action:@selector(redoEdit:) key:@"Z"
+                           mask:(NSEventModifierFlagCommand | NSEventModifierFlagShift)]];
+    [edit addItem:[NSMenuItem separatorItem]];
     NSMenuItem *cut = [edit addItemWithTitle:@"Cut" action:@selector(cutEdit:) keyEquivalent:@"x"];
     cut.target = self;
     NSMenuItem *copy = [edit addItemWithTitle:@"Copy" action:@selector(copyEdit:) keyEquivalent:@"c"];
@@ -788,6 +907,38 @@ static int runEngineOnly(void) {
                                      keyEquivalent:@"a"];
     selectAll.target = self;
     editItem.submenu = edit;
+
+    NSMenuItem *viewItem = [[NSMenuItem alloc] init];
+    [main addItem:viewItem];
+    NSMenu *view = [[NSMenu alloc] initWithTitle:@"View"];
+    [view addItem:[self menuItem:@"Reload" action:@selector(reloadPage) key:@"r"
+                           mask:(NSEventModifierFlagCommand | NSEventModifierFlagShift)]];
+    [view addItem:[NSMenuItem separatorItem]];
+    [view addItem:[self menuItem:@"Dashboard" action:@selector(goDashboard) key:@"1"]];
+    [view addItem:[self menuItem:@"Print Jobs" action:@selector(goJobs) key:@"2"]];
+    /* The counter's screen, so it sits beside the order book. It has no number key: ⌘1…⌘0 are
+       already spoken for, and a hand-over is one click from the rail anyway. */
+    [view addItem:[self menuItem:@"Collect" action:@selector(goCollect) key:@""]];
+    [view addItem:[self menuItem:@"Clients" action:@selector(goClients) key:@"3"]];
+    [view addItem:[self menuItem:@"Enquiries" action:@selector(goLeads) key:@"4"]];
+    [view addItem:[self menuItem:@"Accounts" action:@selector(goAccounts) key:@"5"]];
+    [view addItem:[self menuItem:@"Expenses" action:@selector(goExpenses) key:@"6"]];
+    [view addItem:[self menuItem:@"Reports" action:@selector(goReports) key:@"7"]];
+    [view addItem:[self menuItem:@"Spoiled Work" action:@selector(goSpoiled) key:@"8"]];
+    [view addItem:[self menuItem:@"Pending Sync" action:@selector(goSync) key:@"9"]];
+    [view addItem:[self menuItem:@"Shop & Devices" action:@selector(goShop) key:@"0"]];
+    [view addItem:[NSMenuItem separatorItem]];
+    [view addItem:[self menuItem:@"Enter Full Screen" action:@selector(enterFullScreen:) key:@"f"
+                           mask:(NSEventModifierFlagControl | NSEventModifierFlagCommand)]];
+    viewItem.submenu = view;
+
+    NSMenuItem *dataItem = [[NSMenuItem alloc] init];
+    [main addItem:dataItem];
+    NSMenu *data = [[NSMenu alloc] initWithTitle:@"Data"];
+    [data addItem:[self menuItem:@"Back Up the Book Now" action:@selector(backupNow:) key:@"b"]];
+    [data addItem:[self menuItem:@"Show the Book in Finder" action:@selector(revealBook:) key:@""]];
+    [data addItem:[self menuItem:@"Open the Backups Folder" action:@selector(openCopies:) key:@""]];
+    dataItem.submenu = data;
 
     NSMenuItem *windowItem = [[NSMenuItem alloc] init];
     [main addItem:windowItem];
@@ -977,15 +1128,18 @@ static void callEngine(NSString *method, NSString *path, NSDictionary *body,
                }] resume];
 }
 
-// ------------------------------------------------------------- the three panes
+// ------------------------------------------------------------- the panes
 @interface SettingsPane : NSViewController
 @property (nonatomic, copy) NSString *paneName;
+// The symbol beside the pane's name in the toolbar, the same four the shop's own Mac app shows.
+@property (nonatomic, copy) NSString *paneSymbol;
 @property (nonatomic, strong) NSTextField *status;
 - (void)say:(NSString *)text colour:(NSColor *)colour;
 - (void)place:(NSGridView *)grid;
 @end
 
 @implementation SettingsPane
+- (NSString *)paneSymbol { return _paneSymbol.length ? _paneSymbol : @"gearshape"; }
 - (void)say:(NSString *)text colour:(NSColor *)colour {
     self.status.stringValue = text ?: @"";
     self.status.textColor = colour ?: [NSColor secondaryLabelColor];
@@ -1045,7 +1199,10 @@ static NSString *wholeCopyOfBook(NSString *book) {
 }
 
 - (instancetype)init {
-    if ((self = [super init])) self.paneName = @"General";
+    if ((self = [super init])) {
+        self.paneName = @"General";
+        self.paneSymbol = @"gearshape";
+    }
     return self;
 }
 
@@ -1467,7 +1624,10 @@ static NSString *sizeWords(unsigned long long bytes) {
 }
 
 - (instancetype)init {
-    if ((self = [super init])) self.paneName = @"Appearance";
+    if ((self = [super init])) {
+        self.paneName = @"Appearance";
+        self.paneSymbol = @"paintpalette";
+    }
     return self;
 }
 
@@ -1526,7 +1686,10 @@ static NSString *sizeWords(unsigned long long bytes) {
 }
 
 - (instancetype)init {
-    if ((self = [super init])) self.paneName = @"Profile";
+    if ((self = [super init])) {
+        self.paneName = @"Profile";
+        self.paneSymbol = @"person.crop.circle";
+    }
     return self;
 }
 
@@ -1607,7 +1770,10 @@ static NSString *sizeWords(unsigned long long bytes) {
 }
 
 - (instancetype)init {
-    if ((self = [super init])) self.paneName = @"Updates";
+    if ((self = [super init])) {
+        self.paneName = @"Updates";
+        self.paneSymbol = @"arrow.triangle.2.circlepath";
+    }
     return self;
 }
 
@@ -1737,6 +1903,8 @@ static NSComparisonResult compareVersions(NSString *a, NSString *b) {
     for (SettingsPane *pane in panes) {
         NSTabViewItem *item = [[NSTabViewItem alloc] initWithIdentifier:pane.paneName];
         item.label = pane.paneName;
+        item.image = [NSImage imageWithSystemSymbolName:pane.paneSymbol
+                               accessibilityDescription:pane.paneName];
         item.viewController = pane;
         [_tabs addTabViewItem:item];
     }
@@ -1826,6 +1994,10 @@ static NSComparisonResult compareVersions(NSString *a, NSString *b) {
         return;
     }
     NSMutableString *words = [NSMutableString stringWithFormat:@"%@:", item.label];
+    // The pane's toolbar icon is part of what the window is meant to show, so the probe says
+    // whether this tab item actually carries one rather than leaving a person to squint at a
+    // screen grab of the pane alone.
+    [words appendFormat:@" icon=%@", item.image ? @"set" : @"missing"];
     for (NSTextField *field in [self fieldsIn:pane]) {
         if (!field.stringValue.length) continue;
         [words appendFormat:@" %@=%@", field.placeholderString ?: @"value",

@@ -1,12 +1,12 @@
 'use strict';
 
-/* Bumped with the copies-of-the-book build: the buttons that open a copy, take it out and put it back
-   live in /app.js, and a device still running its own cached copy of the old one would simply not have
-   them — a click that does nothing is worse than a screen that says it is out of date. The new worker
-   prefills the shell from the shop, so this lands while the Mac is answering — and if it is asked for
-   during an outage the install simply fails, leaving the device on the copy it already has rather than
-   on nothing. */
-const CACHE_NAME = 'crispprint-shell-v13';
+/* Bumped with the six picture themes: styles.css now points at six files under /img, and a counter
+   that kept the old shell would show a washed flat paper where the shop's chosen picture should be.
+   The pictures ride in the shell cache so a counter whose road to the shop is out still wears them.
+   The new worker prefills the shell from the shop, so this lands while the Mac is answering — and if
+   it is asked for during an outage the install simply fails, leaving the device on the copy it
+   already has rather than on nothing. */
+const CACHE_NAME = 'crispprint-shell-v16';
 const APP_SHELL = [
   '/',
   '/index.html',
@@ -19,6 +19,12 @@ const APP_SHELL = [
   '/img/icon-512.png',
   '/img/icon-maskable-512.png',
   '/img/apple-touch-icon.png',
+  '/img/bg-violet.png',
+  '/img/bg-beams.png',
+  '/img/bg-circuit.png',
+  '/img/bg-constellation.png',
+  '/img/bg-dusk.png',
+  '/img/bg-bloom.png',
 ];
 
 self.addEventListener('install', (event) => {
