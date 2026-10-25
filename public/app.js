@@ -1658,9 +1658,10 @@ function lookWords(d) {
    coordinates asked for. They are constants rather than something read out of the book, because the
    book's own address field holds the server's network address for the shop's other machines, not a
    town — if the shop ever moves, this is the one place to say so. The figure in the tile is the figure
-   the forecast service answered with, read from the machine looking at the screen; the shop's own
-   server stays local and never becomes a weather station. When nothing answers, nothing is invented:
-   the tile says so, or keeps the last reading it really did get and says when it was read. */
+   the forecast service answered with, read from the machine looking at the screen; when that machine
+   has no road to the service, the shop's own engine is asked and hands the same answer across (see
+   loadWeather below). When nothing answers, nothing is invented: the tile says so, or keeps the last
+   reading it really did get and says when it was read. */
 const WX_PLACE = 'Accra', WX_LAT = 5.5560, WX_LON = -0.1969;
 const WX_HOURS = 6, WX_OLD = 20 * 60 * 1000, WX_RETRY = 60 * 1000, WX_KEY = 'crispprint-weather';
 const WX_CODE = {
@@ -1765,41 +1766,55 @@ function wxMarkup() {
   return '<div class="today-wx" id="todayWx" role="img" aria-label="' +
     esc(wxState ? wxLabel(wxState) : WX_PLACE + ', no reading yet.') + '">' + wxBody() + '</div>';
 }
-function loadWeather() {
-  wxAsked = Date.now();
+/* The forecast is asked for down two roads. The first is the service itself, straight from the
+   machine reading the screen. When that road is out — a counter whose own internet is down while
+   the shop's is fine — the second is the shop's own engine, asked on this page's own origin. Both
+   answer in the same shape, so one reader below serves both, and the tile cannot tell them apart. */
+function wxReading(d) {
+  const c = (d && d.current) || {};
+  if (typeof c.temperature_2m !== 'number') throw new Error('no reading');
+  const ht = (d.hourly || {}).time || [], hp = (d.hourly || {}).temperature_2m || [];
+  const hc = (d.hourly || {}).weather_code || [];
+  let from = ht.indexOf(String(c.time || '').slice(0, 13) + ':00');
+  if (from < 0) from = 0;
+  const hours = [];
+  for (let i = from; i < ht.length && hours.length < WX_HOURS; i++) {
+    if (typeof hp[i] === 'number') hours.push({ t: ht[i], temp: hp[i], code: hc[i] });
+  }
+  const hi = (d.daily || {}).temperature_2m_max || [], lo = (d.daily || {}).temperature_2m_min || [];
+  return {
+    place: WX_PLACE, temperature: c.temperature_2m, feels: c.apparent_temperature,
+    humidity: c.relative_humidity_2m, code: c.weather_code, isDay: c.is_day,
+    hi: hi[0], lo: lo[0], hours: hours, at: Date.now(),
+  };
+}
+function wxAsk(url) {
+  /* Each road gets its own eight seconds. One shared clock would abort the shop's road exactly as
+     it was starting, on the machine whose own road had just used all the time up. */
   const ctrl = new AbortController();
   const off = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, 8000);
-  const url = 'https://api.open-meteo.com/v1/forecast?latitude=' + WX_LAT + '&longitude=' + WX_LON +
+  return fetch(url, { signal: ctrl.signal }).then((r) => {
+    clearTimeout(off);
+    if (!r.ok) throw new Error('http ' + r.status);
+    return r.json();
+  }, (err) => { clearTimeout(off); throw err; });
+}
+function loadWeather() {
+  wxAsked = Date.now();
+  const query = '?latitude=' + WX_LAT + '&longitude=' + WX_LON +
     '&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,weather_code' +
     '&hourly=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min' +
     '&timezone=auto&forecast_days=2';
-  fetch(url, { signal: ctrl.signal }).then((r) => {
-    if (!r.ok) throw new Error('http ' + r.status);
-    return r.json();
-  }).then((d) => {
-    clearTimeout(off);
-    const c = (d && d.current) || {};
-    if (typeof c.temperature_2m !== 'number') throw new Error('no reading');
-    const ht = (d.hourly || {}).time || [], hp = (d.hourly || {}).temperature_2m || [];
-    const hc = (d.hourly || {}).weather_code || [];
-    let from = ht.indexOf(String(c.time || '').slice(0, 13) + ':00');
-    if (from < 0) from = 0;
-    const hours = [];
-    for (let i = from; i < ht.length && hours.length < WX_HOURS; i++) {
-      if (typeof hp[i] === 'number') hours.push({ t: ht[i], temp: hp[i], code: hc[i] });
-    }
-    const hi = (d.daily || {}).temperature_2m_max || [], lo = (d.daily || {}).temperature_2m_min || [];
-    wxState = {
-      place: WX_PLACE, temperature: c.temperature_2m, feels: c.apparent_temperature,
-      humidity: c.relative_humidity_2m, code: c.weather_code, isDay: c.is_day,
-      hi: hi[0], lo: lo[0], hours: hours, at: Date.now(),
-    };
-    wxSaved(wxState);
-    wxDown = false;
-  }).catch(() => {
-    clearTimeout(off);
-    wxDown = true;
-  });
+  wxAsk('https://api.open-meteo.com/v1/forecast' + query)
+    .then(wxReading)
+    .catch(() => wxAsk('/api/weather' + query).then(wxReading))
+    .then((reading) => {
+      wxState = reading;
+      wxSaved(wxState);
+      wxDown = false;
+    }).catch(() => {
+      wxDown = true;
+    });
 }
 function todayCard() {
   const now = new Date();

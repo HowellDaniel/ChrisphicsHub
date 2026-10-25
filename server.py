@@ -4967,6 +4967,70 @@ def seed():
           "Delete the data file to start clean.")
 
 
+# ------------------------------------------------------------------------ weather
+
+WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
+WEATHER_MAX_BYTES = 512 * 1024
+WEATHER_KEEP = 10 * 60          # an answered forecast is as good for ten minutes as it is now
+_weather_done = {}              # (lat, lon) -> (fetched at, the service's own reply)
+_weather_lock = threading.Lock()
+
+
+def shop_forecast(params):
+    """The forecast, fetched by the shop's own engine for whichever counter asked for it.
+
+    Every screen used to ask the weather service itself, so a counter whose own internet was down
+    said "No weather" while the shop was perfectly online. The page still asks the service first —
+    its reading is as fresh as the machine reading it — and only comes here when that fails. This
+    route hands back the service's reply unchanged, because the page parses one shape on both roads.
+    Only numeric coordinates are accepted, so the door cannot be turned into a general fetch."""
+    try:
+        lat = float(params.get("latitude", ["5.5560"])[0])
+        lon = float(params.get("longitude", ["-0.1969"])[0])
+    except (TypeError, ValueError):
+        raise ValueError("latitude and longitude must be numbers") from None
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError("latitude and longitude are outside the globe")
+    key = (round(lat, 4), round(lon, 4))
+    now = time.time()
+    with _weather_lock:
+        saved = _weather_done.get(key)
+        if saved and now - saved[0] < WEATHER_KEEP:
+            return saved[1]
+    query = ("?latitude=%s&longitude=%s"
+             "&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,weather_code"
+             "&hourly=temperature_2m,weather_code"
+             "&daily=temperature_2m_max,temperature_2m_min"
+             "&timezone=auto&forecast_days=2" % key)
+    request = urllib.request.Request(WEATHER_URL + query,
+                                     headers={"User-Agent": SHOP["name"]})
+    data, trouble = None, ""
+    try:
+        with urllib.request.urlopen(request, timeout=6) as response:
+            raw = response.read(WEATHER_MAX_BYTES + 1)
+        if len(raw) > WEATHER_MAX_BYTES:
+            trouble = "the forecast service sent more than a tile can read"
+        else:
+            data = json.loads(raw.decode("utf-8"))
+            if not isinstance(data, dict) or not isinstance(data.get("current"), dict):
+                data, trouble = None, "the forecast service answered in a shape this build does not read"
+    except urllib.error.HTTPError as error:
+        trouble = "the forecast service answered %s" % error.code
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError):
+        trouble = "the forecast service could not be reached from the shop's Mac"
+    except ValueError:
+        trouble = "the forecast service answered in a shape this build does not read"
+    if trouble:
+        # A last reading the shop really did get beats a blank tile, which would say the shop has
+        # no internet when only one road to the forecast is out.
+        if saved:
+            return saved[1]
+        raise RuntimeError(trouble)
+    with _weather_lock:
+        _weather_done[key] = (time.time(), data)
+    return data
+
+
 # -------------------------------------------------------------------------- http
 
 class Handler(BaseHTTPRequestHandler):
@@ -5447,6 +5511,14 @@ class Handler(BaseHTTPRequestHandler):
             raise LookupError("Unknown route " + path)
         rest = seg[1:]
         head = rest[0] if rest else ""
+
+        if method == "GET" and head == "weather" and len(rest) == 1:
+            # The counters ask the forecast service themselves first and only land here when their
+            # own road to it is out; this engine's road is the shop's, which is the one that stays up.
+            try:
+                return 200, shop_forecast(params)
+            except RuntimeError as error:
+                return 503, {"error": str(error)}
 
         if method == "GET" and head == "book-rev":
             # Cheap on purpose: every counter on the Wi-Fi asks this a few times a minute, and a
