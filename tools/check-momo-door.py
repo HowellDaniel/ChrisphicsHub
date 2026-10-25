@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Prove the MoMo card stops showing a refusal it did not cause, on a throwaway book.
+"""Prove the Messages reader stops reporting a refusal it did not cause, on a throwaway book.
 
 The owner's ask: "Messages is shut to this app ... fix this error from the dashboard."
+The card itself came off the Dashboard on 15 October, but the engine and /api/momo stayed, and the
+boot server still reads Messages when watching is on — so what the shop would see is still proved.
 
 Two engines read Messages and both write the one shared line `momo_status` in the one book — the
 Mac app's engine and the Wi-Fi server that starts itself at boot. macOS gives the door (Full Disk
@@ -15,9 +17,12 @@ nothing but a blank status behind: that stamp, or a blank status with a fresh po
 card also names the exact entry this engine needs (messages_door) so a grant can be aimed at the
 right program.
 
-Nothing here touches ~/Library/Messages as it is really seen: the failing read is the true one
-(this shell has no door), and the working read is simulated by handing poll_messages the answer
-the granted engine would return.
+What is proved here is the shut engine's behaviour, and it is forced rather than trusted to this
+Mac: the door was re-granted on 25 October, so `read_messages` now succeeds when this check runs and
+the refusal it used to lean on never happens. Every shut-engine case therefore reads Messages from
+a file this process cannot open — the same failure a shut app gets, whatever System Settings says
+today. Nothing here reads ~/Library/Messages as it is really seen: the only real read is the report
+of which way this Mac's door currently stands.
 
     python3 tools/check-momo-door.py
 """
@@ -53,6 +58,13 @@ server.connect(book)
 
 REFUSAL = ("Messages is shut to this app. Allow it under System Settings ▸ Privacy & Security "
            "▸ Full Disk Access, then press Check Messages. (DatabaseError)")
+
+# A file that exists but cannot be opened is the shut engine's whole problem, reproduced without
+# asking this Mac to lose its grant: sqlite refuses the read-only open and the reader reports it.
+SHUT_MESSAGES = os.path.join(work, "shut-chat.db")
+with open(SHUT_MESSAGES, "wb") as fh:
+    fh.write(b"not a Messages file")
+os.chmod(SHUT_MESSAGES, 0)
 
 fails = []
 
@@ -91,7 +103,13 @@ def book_as_the_working_reader_left(read_ok_ago=None, status_text="", checked_ag
     server.set_state("momo_checked", ago(checked_ago))
 
 
-print("The real read first (this shell has no door):")
+print("Which way this Mac's own door stands today (a report, not an assertion):")
+real_rows, real_problem = server.read_messages(5)
+print("  real read: %s" % ("open — %d newest texts" % len(real_rows) if not real_problem
+                           else "shut — %s" % real_problem))
+
+print("\nA reader that cannot open Messages says why:")
+server.MESSAGES_DB = SHUT_MESSAGES
 rows, problem = server.read_messages(5)
 check("read_messages refuses for a reason we can name", bool(problem), problem)
 check("the refusal is the Full Disk Access one", "Full Disk Access" in problem, problem)
@@ -239,7 +257,16 @@ if not squatted:
     # Watching off: the throwaway engine's own twenty-second poller must not write into the book
     # between these requests and answer for the press.
     server.set_state("momo_watch", "0")
-    srv = subprocess.Popen([sys.executable, os.path.join(REPO, "server.py"),
+    # The child is started through a runner, not server.py itself, because the press has to be made
+    # by an engine that genuinely cannot get into Messages — and this Mac can.
+    engine_src = os.path.join(work, "shut-engine.py")
+    with open(engine_src, "w", encoding="utf-8") as fh:
+        fh.write("import os,sys\n"
+                 "sys.path.insert(0, %r)\n"
+                 "import server\n"
+                 "server.MESSAGES_DB = %r\n"
+                 "server.main()\n" % (REPO, SHUT_MESSAGES))
+    srv = subprocess.Popen([sys.executable, engine_src,
                             "--port", str(PORT), "--no-browser"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            env={**os.environ, "CHRISPHICS_DB": book,
