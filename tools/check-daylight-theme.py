@@ -265,18 +265,26 @@ open(PROBE_JS, "w", encoding="utf-8").write(r"""
     var realFetch = window.fetch.bind(window);
     var openMeteoTries = 0;
     window.__liveTries = 0;
+    window.__shopTries = 0;
     window.fetch = function (input, init) {
       var u = typeof input === "string" ? input : (input && input.url) || "";
-      if (u.indexOf("api.open-meteo.com") === -1) return realFetch(input, init);
-      openMeteoTries += 1;
-      window.__liveTries = openMeteoTries;
+      var byShop = u.indexOf("/api/weather") !== -1;
+      if (u.indexOf("api.open-meteo.com") === -1 && !byShop) return realFetch(input, init);
+      /* Only the page's own ask is counted, because the retry rule is about that ask. The shop's
+         relay is the second half of the same road: ?wx=fail and ?wx=old refuse both, or the check
+         would be watching a tile quietly filled by the road it meant to close. ?wx=shoponly refuses
+         only the machine's own ask — the counter whose internet is down while the shop's is up. */
+      if (byShop) window.__shopTries += 1;
+      else { openMeteoTries += 1; window.__liveTries = openMeteoTries; }
       /* ?wx=offthenon is the machine that was briefly out of range: the first ask is refused, every
          ask after it answers. It exists to catch a page that gives up on one try. */
       if (wx === "fail" || wx === "old") return Promise.reject(new TypeError("offline"));
+      if (wx === "shoponly" && !byShop) return Promise.reject(new TypeError("offline"));
       if (wx === "offthenon" && openMeteoTries === 1) return Promise.reject(new TypeError("offline"));
       /* ?wx=slow keeps the answer in the air for three seconds, which is the only way to see what the
          tile says while a request it never made is still on its way. */
-      return wxAnswer(WX_FIX[wx] || WX_FIX.night, wx === "slow" ? 3000 : 30);
+      return wxAnswer(WX_FIX[wx === "shoponly" ? "rain" : wx] || WX_FIX.night,
+                      wx === "slow" ? 3000 : 30);
     };
     window.__liveLog = "fixture";
   }
@@ -402,6 +410,7 @@ WEATHER = ("(function(){function g(sel,prop){var e=document.querySelector(sel);"
           "hourCols:sp.length?g('.wx-hours','gridTemplateColumns'):'none',"
           "live:(function(){try{return window.__liveLog||'';}catch(e){return '';}})(),"
           "tries:(function(){try{return String(window.__liveTries||0);}catch(e){return '';}})(),"
+          "shopTries:(function(){try{return String(window.__shopTries||0);}catch(e){return '';}})(),"
           "label:wx?wx.getAttribute('aria-label'):'',"
           "spill:(document.documentElement.scrollWidth>document.documentElement.clientWidth)"
           "?'yes':'no'});})()")
@@ -1019,6 +1028,19 @@ check("with nothing answering: the tile says which half failed",
 expect("with nothing answering: and it is announced as empty, not as a guess",
        off.get("label"), "Accra, no reading yet.")
 check("with nothing answering: no strip of made-up hours", off.get("cells") == 0, off.get("cells"))
+
+# 10c-i. The other road. A counter whose own machine cannot reach the service is not cut off from the
+#        forecast while the shop's Mac can reach it: the page asks the shop, and the shop answers with
+#        the service's own reply untouched. This is the case that used to print "No weather" on a
+#        phone that was perfectly able to print a job.
+said, reports = run_probe("probe=13:00:00&mode=clear&wx=shoponly",
+                          [HAVE_WX, "say|" + WEATHER], "only the shop can reach the sky")
+shop = reports[0] if reports else {}
+expect("a counter that cannot reach the service gets its figure from the shop", shop.get("temp"), "27°")
+expect("and the tile does not also admit there was no weather", shop.get("none"), "")
+check("and it asked its own service first, then the shop when that was refused",
+      shop.get("tries") == "1" and int(shop.get("shopTries") or 0) >= 1,
+      "service asked %s times, shop asked %s" % (shop.get("tries"), shop.get("shopTries")))
 
 said, reports = run_probe("probe=13:00:00&mode=clear&wx=old",
                           [HAVE_WX, "say|" + WEATHER], "three days old")
