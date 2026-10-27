@@ -2434,6 +2434,7 @@ async function viewShop() {
           (login.required && !shop.reachable_from_wifi
             ? '<button class="btn ghost" data-action="shop-password-off">Switch sign-in off</button>' : '')) + '</p>' +
     '</div></div>' +
+    firstMachineCard(shop, shopMac) +
     copiesCard(copy, shopMac) +
     emailAccountsCard(mail, shopMac) +
     securityCard(guard, shopMac);
@@ -2512,6 +2513,64 @@ function copyLookout(look) {
       ? '<p class="err">It will not go back: ' + esc(look.reasons.join('; ')) + '.</p>' : '') +
     '<button class="btn sm ghost" data-action="close-copy">Close the look</button>';
   box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+/* One machine is where the shop's records are kept up to date as the day happens, and the book says
+   which one that is. Naming it settles the one case a stamp cannot settle by itself — two copies of
+   the same job, both written in the same second — and it puts beside the name the last time anything
+   really arrived from that machine, which is the only thing somebody at the front desk can read that
+   says her entries are getting through. The trail holds one line per machine per hour, so the times
+   below are hourly marks, not the minute of the last save. */
+function firstMachineCard(shop, shopMac) {
+  const origin = shop.origin || {named: false, address: '', name: ''};
+  const machines = (shop.machines || []).filter((m) => m && m.address);
+  const first = machines.find((m) => m.first) || null;
+  const rows = machines.map((m) =>
+    '<tr><td><span class="strong">' + esc(m.name || 'a machine') + '</span>' +
+    (m.first ? ' <span class="tag">first</span>' : '') +
+    (m.this_mac ? ' <span class="muted"> · this Mac</span>' : '') + '</td>' +
+    '<td class="ref">' + esc(m.address) + '</td>' +
+    '<td class="ref">' + (m.last_write ? esc(fdatetime(m.last_write))
+                                       : '<span class="muted">nothing in the trail</span>') +
+    '</td></tr>').join('');
+  return '<div class="card"><h3>The shop’s first machine<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-action="shop-devices">Refresh</button></h3><div class="card-b">' +
+    (origin.named
+      ? '<p class="hint"><b>' + esc(origin.name || 'a machine') + '</b> — <span class="addr">' +
+        esc(origin.address) + '</span>' +
+        (first && first.last_write ? ', last heard of at ' + esc(fdatetime(first.last_write)) : '') +
+        '.</p>'
+      : '<p class="hint">No machine is named first. Every counter is then read the same way: a record' +
+        ' in another book replaces the shop’s copy only when it is stamped later than it.</p>') +
+    '<p class="hint">A counter that has joined the shop does not keep a second ledger: what is typed' +
+    ' there is written into this book and the other screens take it within about ten seconds. The' +
+    ' name matters on the day a book that was kept apart is brought in — a job stamped to the very' +
+    ' same second as the shop’s copy then goes with this machine instead of being left as a tie,' +
+    ' and a copy stamped earlier is still left alone.</p>' +
+    (rows
+      ? '<div class="tablewrap"><table><thead><tr><th>Machine</th><th>Wi-Fi number</th>' +
+        '<th>Last wrote</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+      : '<p class="hint">Nothing has changed the book from another machine for as far back as this' +
+        ' trail reaches.</p>') +
+    (shopMac
+      ? '<form id="originForm" class="stack">' +
+        '<div class="grid split">' +
+        '<label class="field"><span>What the shop calls it</span><input name="name" type="text"' +
+        ' maxlength="60" placeholder="CHRISPRINT’s iMac (2)" value="' + esc(origin.name || '') +
+        '"></label>' +
+        '<label class="field"><span>Its Wi-Fi number</span><input name="address" type="text"' +
+        ' maxlength="43" placeholder="192.168.100.19" value="' + esc(origin.address || '') +
+        '"></label></div>' +
+        '<p><button class="btn primary" type="submit">' +
+        (origin.named ? 'Save the first machine' : 'Name this machine first') + '</button> ' +
+        (origin.named ? '<button class="btn ghost" data-action="origin-clear" type="button">' +
+          'Nobody in particular</button>' : '') + '</p>' +
+        '<p class="hint">The number is how this engine sees the machine, so it is the number the' +
+        ' router gave that Mac; if the router hands out a new one, it is changed here.</p>' +
+        '<p class="err" id="originErr"></p></form>'
+      : '<p class="hint">Which machine the day is taken from is settled on the shop’s own computer.' +
+        ' This device can read the list but not change it.</p>') +
+    '</div></div>';
 }
 
 function copiesCard(copy, shopMac) {
@@ -2846,6 +2905,23 @@ function emailAccountsCard(mail, shopMac) {
 }
 
 function wireShopForms() {
+  const origin = document.getElementById('originForm');
+  if (origin) {
+    origin.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('originErr').textContent = '';
+      try {
+        await api('/api/shop-origin', { method: 'PUT', body: JSON.stringify({
+          name: f.name.value.trim(), address: f.address.value.trim(),
+        }) });
+        toast(f.address.value.trim()
+                ? 'That machine is the shop’s first — a same-second copy of a job goes with it'
+                : 'No machine is named first, so every counter is read the same way', 'good');
+        await render();
+      } catch (err) { document.getElementById('originErr').textContent = err.message; }
+    });
+  }
   const copies = document.getElementById('copiesForm');
   if (copies) {
     copies.addEventListener('submit', async (e) => {
@@ -2865,8 +2941,7 @@ function wireShopForms() {
       } catch (err) { document.getElementById('copiesErr').textContent = err.message; }
     });
   }
-  const named = document.getElementById('nameComputerForm');
-  if (named) {
+  const named = document.getElementById('nameComputerForm');  if (named) {
     named.addEventListener('submit', async (e) => {
       e.preventDefault();
       const f = e.target;
@@ -4580,6 +4655,13 @@ const ACTIONS = {
   },
   'setup-page'() { window.open('/setup', '_blank'); },
   'shop-devices'() { render().catch(fail); },
+  async 'origin-clear'() {
+    try {
+      await api('/api/shop-origin', { method: 'PUT', body: JSON.stringify({ address: '' }) });
+      toast('No machine is named first, so every counter is read the same way', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
   'shop-security'() { render().catch(fail); },
   async 'book-copy'() {
     try {

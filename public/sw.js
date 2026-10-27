@@ -6,7 +6,7 @@
    The new worker prefills the shell from the shop, so this lands while the Mac is answering — and if
    it is asked for during an outage the install simply fails, leaving the device on the copy it
    already has rather than on nothing. */
-const CACHE_NAME = 'crispprint-shell-v16';
+const CACHE_NAME = 'crispprint-shell-v17';
 const APP_SHELL = [
   '/',
   '/index.html',

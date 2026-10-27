@@ -2207,6 +2207,100 @@ def set_shop_profile(body):
     return {"shop": dict(SHOP), "saved": sorted(cleaned)}
 
 
+# ------------------------------------------------------------- the shop's first machine
+#
+# One counter is where the shop's records are actually kept up to date as they happen. Naming that
+# machine does not move the book — every machine that has joined writes the one book anyway — but it
+# settles two things: when a copy of a book is brought in and a job carries the same second on both
+# sides, the first machine's version is the one that stands; and the counter can say which machine
+# the day is being taken from, and see the last time anything arrived from it.
+#
+# The Wi-Fi number is the identity, because that is what reaches this engine. The name is what the
+# shop calls it, and it is honoured too when a book arrives introduced by that name.
+
+ORIGIN_ADDRESS_KEY = "origin_address"
+ORIGIN_NAME_KEY = "origin_name"
+
+
+def is_wifi_number(value):
+    """Four groups of digits, each one a number an interface can actually hold."""
+    parts = value.split(".")
+    return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+
+
+def origin_machine():
+    address = state_value(ORIGIN_ADDRESS_KEY).strip()
+    if not address:
+        return {"address": "", "name": "", "named": False, "since": ""}
+    return {"address": address, "name": state_value(ORIGIN_NAME_KEY).strip(), "named": True,
+            "since": state_value("origin_set_at")}
+
+
+def is_origin(address="", label=""):
+    """Whether the machine at this address — or a book introduced by this name — is the shop's first."""
+    origin = origin_machine()
+    if not origin["address"]:
+        return False
+    if address and address == origin["address"]:
+        return True
+    return bool(label and origin["name"]
+                and _name_key(label) == _name_key(origin["name"]))
+
+
+def set_origin_machine(body):
+    """Name or clear the shop's first machine. An address that is not a Wi-Fi number is refused —
+    a name in its place would quietly never match the traffic this rule is read against."""
+    if not isinstance(body, dict):
+        raise ValueError("Send the machine as a JSON object")
+    address = "" if body.get("address") is None else str(body.get("address")).strip()
+    name = "" if body.get("name") is None else str(body.get("name")).strip()
+    if address and not is_wifi_number(address):
+        raise ValueError("A first machine is named by its Wi-Fi number, like 192.168.100.19")
+    if len(name) > 60:
+        raise ValueError("The name of the machine is too long — 60 characters at most")
+    if address:
+        set_state(ORIGIN_ADDRESS_KEY, address)
+        set_state(ORIGIN_NAME_KEY, name)
+        if not state_value("origin_set_at"):
+            set_state("origin_set_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    else:
+        with _lock:
+            _db.execute("DELETE FROM app_state WHERE key IN (?, ?, ?)",
+                        (ORIGIN_ADDRESS_KEY, ORIGIN_NAME_KEY, "origin_set_at"))
+            _db.commit()
+    return {"origin": origin_machine(),
+            "cleared": not address,
+            "note": ("This machine's entries are the shop's, and a same-second copy of a job goes "
+                     "with it when another book is brought in." if address else
+                     "No first machine is named — every counter is treated the same.")}
+
+
+def machine_activity(limit=8):
+    """The counters that have written into this book lately, newest first.
+
+    Read out of the security trail rather than a table of its own: the trail already keeps who came
+    from where, and a machine that saves every few minutes would otherwise be a second ledger to
+    keep in step. One line per machine per hour is what `note_counter_write` leaves behind, so a
+    quiet gap here is a machine that stopped feeding the shop, not a machine that was idle."""
+    rows = q("SELECT address, MAX(at) AS last_write, COUNT(*) AS notes FROM security_log"
+             " WHERE kind = 'wrote_into_book' GROUP BY address"
+             " ORDER BY last_write DESC LIMIT ?", (max(1, int(limit)),))
+    named = {r["address"]: r["from_label"] for r in q(
+        "SELECT address, from_label FROM brought_over WHERE address <> ''")}
+    origin = origin_machine()
+    out = []
+    for row in rows:
+        address = row["address"]
+        here = address.startswith("127.") or address == SERVE["host"]
+        out.append({"address": address, "last_write": row["last_write"], "changes": row["notes"],
+                    "name": "This Mac" if here else named.get(address, ""),
+                    "first": address == origin["address"]})
+    if origin["named"] and not any(m["first"] for m in out):
+        out.insert(0, {"address": origin["address"], "last_write": "", "changes": 0,
+                       "name": origin["name"], "first": True})
+    return {"origin": origin, "machines": out}
+
+
 # ----------------------------------------------------------------------- sign-in
 
 def hash_password(password, salt=None, rounds=PBKDF2_ROUNDS):
@@ -2571,14 +2665,49 @@ def note_security(kind, address="", device="", detail=""):
         _last_denied[address or "?"] = now
     try:
         with _lock:
-            _db.execute("INSERT INTO security_log (kind, address, device, detail) VALUES (?,?,?,?)",
-                        (text(kind, 32), text(address, 60), text(device, 60), text(detail, 200)))
+            cur = _db.execute("INSERT INTO security_log (kind, address, device, detail) VALUES (?,?,?,?)",
+                              (text(kind, 32), text(address, 60), text(device, 60), text(detail, 200)))
             _db.execute("DELETE FROM security_log WHERE id NOT IN"
                         " (SELECT id FROM security_log ORDER BY id DESC LIMIT ?)",
                         (SECURITY_TRAIL_KEEP,))
             _db.commit()
+            return cur.lastrowid
     except sqlite3.Error:
         # A shop still being able to open its ledger matters more than the note about it.
+        return None
+
+
+COUNTER_WRITE_NOTE_SECS = 3600
+_write_note = {}   # address -> [trail line id, when the line was opened, records taken in so far]
+
+
+def note_counter_write(address, device=""):
+    """Say which machine just changed the book, so the shop can see a counter's entries arriving
+    rather than take it on faith. One line per machine per hour, counting what happened in between:
+    a cashier typing all morning is one story, not a line a keystroke, and the trail keeps only the
+    last SECURITY_TRAIL_KEEP events of every kind — a line per save would spend the whole of it.
+    The line itself is kept alive rather than left behind: it is rewritten with the newest write's
+    time, so a machine that has been busy all morning still reads as the machine the shop last
+    heard from instead of one that went quiet at the first entry of a burst."""
+    key = address or "?"
+    now = time.time()
+    entry = _write_note.get(key)
+    if entry is None or now - entry[1] >= COUNTER_WRITE_NOTE_SECS:
+        # Either this machine has never been seen, or its line has aged out of the hour. Either way
+        # a new line opens holding only this write; the old line keeps the count it reached.
+        row_id = note_security("wrote_into_book", address, device, "changed 1 record in the shop's book")
+        _write_note[key] = [row_id, now, 1]
+        return
+    entry[2] += 1
+    if entry[0] is None:
+        return
+    try:
+        with _lock:
+            _db.execute("UPDATE security_log SET at = datetime('now','localtime'), detail = ? WHERE id = ?",
+                        ("changed %s record%s in the shop's book" % (entry[2], "" if entry[2] == 1 else "s"),
+                         entry[0]))
+            _db.commit()
+    except sqlite3.Error:
         pass
 
 
@@ -5224,6 +5353,7 @@ class Handler(BaseHTTPRequestHandler):
                 if (method != "GET" and result is not None and path.startswith("/api/")
                         and result[0] < 300 and path not in ("/api/login", "/api/logout")):
                     _book_writes["count"] += 1
+                    note_counter_write(self.client_ip(), self.headers.get("User-Agent", ""))
             if result is not None:
                 code, payload = result
                 headers = dict(self.response_headers)
@@ -5578,6 +5708,7 @@ class Handler(BaseHTTPRequestHandler):
                          "login": {"required": auth_required(),
                                    "from_environment": bool(AUTH_PASSWORD),
                                    "chosen_on_this_mac": bool(book_password())},
+                         **machine_activity(),
                          "backup": backup_report()}
         if method == "PUT" and head == "shop":
             # The shop's own details are the counter's business: the name and number printed on
@@ -5585,6 +5716,16 @@ class Handler(BaseHTTPRequestHandler):
             if not self.is_shop_computer():
                 return 403, {"error": "The shop's own details are changed on the shop's computer"}
             return 200, set_shop_profile(self.body())
+        if method == "PUT" and head == "shop-origin":
+            # Which machine the day is taken from is the shop's decision, made on the shop's own
+            # computer — a counter cannot crown itself and have its same-second copies win.
+            if not self.is_shop_computer():
+                return 403, {"error": "The shop's first machine is named on the shop's computer"}
+            answer = set_origin_machine(self.body())
+            note_security("origin_named", self.client_ip(), self.headers.get("User-Agent", ""),
+                          "named %s as the shop's first machine"
+                          % (answer["origin"]["address"] or "no machine"))
+            return 200, answer
         if head == "shop-password":
             if method == "POST":
                 if not self.is_shop_computer() and not book_password():
@@ -6991,18 +7132,28 @@ def _merge_book(source, tables, label, address, digest):
             # A number is unique inside one book, but two books that both issued it for different
             # jobs would collide: the client or the title has to agree as well.
             held = _db.execute(
-                "SELECT id, coalesce(updated_at, created_at, '') AS stamp FROM jobs"
+                "SELECT *, coalesce(updated_at, created_at, '') AS stamp FROM jobs"
                 " WHERE ref = ? AND (client_id = ? OR lower(trim(title)) = lower(trim(?)))"
                 " LIMIT 1", (ref, client, row["title"])).fetchone()
         if held is None:
             held = _db.execute(
-                "SELECT id, coalesce(updated_at, created_at, '') AS stamp FROM jobs"
+                "SELECT *, coalesce(updated_at, created_at, '') AS stamp FROM jobs"
                 " WHERE client_id = ? AND lower(trim(title)) = lower(trim(?))"
                 " AND created_at = ? LIMIT 1",
                 (client, row["title"], row["created_at"])).fetchone()
         if held:
             job_map[row["id"]] = held["id"]
-            if stamp(row) > (held["stamp"] or ""):
+            incoming, on_hand = stamp(row), (held["stamp"] or "")
+            # A job the other Mac changed more recently replaces the shop's copy; an older copy never
+            # does. A copy stamped to the very same second is a tie this rule cannot read as newer,
+            # and it goes with the shop's first machine — the counter the day is taken from — because
+            # a same-second stamp is that machine's own write, not a race it lost.
+            replace = incoming > on_hand
+            if not replace and incoming == on_hand and is_origin(address, label):
+                held_fields = held.keys()
+                replace = any(row[c] != held[c] for c in job_writes
+                              if c in held_fields and c in row.keys())
+            if replace:
                 _db.execute("UPDATE jobs SET %s WHERE id = ?"
                             % ", ".join("%s = ?" % c for c in job_writes),
                             tuple(row[c] for c in job_writes) + (held["id"],))
