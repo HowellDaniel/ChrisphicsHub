@@ -225,6 +225,7 @@ TARGETS = {
         "folder": "Chrisphics Hub for Windows",
         "zip": "Chrisphics-Hub-Windows.zip",
         "portable_zip": "Chrisphics-Hub-Windows-portable.zip",
+        "setup": "Chrisphics-Hub-Setup-x64.exe",
         "kind": "win", "arch": "x86_64-pc-windows-msvc",
     },
     "linux-x64": {
@@ -313,13 +314,37 @@ if [ -z "${CHRISPHICS_NO_OPEN:-}" ]; then open "$DEST/%(app)s"; fi
 """
 
 # -------------------------------------------------------------------------- Windows
+#
+# A Windows copy has no application shell of its own — the .bat is the whole launcher — so the
+# question of which book to work in is asked of the engine the bundle carries (`--find-shop`), and
+# the launcher only acts on the answer: a URL opens the shop's one book, nothing at all opens this
+# computer's copy. Asked here rather than written twice because the rule is the same one the Mac's
+# window shell applies, and an address baked into a bundle is a hint, never a fact — a router hands
+# numbers out again, so nothing counts until the shop's own authority signs the answer.
+#
+# `:open` asks Edge or Chrome for an app window, because a counter means an application and not
+# another browser tab; with neither installed the default browser takes the address.
 RUN_BAT_WIN = """@echo off
-rem Open Chrisphics Hub on this computer. Its own records are in %%LOCALAPPDATA%%\\CRISPprint Hub.
+rem Open Chrisphics Hub on this computer. On the shop's Wi-Fi this PC works in the shop's one book,
+rem the same book the other counters write in. Away from it, it opens its own copy of the records.
 setlocal
 set HERE=%%~dp0
 if "%%CHRISPHICS_PORT%%"=="" set CHRISPHICS_PORT=8712
-set SUPPORT=%%LOCALAPPDATA%%\\CRISPprint Hub
+set SUPPORT=%(support)s
 if not exist "%%SUPPORT%%" mkdir "%%SUPPORT%%"
+set CHRISPHICS_SUPPORT=%%SUPPORT%%
+"%%HERE%%runtime\\python.exe" "%%HERE%%app\\server.py" --find-shop > "%%SUPPORT%%\\shop-found.txt" 2>nul
+set SHOP=
+set /p SHOP=<"%%SUPPORT%%\\shop-found.txt"
+if not "%%SHOP%%"=="" (
+  echo The shop answered at %%SHOP%%
+  echo This PC is working in the shop's one book. Nothing is written into a book of its own here.
+  call :open "%%SHOP%%"
+  echo Closing this window changes nothing: the shop's own Mac is what keeps the book open.
+  timeout /t 12 /nobreak >nul
+  goto :eof
+)
+echo No shop book answered on this network, so this PC is opening its own copy of the records.
 rem The first time this is started on the PC, the copy of the shop's book that came in the program
 rem folder is put where this machine keeps its own records — and again on any later start whose book
 rem is still the empty one the engine made, so a PC that was shown the demo first does not stay blank.
@@ -328,29 +353,111 @@ echo Opening Chrisphics Hub at http://127.0.0.1:%%CHRISPHICS_PORT%%/
 echo Records: %%SUPPORT%%\\shop.db
 echo Leave this window open while you work; close it to stop the shop.
 rem Naming the book, instead of letting the engine reach its default, keeps this copy its own shop.
-set CHRISPHICS_SUPPORT=%%SUPPORT%%
 set CHRISPHICS_DB=%%SUPPORT%%\\shop.db
 "%%HERE%%runtime\\python.exe" "%%HERE%%app\\server.py" --port %%CHRISPHICS_PORT%% --shop-copy "%%HERE%%data\\shop.db" %%*
+goto :eof
+
+:open
+set APP_WINDOW=--app=%%~1 --window-size=1280,880
+set BROWSER=%%ProgramFiles(x86)%%\\Microsoft\\Edge\\Application\\msedge.exe
+if not exist "%%BROWSER%%" set BROWSER=%%ProgramFiles%%\\Microsoft\\Edge\\Application\\msedge.exe
+if exist "%%BROWSER%%" (
+  start "" "%%BROWSER%%" %%APP_WINDOW%%
+  exit /b
+)
+set BROWSER=%%ProgramFiles%%\\Google\\Chrome\\Application\\chrome.exe
+if not exist "%%BROWSER%%" set BROWSER=%%ProgramFiles(x86)%%\\Google\\Chrome\\Application\\chrome.exe
+if exist "%%BROWSER%%" (
+  start "" "%%BROWSER%%" %%APP_WINDOW%%
+  exit /b
+)
+start "" %%~1
+exit /b
 """
 
-# The same launcher arranged so the folder itself is the whole shop: nothing is installed and the
-# book stays inside the folder, in data\shop.db, so a USB stick carries the program and its records
-# together. No take-over step is needed: the book the folder carries is the book it opens.
+# The same launcher arranged so the folder itself is the whole shop: nothing is installed and, when no
+# shop answers, the book stays inside the folder in data\shop.db, so a USB stick carries the program
+# and its records together. It still joins the shop's one book when the shop is on the Wi-Fi — a stick
+# taken to the shop works at the shop's counter like any other machine — and the address it found is
+# written in the same folder as the book it fell back to, so the stick remembers the shop too.
 RUN_BAT_WIN_PORTABLE = """@echo off
-rem Open Chrisphics Hub straight out of this folder. Nothing is installed: the program runs from
-rem here, and its book lives here too, in data\\shop.db, so the whole folder - records and all -
-rem can be carried on a USB stick.
+rem Open Chrisphics Hub straight out of this folder. On the shop's Wi-Fi this works in the shop's one
+rem book. With the shop out of reach the program runs from here and its book lives here too, in
+rem data\shop.db, so the whole folder - records and all - can be carried on a USB stick.
 setlocal
 set HERE=%%~dp0
 if "%%CHRISPHICS_PORT%%"=="" set CHRISPHICS_PORT=8712
+set CHRISPHICS_SUPPORT=%%HERE%%data
+"%%HERE%%runtime\\python.exe" "%%HERE%%app\\server.py" --find-shop > "%%HERE%%data\\shop-found.txt" 2>nul
+set SHOP=
+set /p SHOP=<"%%HERE%%data\\shop-found.txt"
+if not "%%SHOP%%"=="" (
+  echo The shop answered at %%SHOP%%
+  echo This folder is working in the shop's one book; nothing is written into data\shop.db.
+  call :open "%%SHOP%%"
+  echo Closing this window changes nothing: the shop's own Mac is what keeps the book open.
+  timeout /t 12 /nobreak >nul
+  goto :eof
+)
+echo No shop book answered on this network, so this folder is opening its own copy of the records.
 echo Opening Chrisphics Hub at http://127.0.0.1:%%CHRISPHICS_PORT%%/
 echo Records: %%HERE%%data\\shop.db
 echo Leave this window open while you work; close it to stop the shop.
 rem Naming the book, instead of letting the engine reach its default, keeps this copy its own shop:
 rem the book that came in the data folder is the one it opens, and everything written goes back there.
-set CHRISPHICS_SUPPORT=%%HERE%%data
 set CHRISPHICS_DB=%%HERE%%data\\shop.db
 "%%HERE%%runtime\\python.exe" "%%HERE%%app\\server.py" --port %%CHRISPHICS_PORT%% %%*
+goto :eof
+
+:open
+set APP_WINDOW=--app=%%~1 --window-size=1280,880
+set BROWSER=%%ProgramFiles(x86)%%\\Microsoft\\Edge\\Application\\msedge.exe
+if not exist "%%BROWSER%%" set BROWSER=%%ProgramFiles%%\\Microsoft\\Edge\\Application\\msedge.exe
+if exist "%%BROWSER%%" (
+  start "" "%%BROWSER%%" %%APP_WINDOW%%
+  exit /b
+)
+set BROWSER=%%ProgramFiles%%\\Google\\Chrome\\Application\\chrome.exe
+if not exist "%%BROWSER%%" set BROWSER=%%ProgramFiles(x86)%%\\Google\\Chrome\\Application\\chrome.exe
+if exist "%%BROWSER%%" (
+  start "" "%%BROWSER%%" %%APP_WINDOW%%
+  exit /b
+)
+start "" %%~1
+exit /b
+"""
+
+# Where each Windows shape keeps its records, in the words its own launcher uses.
+WIN_SUPPORT = "%LOCALAPPDATA%\\CRISPprint Hub"
+WIN_SUPPORT_PORTABLE = "%HERE%data"
+
+# The two choices the Mac keeps in Settings ▸ General, put where a Windows counter can see them named.
+# Without them a PC that once asked for its own book could never say so, and a PC already sitting on
+# its own book could never ask for the shop's again. `support` is the folder that copy's own launcher
+# names, so the choice lands where the launcher will look for it: the stick's data folder is a
+# different shop from the one installed in App Data.
+JOIN_BAT_WIN = """@echo off
+rem Ask for the shop's one book again. This clears the choice made by "Keep this PC's own book" and
+rem looks for the shop the same way the launcher does: an address counts only when the shop's own
+rem certificate answers under it. Then start Chrisphics Hub and it opens on the shop's book.
+setlocal
+set HERE=%%~dp0
+if "%%CHRISPHICS_SUPPORT%%"=="" set CHRISPHICS_SUPPORT=%(support)s
+"%%HERE%%runtime\\python.exe" "%%HERE%%app\\server.py" --join-shop
+echo.
+pause
+"""
+
+OWN_BOOK_BAT_WIN = """@echo off
+rem Keep a book on this PC alone: what is written here stays here, and nothing is asked of the shop's
+rem server. Start Chrisphics Hub after this and it opens this computer's own records. Undo it with
+rem "Join the shop's book" — which never deletes the book this PC built up, only stops using it.
+setlocal
+set HERE=%%~dp0
+if "%%CHRISPHICS_SUPPORT%%"=="" set CHRISPHICS_SUPPORT=%(support)s
+"%%HERE%%runtime\\python.exe" "%%HERE%%app\\server.py" --own-book
+echo.
+pause
 """
 
 INSTALL_CMD_WIN = """@echo off
@@ -490,8 +597,16 @@ MAC_RECORDS = """    They live in "~/Library/Application Support/CRISPprint Hub/
                                       disk
         Use this Mac's own book       leaves the shop on purpose, and the choice survives relaunch"""
 
-WIN_RECORDS = """    They live in "%LOCALAPPDATA%\\CRISPprint Hub\\shop.db" — this user's own copy.
-    Uninstalling leaves that file where it is, so the records outlive the program."""
+WIN_RECORDS = """    They live in "%LOCALAPPDATA%\\CRISPprint Hub\\shop.db" — a book of this PC's own, and the only
+    place anything is written while the shop is out of reach. On the shop's Wi-Fi the shop's one book
+    is opened over the network instead, and this file is left exactly as it is.
+    Uninstalling leaves that file where it is, so the records outlive the program.
+    The two choices are files beside the launcher, and either can be pressed again at any time:
+        "Join the shop's book.bat"     work in the shop's book — what a fresh PC does by itself, and
+                                       what to press when a shop that went away has come back
+        "Keep this PC's own book.bat"  stop asking, and keep this machine's own book even on the
+                                       shop's Wi-Fi. It deletes nothing: the book this PC built up
+                                       stays on disk, and "Join the shop's book" brings it back."""
 
 LINUX_RECORDS = """    They live in the "data" folder inside this one ("data/shop.db"). Copy the folder and the
     records come with it."""
@@ -503,11 +618,19 @@ MAC_OPENING = """    The shop opens in its own window — the app carries the en
     not appear, the shop is still there: open <http://127.0.0.1:8712/> in a browser, and read
     "~/Library/Application Support/CRISPprint Hub/engine.log" for what it said."""
 
-WIN_OPENING = """    A console window opens and the shop appears in your browser at <http://127.0.0.1:8712/>. Keep the
-    console open while you work — closing it closes the shop. If no page appears, type that address
-    into Chrome, Edge or Firefox."""
+WIN_OPENING = """    It asks the shop first. On the shop's Wi-Fi the shop's own Mac answers under its own certificate,
+    and the shop opens in an Edge or Chrome app window at that address — the same book the other
+    counters write in, so an entry made here appears on the others within seconds, and this PC keeps
+    no records of its own while it is online. Away from that Wi-Fi nothing answers, so a console opens,
+    the shop runs on this computer and appears at <http://127.0.0.1:8712/>. Keep the console open while
+    you work — closing it closes the shop. If no page appears, type that address into Chrome, Edge or
+    Firefox."""
 
-LINUX_OPENING = WIN_OPENING.replace("console", "terminal")
+# The Linux launcher starts its own engine and nothing else — the shop's door is wired into the Mac's
+# window shell and the Windows launcher, so this one says only what that folder actually does.
+LINUX_OPENING = """    A terminal window opens and the shop appears in your browser at <http://127.0.0.1:8712/>. Keep the
+    terminal open while you work — closing it closes the shop. If no page appears, type that address
+    into Chrome, Edge or Firefox."""
 
 # What the install opens with. A build made on the shop's Mac hands over the shop's own book, so the
 # first screen shows the shop's figures instead of an empty ledger; a build with nothing to copy — or
@@ -526,9 +649,10 @@ SEEDED_START = """    It starts already full of the shop's records and the shop'
     Mac does not decide who is signed in here. Client messages that had not gone out yet arrive as the
     record they are, with the automatic-send flag let go — so this computer cannot send one client the
     same message twice, and pressing send here still works.
-    What is written here goes into the book named above. On the shop's Wi-Fi a Mac opens the shop's
-    live book instead, so its entries are the shop's; a copy that is not on that Wi-Fi keeps its own,
-    and moving its records across is the "Bring this Mac's entries in…" action described above.
+    What is written here goes into the book named above. On the shop's Wi-Fi a Mac or a Windows PC
+    opens the shop's live book instead, so its entries are the shop's; a copy that is not on that
+    Wi-Fi keeps its own. On a Mac, moving an older book across is the "Bring this Mac's entries in…"
+    action described above; on a PC, the two files named above are the same two choices.
     If this computer already ran a copy of this program that had nothing written in it, opening this
     one puts the shop's records into that empty book — an app that stayed blank after installing the
     shop's copy would look like a demo, and is not one. A book with even one record in it is left
@@ -543,9 +667,12 @@ The same printing-shop records program, arranged to run straight out of this fol
 installed. Put the whole folder on a USB stick, a network drive or any folder on the PC, and start it.
 
 RUN IT
-    Double-click "Start Chrisphics Hub (portable).bat". A console window opens and the shop appears
-    in your browser at <http://127.0.0.1:8712/>. Keep the console open while you work — closing it
-    closes the shop. If no page appears, type that address into Chrome, Edge or Firefox.
+    Double-click "Start Chrisphics Hub (portable).bat". It asks the shop first: on the shop's Wi-Fi the
+    shop's own Mac answers, and this folder opens the shop's one book in an Edge or Chrome app window —
+    the same book the other counters write in, so what is booked here appears on them within seconds.
+    Away from that Wi-Fi nothing answers, so the folder runs its own engine: a console opens and the
+    shop appears in your browser at <http://127.0.0.1:8712/>. Keep the console open while you work —
+    closing it closes the shop. If no page appears, type that address into Chrome, Edge or Firefox.
 
     Nothing is installed and nothing is written outside this folder: no Start Menu entry, no
     Settings > Apps entry, and no trace of the program anywhere but here.
@@ -553,14 +680,16 @@ RUN IT
 YOUR RECORDS
     They live inside this folder, in "data\\shop.db" — the book travels with the folder, so the
     stick you carry holds the shop's records on it, and what is written on this computer stays on
-    this computer.
+    this computer. While the shop itself answers on the Wi-Fi its book is used instead and nothing is
+    written into this file; the two choices are "Join the shop's book.bat" and
+    "Keep this PC's own book.bat" in this folder, and either can be pressed again at any time.
 %(starts)s
 
 IF PORT 8712 IS TAKEN
     %(port_hint)s
 
-This is not the shop's Wi-Fi server: it answers only on this computer, and no password is asked for
-because nothing outside this computer can reach it.
+When this folder runs its own copy it is not the shop's Wi-Fi server: it answers only on this
+computer, and no password is asked for because nothing outside this computer can reach it.
 """
 
 fails = []
@@ -954,6 +1083,40 @@ def shop_addresses():
     return found, ""
 
 
+def carry_shop_trust(folder):
+    """Put the shop's own authority, and the addresses it answers on, inside a bundle — the two files
+    that let a copy on any machine join the shop's one book instead of keeping a book of its own. The
+    authority is what makes the join safe without anybody opening a certificate store by hand, and a
+    certificate this authority did not sign is refused wherever it is offered; the addresses are the
+    shop's Wi-Fi number *and* its `.local` name, because the number is a lease that moves and the
+    name is not. Only a seeded set carries them: a demo build is meant to stand alone.
+
+    Returns verdicts, because a bundle that lost one of these two files is a bundle that will quietly
+    never come online, and that is worth a line in the build report rather than a mystery later."""
+    verdicts = []
+    os.makedirs(folder, exist_ok=True)
+    carried_ca = os.path.join(folder, "shop-ca.pem")
+    if os.path.isfile(SHOP_CA):
+        shutil.copy2(SHOP_CA, carried_ca)
+        os.chmod(carried_ca, 0o644)
+    verdicts.append(("it carries the shop's own certificate, so it may join the shop's one book",
+                     os.path.isfile(carried_ca),
+                     "shop-ca.pem" if os.path.isfile(carried_ca) else "no %s on this Mac" % SHOP_CA))
+    addresses, why = ([], "no certificate to check an address against")
+    if os.path.isfile(carried_ca):
+        addresses, why = shop_addresses()
+    if addresses:
+        write(os.path.join(folder, "shop-urls.txt"),
+              "# The shop's own server, as it answered when this copy was built on %s.\n"
+              "# A number is a lease: if none of these answers, the launcher looks for the shop on "
+              "the\n# Wi-Fi it is on and accepts only a server this certificate signed.\n"
+              % SEEDING["when"] + "\n".join(addresses) + "\n")
+        SEEDING["addresses"] = addresses
+    verdicts.append(("and the shop's addresses on its Wi-Fi, so nobody has to type one",
+                     bool(addresses), "; ".join(addresses) if addresses else why))
+    return verdicts
+
+
 def build(key):
     target = TARGETS[key]
     bundle = os.path.join(DIST, target["folder"])
@@ -1009,22 +1172,12 @@ def build(key):
         icns = make_icns(resources)
         note("the app carries the shop's own icon", os.path.getsize(icns) > 10_000,
              "%.0f KB .icns" % (os.path.getsize(icns) / 1024.0))
-        # What lets this copy join the shop's one book instead of keeping a book of its own. Only a
-        # seeded set carries them: a demo build is meant to stand alone.
+        # What lets this copy join the shop's one book instead of keeping a book of its own. The
+        # Mac's window shell reads these two from the app's Resources folder; a Windows copy reads
+        # them from beside its engine.
         if SEEDING["path"]:
-            carried_ca = os.path.join(resources, "shop-ca.pem")
-            if os.path.isfile(SHOP_CA):
-                shutil.copy2(SHOP_CA, carried_ca)
-                os.chmod(carried_ca, 0o644)
-            addresses, why = shop_addresses()
-            if addresses:
-                write(os.path.join(resources, "shop-urls.txt"), "\n".join(addresses) + "\n")
-                SEEDING["addresses"] = addresses
-            note("    and it carries the shop's own certificate, so it may join the shop's one book",
-                 os.path.isfile(carried_ca), "shop-ca.pem" if os.path.isfile(carried_ca)
-                 else "no %s on this Mac" % SHOP_CA)
-            note("    and the shop's addresses on its Wi-Fi, so nobody has to type one",
-                 bool(addresses), "; ".join(addresses) if addresses else why)
+            for label, held, detail in carry_shop_trust(resources):
+                note("    %s" % label, held, detail)
         run_name, install_name = "Start Chrisphics Hub.command", "Install Chrisphics Hub.command"
         write(os.path.join(bundle, run_name), RUN_SH_MAC % {"app": MAC_APP}, mode=0o755)
         write(os.path.join(bundle, install_name),
@@ -1044,18 +1197,35 @@ def build(key):
         prefix = "app"
         run_name, install_name = "Start Chrisphics Hub.bat", "Install Chrisphics Hub.cmd"
         command = [os.path.join(bundle, run_name)]
-        write(os.path.join(bundle, run_name), RUN_BAT_WIN % {}, newline="\r\n")
+        write(os.path.join(bundle, run_name), RUN_BAT_WIN % {"support": WIN_SUPPORT},
+              newline="\r\n")
         write(os.path.join(bundle, "Start Chrisphics Hub (portable).bat"),
-              RUN_BAT_WIN_PORTABLE % {}, newline="\r\n")
+              RUN_BAT_WIN_PORTABLE % {"support": WIN_SUPPORT_PORTABLE},
+              newline="\r\n")
+        write(os.path.join(bundle, "Join the shop's book.bat"),
+              JOIN_BAT_WIN % {"support": WIN_SUPPORT}, newline="\r\n")
+        write(os.path.join(bundle, "Keep this PC's own book.bat"),
+              OWN_BOOK_BAT_WIN % {"support": WIN_SUPPORT}, newline="\r\n")
         write(os.path.join(bundle, install_name), INSTALL_CMD_WIN, newline="\r\n")
         write(os.path.join(bundle, "Uninstall Chrisphics Hub.cmd"), UNINSTALL_CMD_WIN, newline="\r\n")
         write(os.path.join(bundle, "install.ps1"), INSTALL_PS1_WIN % {"stamp": git_stamp()},
               newline="\r\n")
         make_ico(png_bytes(256), os.path.join(bundle, "Chrisphics Hub.ico"))
+        # Windows has no window shell to do this in, so the trust travels beside the engine the .bat
+        # asks: the shop's authority, and the addresses it was answering on when the bundle was built.
+        # A PC that gets none of this is a PC that can only ever keep its own book — which is exactly
+        # the copy that "would not come online".
+        if SEEDING["path"]:
+            trust = carry_shop_trust(os.path.join(bundle, "app"))
+            for label, held, detail in trust:
+                note("  %s" % label, held, detail)
         records, install_hint = WIN_RECORDS, (
-            "Double-click \"Install Chrisphics Hub.cmd\". No admin rights are needed: it puts the "
-            "program in your own App Data folder, an icon in the Start Menu and on the Desktop, and "
-            "a line in Settings ▸ Apps so it uninstalls like anything else.")
+            "Double-click \"Chrisphics-Hub-Setup-x64.exe\" — the installer beside this folder. It "
+            "asks Windows to trust the shop's own certificate, puts the program in your own App Data "
+            "folder with an icon in the Start Menu and on the Desktop, and leaves a line in "
+            "Settings ▸ Apps so it uninstalls like anything else. No admin rights are needed.\n"
+            "    \"Install Chrisphics Hub.cmd\" does the same job from this folder, for a PC that "
+            "cannot run the .exe.")
         opening = WIN_OPENING
         port_hint = 'set CHRISPHICS_PORT=8801 && "Start Chrisphics Hub.bat"'
     else:
@@ -1183,7 +1353,9 @@ def build(key):
                  'installed.' % MAC_APP) if kind == "mac" else
                 ('"Start Chrisphics Hub.bat" runs it and keeps the records in App Data. '
                  '"Start Chrisphics Hub (portable).bat" runs it with the records kept inside this '
-                 'folder instead, so the whole folder — book included — can live on a USB stick.')
+                 'folder instead, so the whole folder — book included — can live on a USB stick. '
+                 '"Join the shop\'s book.bat" and "Keep this PC\'s own book.bat" change its mind '
+                 'about which of the two books it works in.')
                 if kind == "win" else '"%s"' % run_name)
     starts = (SEEDED_START % (SEEDING["when"], SEEDING["from"])) if SEEDING["path"] else BLANK_START
     write(os.path.join(bundle, "README.txt"), README_TXT % {
@@ -1240,6 +1412,12 @@ def build(key):
             shutil.copytree(os.path.join(bundle, "data"), os.path.join(portable, "data"))
         for item in ("Start Chrisphics Hub (portable).bat", "Chrisphics Hub.ico"):
             shutil.copy2(os.path.join(bundle, item), os.path.join(portable, item))
+        # The same two choices, pointed at the folder's own data instead of App Data: a stick that
+        # joined the shop this morning must not write its choice into the PC it was borrowed from.
+        write(os.path.join(portable, "Join the shop's book.bat"),
+              JOIN_BAT_WIN % {"support": WIN_SUPPORT_PORTABLE}, newline="\r\n")
+        write(os.path.join(portable, "Keep this PC's own book.bat"),
+              OWN_BOOK_BAT_WIN % {"support": WIN_SUPPORT_PORTABLE}, newline="\r\n")
         starts = (SEEDED_START % (SEEDING["when"], SEEDING["from"])) if SEEDING["path"] else BLANK_START
         write(os.path.join(portable, "README.txt"), PORTABLE_README_WIN % {
             "starts": starts,
@@ -1272,8 +1450,323 @@ def build(key):
                     taken.write(archive.read(entry[0]) if entry else b"")
             label, holds, detail = book_carries(where, "")
             note("  and the portable zip holds the shop's book too", holds, detail)
+        for label, held, detail in win_setup_exe(bundle, target):
+            note("  %s" % label, held, detail)
     return {"bundle": bundle, "kind": kind, "launcher": launcher_path, "server": server,
             "interpreter": interpreter, "runtime": runtime, "command": command}
+
+
+# ------------------------------------------------------------------- a Windows setup .exe
+#
+# A folder a person has to read instructions for is not what "install it" means on Windows. What they
+# expect is one file that opens a wizard, installs, leaves an entry in Settings ▸ Apps, and can be
+# taken off again from there — the shape every other Windows application arrives in. The compiler that
+# makes that file is NSIS's `makensis`, and it is the one Windows tool that genuinely cross-builds
+# here: it runs on this Mac and writes a real Windows .exe, no virtual machine and no Windows box.
+# NSIS itself is built from source (it is portable C++); the small Windows bootstrap programs it
+# stitches onto the front of an installer — the `Stubs` folder — come from the matching official NSIS
+# release, because those are Windows binaries and cannot be made without a Windows cross-compiler.
+#
+# The install is deliberately per-user: `%LOCALAPPDATA%\Programs`, shortcuts in this user's Start Menu
+# and Desktop, and the uninstall key under HKCU. Nothing needs admin rights, which is the same deal
+# the shop's Mac install makes by going into a home folder, and it is what lets a counter install the
+# shop without the owner's Windows password.
+#
+# The one thing a folder cannot do and a setup should: make Windows *trust the shop's own
+# certificate*. That is the difference between the shop's address opening and a browser stopping a
+# cashier with "you can't get there" — which is how a portable copy that had everything else right
+# still looked like it "wouldn't come online". `certutil`, which ships with Windows, adds the shop's
+# authority to this user's Trusted Root store, and the uninstall takes exactly that one certificate
+# out again by its serial number. Windows asks the person to say Yes, because adding a root authority
+# is a decision only a person should make; the wizard says plainly why it is asking.
+
+# A setup .exe smaller than this did not take the interpreter with it: the Windows CPython alone is
+# some 40 MB unpacked, so anything under a few megabytes compressed is a wizard with no shop in it.
+SETUP_MIN_BYTES = 5_000_000
+
+NSI_TEMPLATE = r"""Unicode true
+!include MUI2.nsh
+!include LogicLib.nsh
+!include x64.nsh
+!include FileFunc.nsh
+
+Name "Chrisphics Hub"
+!define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\ChrisphicsHub"
+!define RUNBAT "$INSTDIR\Start Chrisphics Hub.bat"
+OutFile "@@OUT@@"
+InstallDir "$LOCALAPPDATA\Programs\Chrisphics Hub"
+InstallDirRegKey HKCU "${UNINSTKEY}" "InstallLocation"
+RequestExecutionLevel user
+SetCompressor /SOLID lzma
+XPStyle on
+VIProductVersion "@@VIPRODUCT@@"
+VIAddVersionKey /LANG=1033 "ProductName" "Chrisphics Hub"
+VIAddVersionKey /LANG=1033 "ProductVersion" "@@VERSION@@"
+VIAddVersionKey /LANG=1033 "CompanyName" "CRISPprint Ghana"
+VIAddVersionKey /LANG=1033 "FileDescription" "Chrisphics Hub setup"
+VIAddVersionKey /LANG=1033 "FileVersion" "@@VERSION@@"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "(c) CRISPprint Ghana"
+
+!define MUI_ICON "@@ICO@@"
+!define MUI_UNICON "@@ICO@@"
+!define MUI_WELCOMEPAGE_TITLE "Chrisphics Hub on this PC"
+!define MUI_WELCOMEPAGE_TEXT "The printing shop's records and accounts, installed for this user only.$\r$\n$\r$\n\
+On the shop's Wi-Fi this PC opens the shop's one book — the same book the other counters write in, \
+so an entry made here appears on the others within seconds. Away from it, it opens its own copy of \
+the records it came with, and keeps working.$\r$\n$\r$\n\
+Nothing needs administrator rights: the program goes in your own App Data folder, with an icon in the \
+Start Menu and on the Desktop, and a line in Settings > Apps so it uninstalls like anything else.$\r$\n$\r$\n\
+It will also ask Windows to trust the shop's own certificate. That is what lets the shop's address \
+open without a browser warning; say Yes, and the shop's own Mac is the only machine that holds that \
+certificate's key."
+!insertmacro MUI_PAGE_WELCOME
+!define MUI_DIRECTORYPAGE_TEXT_TOP "This goes into your own App Data folder, for this user. \
+Uninstalling it leaves your records where they are."
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!define MUI_FINISHPAGE_RUN "${RUNBAT}"
+!define MUI_FINISHPAGE_RUN_FUNCTION OpenTheShop
+!define MUI_FINISHPAGE_RUN_TEXT "Open Chrisphics Hub now"
+!define MUI_FINISHPAGE_TEXT "Start it any time from the Desktop or the Start Menu.$\r$\n$\r$\n\
+On the shop's Wi-Fi it opens the shop's one book. If the shop did not answer, it opened its own copy \
+instead — the two choices are the files named “Join the shop's book” and “Keep this PC's own book” \
+in the program folder."
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
+
+Function .onInit
+  ${IfNot} ${RunningX64}
+    MessageBox MB_OK|MB_ICONEXCLAMATION \
+      "This is the 64-bit setup for a 64-bit version of Windows. It will still install on this PC, \
+      but the shop runs slower on a 32-bit Windows."
+  ${EndIf}
+FunctionEnd
+
+Function OpenTheShop
+  ExecShell "open" "${RUNBAT}"
+FunctionEnd
+
+Section "Chrisphics Hub" SecMain
+  SectionIn RO
+  SetRegView 64
+  SetOutPath "$INSTDIR"
+  File "@@BUNDLE@@/Chrisphics Hub.ico"
+  File "@@BUNDLE@@/README.txt"
+  File "@@BUNDLE@@/Start Chrisphics Hub.bat"
+  File "@@BUNDLE@@/Start Chrisphics Hub (portable).bat"
+  File "@@BUNDLE@@/Join the shop's book.bat"
+  File "@@BUNDLE@@/Keep this PC's own book.bat"
+  SetOutPath "$INSTDIR\app"
+  File /r "@@BUNDLE@@/app/*"
+  SetOutPath "$INSTDIR\runtime"
+  File /r "@@BUNDLE@@/runtime/*"
+  SetOutPath "$INSTDIR\data"
+  File /r "@@BUNDLE@@/data/*"
+
+  WriteUninstaller "$INSTDIR\Uninstall Chrisphics Hub.exe"
+
+  CreateShortCut "$SMPROGRAMS\Chrisphics Hub.lnk" "${RUNBAT}" "$INSTDIR" \
+    "$INSTDIR\Chrisphics Hub.ico" 0 SW_SHOWNORMAL
+  CreateShortCut "$DESKTOP\Chrisphics Hub.lnk" "${RUNBAT}" "$INSTDIR" \
+    "$INSTDIR\Chrisphics Hub.ico" 0 SW_SHOWNORMAL
+
+  ${If} ${FileExists} "$INSTDIR\app\shop-ca.pem"
+    DetailPrint "Asking Windows to trust the shop's own certificate"
+    nsExec::ExecToStack 'certutil -addstore -user Root "$INSTDIR\app\shop-ca.pem"'
+    Pop $0
+    Pop $1
+    ${If} $0 == 0
+      DetailPrint "Windows trusts the shop now: its address opens without a warning"
+    ${Else}
+      DetailPrint "Windows did not take it. The shop still opens, but the browser will warn once"
+    ${EndIf}
+  ${Else}
+    DetailPrint "This copy carries no shop certificate, so it keeps a book of its own"
+  ${EndIf}
+
+  WriteRegStr HKCU "${UNINSTKEY}" "DisplayName" "Chrisphics Hub"
+  WriteRegStr HKCU "${UNINSTKEY}" "DisplayVersion" "@@VERSION@@"
+  WriteRegStr HKCU "${UNINSTKEY}" "Publisher" "CRISPprint Ghana"
+  WriteRegStr HKCU "${UNINSTKEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "${UNINSTKEY}" "DisplayIcon" "$INSTDIR\Chrisphics Hub.ico"
+  WriteRegStr HKCU "${UNINSTKEY}" "UninstallString" \
+    '"$INSTDIR\Uninstall Chrisphics Hub.exe" /S'
+  WriteRegDWORD HKCU "${UNINSTKEY}" "NoModify" 1
+  WriteRegDWORD HKCU "${UNINSTKEY}" "NoRepair" 1
+  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+  IntFmt $0 "0x%08X" $0
+  WriteRegDWORD HKCU "${UNINSTKEY}" "EstimatedSize" "$0"
+SectionEnd
+
+Section "Uninstall"
+  SetRegView 64
+  nsExec::ExecToLog 'certutil -delstore -user Root @@CA_SERIAL@@'
+  Delete "$SMPROGRAMS\Chrisphics Hub.lnk"
+  Delete "$DESKTOP\Chrisphics Hub.lnk"
+  DeleteRegKey HKCU "${UNINSTKEY}"
+  RMDir /r "$INSTDIR"
+  MessageBox MB_OK "Chrisphics Hub is off this PC. The records it wrote stayed in \
+%LOCALAPPDATA%\CRISPprint Hub, and the shop's own book was never on this computer."
+SectionEnd
+"""
+
+
+def version_quad():
+    """The version Windows stamps into a file's Properties tab: four numbers, no more, no fewer.
+    The shop counts its copies as `1.7`, so the blanks are filled in — but a Windows setup that
+    carries anything else cannot be opened by Windows at all."""
+    parts = [p for p in re.split(r"[.\-+]", version_number()) if p.isdigit()]
+    return ".".join((parts + ["0", "0", "0", "0"])[:4])
+
+
+def find_makensis():
+    """The NSIS compiler, if this Mac has one. Built from source once and left in ~/tools/nsis-3.10 —
+    it is a Mac binary that writes Windows binaries, and there is nothing to install on the machine
+    that receives the setup it makes."""
+    for candidate in (os.environ.get("CHRISPHICS_MAKENSIS"),
+                      os.path.expanduser("~/tools/nsis-3.10/bin/makensis"),
+                      "/opt/homebrew/bin/makensis", "/usr/local/bin/makensis",
+                      shutil.which("makensis")):
+        if candidate and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def ca_identity(path):
+    """Whoever the shop's authority is, by name and serial. The serial is what the uninstall hands
+    Windows to delete again: a store shared with every other root certificate a PC trusts is left
+    alone except for the one certificate this setup put in it."""
+    try:
+        said = subprocess.run(["openssl", "x509", "-in", path, "-noout", "-serial", "-subject"],
+                              capture_output=True, text=True, check=True).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return "", ""
+    serial = re.search(r"serial=([0-9A-Fa-f]+)", said)
+    subject = re.search(r"subject=(.*)", said)
+    return (serial.group(1) if serial else "", subject.group(1).strip() if subject else "")
+
+
+def win_setup_exe(bundle, target):
+    """Compile the Windows folder into one double-clickable setup .exe, and say what came out."""
+    verdicts = []
+    makensis = find_makensis()
+    setup = os.path.join(DIST, target["setup"])
+    if not makensis:
+        return [("the setup .exe a Windows PC double-clicks", False,
+                 "no makensis here — build NSIS from source, or use \"Install Chrisphics Hub.cmd\" "
+                 "in the zip")]
+    if os.path.exists(setup):
+        os.remove(setup)
+    serial, subject = ca_identity(SHOP_CA) if os.path.isfile(SHOP_CA) else ("", "")
+    version = version_number()
+    nsi = os.path.join(scratch(), "Chrisphics-Hub-Setup.nsi")
+    write(nsi, NSI_TEMPLATE.replace("@@OUT@@", setup).replace(
+        "@@BUNDLE@@", bundle.replace("\\", "/")).replace(
+        "@@ICO@@", os.path.join(bundle, "Chrisphics Hub.ico")).replace(
+        "@@VERSION@@", version).replace(
+        "@@VIPRODUCT@@", version_quad()).replace(
+        "@@CA_SERIAL@@", serial or "0"))
+    said = subprocess.run([makensis, "-V4", nsi], capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL)
+    # Every file the compiler says it took is the payload, named where it will land inside the
+    # installed folder — the installer's own account of what is in it, not the folder's.
+    packed = packed_files(said.stdout + said.stderr)
+    held = os.path.isfile(setup) and os.path.getsize(setup) > SETUP_MIN_BYTES
+    verdicts.append(("the setup .exe a Windows PC double-clicks", held,
+                     "%.1f MB by %s" % (os.path.getsize(setup) / 1048576.0, setup) if held else
+                     "makensis said nothing" if not (said.stdout + said.stderr).strip() else
+                     " | ".join((said.stdout + said.stderr).strip().splitlines()[-3:])))
+    verdicts.append(("and it asks Windows to trust %s" % (subject or "the shop"), bool(serial),
+                     "serial %s, removed again by the uninstall" % serial if serial
+                     else "no shop certificate to describe"))
+    if held:
+        # The script the wizard was compiled from travels beside it. "What does this setup actually do
+        # to my PC?" deserves an answer a person can read without a Windows machine in front of them.
+        audit = write(os.path.join(DIST, os.path.splitext(target["setup"])[0] + ".nsi"),
+                      open(nsi, encoding="utf-8").read())
+        verdicts.append(("  and the wizard's own script is left beside it to read",
+                         os.path.isfile(audit), os.path.basename(audit)))
+        verdicts.extend(verify_setup_exe(setup, packed, open(nsi, encoding="utf-8").read(), serial))
+    return verdicts
+
+
+def packed_files(said):
+    """Read makensis's own manifest out of its chatter: each `File:` line names one file it took,
+    under the `SetOutPath:` it was writing to at the moment. A wizard that showed a page but packed
+    no engine reads here as an installer with nothing in it, which is the failure worth catching."""
+    files, folder = {}, ""
+    for line in said.splitlines():
+        moved = re.match(r'SetOutPath: "([^"]*)"$', line)
+        if moved:
+            under = re.sub(r"^\$INSTDIR\\?", "", moved.group(1), flags=re.I).replace("\\", "/")
+            folder = (under + "/") if under and under != "$INSTDIR" else ""
+            continue
+        took = re.match(r'File: "([^"]*)" (\d+) bytes$', line)
+        if took:
+            files[(folder + took.group(1)).replace("\\", "/").lower()] = int(took.group(2))
+    return files
+
+
+def verify_setup_exe(setup, packed, script, serial):
+    """Read the finished .exe back and prove it is what a Windows PC will run: the header a Windows
+    kernel looks for, the NSIS payload stamped into it, and the files the compiler says it took.
+    A file that is merely large is not an installer."""
+    head = open(setup, "rb").read(4096)
+    verdicts = []
+    dos = head[:2] == b"MZ"
+    pe_at = int.from_bytes(head[0x3C:0x40], "little") if dos and len(head) > 0x40 else 0
+    machine = int.from_bytes(head[pe_at + 4:pe_at + 6], "little") if pe_at else 0
+    verdicts.append(("the .exe is a real Windows program", dos and head[pe_at:pe_at + 4] == b"PE\0\0",
+                     "MS-DOS header, PE at 0x%x, machine 0x%04x (a 32-bit wizard on a 64-bit shop)"
+                     % (pe_at, machine)))
+    body = open(setup, "rb").read()
+    nulls = b"NullsoftInst"
+    verdicts.append(("  and it is an NSIS installer with this version stamped in it",
+                     nulls in body,
+                     "NullsoftInst signature at 0x%x" % body.find(nulls) if nulls in body
+                     else "no NSIS signature — the stub was not stitched on"))
+    # Sizes, not just names: a wizard that opens, installs and then has nothing to run is the failure
+    # worth catching. The interpreter is a small `python.exe` in front of a multi-megabyte `python3xx`
+    # library, so what is weighed is the whole runtime folder the compiler says it read, not one file.
+    wanted = {"app/server.py": 100_000, "app/shop-ca.pem": 400, "runtime/python.exe": 1,
+              "data/shop.db": 1, "start chrisphics hub.bat": 1, "join the shop's book.bat": 1,
+              "readme.txt": 1}
+    short = sorted(name for name, least in wanted.items()
+                   if packed.get(name.lower(), -1) < least)
+    runtime_mb = sum(size for name, size in packed.items() if name.startswith("runtime/")) / 1048576.0
+    if runtime_mb < 50:
+        short.append("a runtime worth calling one (%.1f MB)" % runtime_mb)
+    verdicts.append(("  and it packs the engine, the shop's certificate and the launchers",
+                     not short, "%d files: %.1f MB of interpreter, %d KB of engine, %s of shop "
+                               "certificate%s" % (
+                         len(packed), runtime_mb, packed.get("app/server.py", 0) // 1024,
+                         "%d B" % packed.get("app/shop-ca.pem", 0),
+                         " — short of %s" % ", ".join(short) if short else "")))
+    # What makes it an installer rather than a zip: pages a person clicks through, a line in
+    # Settings > Apps with an uninstaller behind it, icons where icons go, no administrator rights
+    # asked for, and the shop's authority put into this user's own certificate store — and taken out
+    # again by its serial number, so the uninstall leaves every other root certificate alone.
+    shape = {"a wizard with pages": "MUI_PAGE_WELCOME",
+             "a folder to choose": "MUI_PAGE_DIRECTORY",
+             "progress while it copies": "MUI_PAGE_INSTFILES",
+             "a finish page that opens the shop": "MUI_FINISHPAGE_RUN",
+             "a line in Settings > Apps": r"Uninstall\ChrisphicsHub",
+             "an uninstaller to go with it": "WriteUninstaller",
+             "a Start Menu icon": "$SMPROGRAMS",
+             "a Desktop icon": "$DESKTOP",
+             "no administrator rights asked": "RequestExecutionLevel user",
+             "the 64-bit view of the registry": "SetRegView 64",
+             "a word to a PC that is not 64-bit": "${RunningX64}",
+             "the shop's authority trusted": "certutil -addstore -user Root",
+             "and that trust taken back out": "certutil -delstore -user Root %s" % serial}
+    gaps = [name for name, marker in shape.items() if marker not in script]
+    verdicts.append(("  and it installs the way a Windows program is expected to", not gaps,
+                     "%d of %d marks, read out of the wizard's own script" % (
+                         len(shape) - len(gaps), len(shape)) +
+                     ("" if not gaps else " — no %s" % ", ".join(gaps))))
+    return verdicts
 
 
 def RUNTIME_BIN(kind):
