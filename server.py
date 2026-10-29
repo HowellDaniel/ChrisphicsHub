@@ -316,6 +316,202 @@ def take_in_shop_copy(source, target=None):
         if moved else "")
 
 
+# ------------------------------------------------------------------ finding the shop's one book
+#
+# A copy that can reach the shop's always-on server trades its own book for the shop's, so every
+# counter writes into one ledger. The Mac's window shell has asked this question in Objective-C since
+# the first hand-out; a Windows PC and a Linux folder have no shell of their own — a .bat and a
+# .command start whatever they are told to — so they could never ask it, and came online never. The
+# answer lives here instead, in the one file every bundle carries, so a launcher on any machine asks
+# the same question with the same rules and gets the same answer.
+#
+# The rules are the shell's, unchanged: an address is the shop only when it answers /healthz with the
+# shop's own "ok", over TLS, under a certificate the shop's authority signed and nothing else. A Wi-Fi
+# number is a lease, and a lease moves — the shop has been at .14, .19, .20 and .24 — so the number
+# baked into a bundle at build time is a hint, never a fact, and a stranger sitting on it is refused
+# by the certificate rather than trusted by the address. When every remembered address is stale, the
+# copy looks for the shop on the wire it is connected to, and a server that does not hold the shop's
+# certificate is not the shop however it answers.
+
+SHOP_DOOR = 8834
+ONLINE_FILE = "shop-online.txt"
+OWN_BOOK_FLAG = "own-book.flag"
+
+
+def counter_folder():
+    """Where this computer keeps its own records — so the address it joined, and the choice to keep
+    its own book, sit beside the book they describe rather than in a registry or a preference file
+    the engine would have to know the name of on each machine."""
+    return SUPPORT
+
+
+def shop_authority():
+    """The shop's own certificate authority: the copy a bundle carries, or the one mkcert made on the
+    Mac that built it. Nothing outside these is a shop, and a bundle with no authority in it is a
+    bundle that can only ever keep its own book."""
+    for path in (os.path.join(ROOT, "shop-ca.pem"),
+                 os.path.expanduser("~/Library/Application Support/mkcert/rootCA.pem")):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def shop_answers(base, ca, wait=1.2, port=SHOP_DOOR):
+    """True when this address is the shop: the answer must come back under the shop's own authority,
+    on the URL's own host name, and say "ok". A timeout, a refused port, a certificate from anywhere
+    else and a page that is not the shop all answer the same way — it is not the shop."""
+    parsed = urlparse(base)
+    host = parsed.hostname or ""
+    if not host:
+        return False
+    url = "https://%s:%d/healthz" % ("[%s]" % host if ":" in host else host, parsed.port or port)
+    try:
+        context = ssl.create_default_context(cafile=ca)
+        request = urllib.request.Request(url, headers={"User-Agent": "Chrisphics counter"})
+        with urllib.request.urlopen(request, context=context, timeout=wait) as answer:
+            return answer.status == 200 and b"ok" in answer.read(256)
+    except Exception:
+        return False
+
+
+def shop_urls(tail, port=SHOP_DOOR):
+    """One line per address in a file the bundle carries — a full URL, or a bare host name turned
+    onto the shop's door. A comment line is allowed, and so is a file that is not there."""
+    path = os.path.join(ROOT, tail)
+    if not os.path.isfile(path):
+        return []
+    try:
+        lines = open(path, encoding="utf-8", errors="replace").read().splitlines()
+    except OSError:
+        return []
+    found = []
+    for line in lines:
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        if not text.startswith("https://"):
+            text = "https://%s:%d/" % (text, port)
+        if not text.endswith("/"):
+            text += "/"
+        if text not in found:
+            found.append(text)
+    return found
+
+
+def joined_shop():
+    """The address this computer joined last time it could reach the shop. Kept so a counter on the
+    shop's Wi-Fi does not have to rediscover the shop every morning, and retried even when the shop
+    cannot be reached — a shop Mac that is asleep is still the shop the counter belongs to."""
+    path = os.path.join(counter_folder(), ONLINE_FILE)
+    try:
+        saved = open(path, encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+    return saved if saved.startswith("https://") else ""
+
+
+def remember_shop(url):
+    if joined_shop() == url:
+        return
+    try:
+        os.makedirs(counter_folder(), exist_ok=True)
+        with open(os.path.join(counter_folder(), ONLINE_FILE), "w", encoding="utf-8") as fh:
+            fh.write(url + "\n")
+    except OSError:
+        pass  # a copy that cannot write down the shop still found it, and can open it for today
+
+
+def own_book_chosen():
+    return os.path.isfile(os.path.join(counter_folder(), OWN_BOOK_FLAG))
+
+
+def choose_own_book(on):
+    """Say that this computer keeps a book of its own, or take the choice back. Written as a file
+    beside its book rather than in a preference store, because the .bat, the .command and this engine
+    all have to read the same answer without any of them owning a settings format."""
+    path = os.path.join(counter_folder(), OWN_BOOK_FLAG)
+    os.makedirs(counter_folder(), exist_ok=True)
+    if on:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("This computer keeps its own book. Delete this file to join the shop again.\n")
+        return "This computer will keep its own book. Delete %s to join the shop again." % path
+    if os.path.exists(path):
+        os.remove(path)
+        return "This computer will look for the shop's book again."
+    return "This computer already keeps looking for the shop's book."
+
+
+def local_networks():
+    """The /24s this computer is plugged into. `getaddrinfo` on its own name is the portable way to
+    ask, and a machine on more than one network — Wi-Fi and a cable — is searched on each of them."""
+    nets = []
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return nets
+    for info in infos:
+        address = info[4][0]
+        if address.startswith("127.") or address in ("0.0.0.0",):
+            continue
+        net = ".".join(address.split(".")[:3])
+        if net not in nets:
+            nets.append(net)
+    return nets
+
+
+def sweep_for_shop(ca, port=SHOP_DOOR, seconds=6.0, reach=0.35):
+    """The shop's number, looked for on the wire. Only reached when every remembered address is
+    stale — which is what a moved lease does to a bundle built before it moved. Every number in the
+    /24 is asked at once, briefly, and the certificate decides: a printer, a router or a neighbour's
+    NAS answering on 8834 is not the shop because the shop's authority did not sign it."""
+    from concurrent.futures import ThreadPoolExecutor
+    hosts = ["%s.%d" % (net, last) for net in local_networks() for last in range(1, 255)]
+    if not hosts:
+        return ""
+    deadline = time.time() + seconds
+    with ThreadPoolExecutor(max_workers=64) as pool:
+        futures = {pool.submit(shop_answers, "https://%s:%d/" % (h, port), ca, reach): h for h in hosts}
+        for future in futures:
+            if time.time() > deadline:
+                break
+            if future.result():
+                for other in futures:
+                    other.cancel()
+                return "https://%s:%d/" % (futures[future], port)
+    return ""
+
+
+def find_shop(remember=True):
+    """The shop's live book, if this computer can reach it — tried in the order that costs least:
+    the address the counter named, the one it joined last, and the ones the bundle was built with.
+    The build writes both the shop's Wi-Fi number and its `.local` name into that list, because a
+    number is a lease and a name outlives it."""
+    ca = shop_authority()
+    if not ca:
+        return ""
+    port = int(os.environ.get("CHRISPHICS_SHOP_PORT") or SHOP_DOOR)
+    named = (os.environ.get("CHRISPHICS_SHOP_URL") or "").strip()
+    saved = joined_shop()
+    candidates = ([named] if named else []) + ([saved] if saved else [])
+    candidates += shop_urls("shop-urls.txt", port)
+    seen, ordered = set(), []
+    for url in candidates:
+        if url not in seen:
+            seen.add(url)
+            ordered.append(url)
+    for url in ordered:
+        if shop_answers(url, ca, 1.2, port):
+            if remember:
+                remember_shop(url)
+            return url
+    # Nothing remembered answers — which is what a moved lease, or a PC whose mDNS is blocked, does
+    # to a bundle built before it. So ask the wire this computer is on, and let the certificate say.
+    found = sweep_for_shop(ca, port)
+    if found and remember:
+        remember_shop(found)
+    return found
+
+
 def connect(path=None):
     global _db, DB_PATH
     if path:
@@ -7513,7 +7709,31 @@ def main():
                     help="let the Mac sleep even when other devices can reach the book")
     ap.add_argument("--backup", action="store_true",
                     help="write a checked, tidied copy of the book into the backups folder and exit")
+    ap.add_argument("--find-shop", action="store_true",
+                    help="print the shop's live book if this computer can reach it, and exit. 0 found, "
+                         "1 not reachable, 2 this computer was told to keep its own book.")
+    ap.add_argument("--join-shop", action="store_true",
+                    help="stop keeping a book of this computer's own, then look for the shop's")
+    ap.add_argument("--own-book", action="store_true",
+                    help="tell this computer to keep its own book whatever the Wi-Fi offers")
     args = ap.parse_args()
+    if args.own_book:
+        print(choose_own_book(True))
+        return
+    if args.join_shop:
+        print(choose_own_book(False))
+        args.find_shop = True
+    if args.find_shop:
+        if own_book_chosen():
+            print("This computer keeps a book of its own.", file=sys.stderr)
+            raise SystemExit(2)
+        shop = find_shop()
+        if shop:
+            print(shop)
+            return
+        # Nothing to print on stdout: a launcher decides what to do next by whether it got a URL.
+        print("No shop book answered under the shop's own certificate.", file=sys.stderr)
+        raise SystemExit(1)
     if args.shop_copy:
         # Before connect(): opening a book that is not there yet would create an empty one, and an
         # empty book is exactly what this step is allowed to replace — so the question has to be
