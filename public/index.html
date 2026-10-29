@@ -23,6 +23,17 @@
      the shop's clock is the only look there is, and nothing is stored to read. */
   var h = new Date().getHours();
   document.documentElement.dataset.theme = (h < 8 || h >= 17) ? "dark" : "light";
+  /* The paper and the size of the words this computer asked for, set before the first paint for the
+     same reason the theme is: a screen that shows plain paper for a second and then puts the shop's
+     wallpaper on is the flash this block exists to prevent. Nothing is written when the computer has
+     never asked — which is also how the Mac's own app window keeps its native Settings ▸ Appearance
+     in charge: it injects its own answer here, and this script has nothing of its own to say. */
+  try {
+    var bg = localStorage.getItem('crispprint-background');
+    if (bg) document.documentElement.dataset.bg = bg;
+    var size = localStorage.getItem('crispprint-text-size');
+    if (size) document.documentElement.style.setProperty('--text-scale', size);
+  } catch (e) { /* a private window keeps no paper of its own */ }
 })();
 </script>
 </head>
@@ -48,6 +59,7 @@
       <a class="navlink" href="#/expenses" data-view="expenses">Expenses</a>
       <a class="navlink" href="#/reports" data-view="reports">Reports</a>
       <a class="navlink" href="#/shop" data-view="shop">Shop &amp; devices</a>
+      <a class="navlink" href="#/settings" data-view="settings">Settings</a>
     </nav>
 
     <div class="side-cta">
@@ -60,6 +72,10 @@
   </aside>
 
   <main class="main">
+    <!-- The Mac's app window brings its own menu bar; a computer opened by the launcher in a browser
+         window has none, so the shop's File, Edit, View, Data and Shop menus are drawn here instead.
+         app.js leaves it hidden inside the Mac's own window and on a phone. -->
+    <div class="menubar" id="menubar" role="menubar" aria-label="Shop menus" hidden></div>
     <header class="topbar" id="topbar"></header>
     <div class="view" id="view"><p class="loading">Loading the book…</p></div>
 

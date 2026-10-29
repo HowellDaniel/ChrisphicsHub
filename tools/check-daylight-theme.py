@@ -140,9 +140,17 @@ check("neither file names a mode to pick any more",
       and "setTheme" not in app and "themeMode" not in app,
       "head list %s / app.js modes %s" % ('"light", "dark", "system"' in head,
                                            "THEME_MODES" in app))
-check("the page's own head script stores nothing and reads nothing back",
-      "crispprint-theme" not in head and "localStorage" not in head and "matchMedia" not in head,
-      "")
+# The head script does read from localStorage now — the paper and the size of the words, so a window
+# does not flash plain white before the shop's wallpaper lands. Neither of those is a look the clock
+# decides, so the rule still holds in the form that matters: nothing is ever written, and the two
+# names read back are exactly these. An "anyThemeStored" style test would have failed for a reason
+# that has nothing to do with the day/night band.
+check("the page's own head script stores nothing the clock could be contradicted by",
+      "setItem" not in head and "crispprint-theme" not in head and "matchMedia" not in head,
+      "setItem in head: %s / theme key in head: %s" % ("setItem" in head, "crispprint-theme" in head))
+expect("and the only looks it reads back are the paper and the words, never a theme",
+       sorted(set(re.findall(r"localStorage\.getItem\('([^']+)'\)", head))),
+       ["crispprint-background", "crispprint-text-size"])
 check("and the stylesheet has no appearance control left in it",
       "themeseg" not in text("public/styles.css"), "")
 

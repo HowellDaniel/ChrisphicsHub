@@ -23,6 +23,7 @@ import io
 import json
 import mimetypes
 import os
+import platform
 import re
 import secrets
 import socket
@@ -72,7 +73,46 @@ DB_PATH = os.environ.get("CHRISPHICS_DB") or os.path.join(SUPPORT, "chrisphics.d
 BACKUP_DIR = os.environ.get("CHRISPHICS_BACKUP_DIR") or os.path.join(SUPPORT, "Backups")
 # Where the book lived while the shop's name was misspelled. adopt_legacy_book() copies it
 # forward on the first run of the corrected build; the old file is never touched.
+
 LEGACY_DB = os.path.expanduser("~/Library/Application Support/Chriphics Hub/chriphics.db")
+
+
+def counter_version():
+    """The build number this engine is running, taken from the VERSION file the app was made with.
+
+    One number, three readers: the file at the repository root is the same one GitHub serves raw,
+    which is what the Mac's Settings > Updates pane asks of it, and the installer carries a copy
+    into every bundle beside server.py so a hand-out computer can answer for itself too. Empty when
+    no copy came with the build, and the screen then says it does not know rather than making a
+    number up, because a wrong version is worse at the counter than no version.
+    """
+    places = [os.path.join(ROOT, "VERSION")]
+    if os.path.basename(ROOT) == "app":
+        # A bundle lays the engine out as <app>/app/server.py, with VERSION one level above it.
+        places.append(os.path.join(ROOT, os.pardir, "VERSION"))
+    for where in places:
+        try:
+            return open(where, encoding="utf-8").read().strip()[:16]
+        except OSError:
+            continue
+    return ""
+
+
+def system_name():
+    """The computer answering, in the words a counter would use.
+
+    The book lives on a Mac in this shop, and a PC that cannot find the shop works on a copy of its
+    own, so the Settings screen has to say which of the two it is looking at rather than printing
+    `darwin`. Windows 11 reports its own release as 10.0 to anything that asks, which is as true as
+    that operating system lets the answer be.
+    """
+    kind, release = platform.system(), platform.release()
+    if kind == "Darwin":
+        return "macOS " + release
+    if kind == "Windows":
+        return "Windows " + release
+    return (kind or "unknown") + (" " + release if release else "")
+
 
 SHOP = {
     # The shop's trading name, as it appears on a job sheet. The phone starts empty: these
@@ -2495,6 +2535,46 @@ def machine_activity(limit=8):
         out.insert(0, {"address": origin["address"], "last_write": "", "changes": 0,
                        "name": origin["name"], "first": True})
     return {"origin": origin, "machines": out}
+
+
+def counter_facts(handler):
+    """What the Settings screen is told about the computer answering it — read-only, every field.
+
+    The screen exists because a Windows counter has no app window of its own: the launcher opens a
+    browser at this page, so anything the Mac gets from its native panel has to be answered here.
+    It is deliberately given no way to write. A counter joined to the shop's book is served by the
+    shop's own computer, and an engine that accepted "make this computer quieter" would be changing
+    the shop's Mac on somebody else's say-so. So the choices that belong to the machine standing at
+    the counter — which screen opens first, how big the words are, the paper behind them — are kept
+    in that browser's own memory, and this answer only ever tells it what it is looking at."""
+
+    def shortened(path):
+        return path.replace(os.path.expanduser("~"), "~")
+
+    return {
+        "version": counter_version(),
+        "system": system_name(),
+        "python": sys.version.split()[0],
+        "machine": platform.node()[:60],
+        "book": shortened(DB_PATH),
+        "backups": shortened(BACKUP_DIR),
+        "address": shop_url(handler.headers.get("Host", "")),
+        "tls": bool(getattr(handler.server, "is_tls", False)),
+        "reachable_from_wifi": SERVE["host"] not in ("127.0.0.1", "localhost", "::1"),
+        # Which computer is answering, said plainly, because the counter cannot tell the two apart:
+        # the shop's own server is the one serving the book across the Wi-Fi door on its certificate.
+        # Anything else is a copy working on its own records — a PC that could not find the shop, or
+        # a Mac that was told to keep its own book.
+        "answered_by": "the shop's own computer" if (SERVE["port"] == SHOP_DOOR) else "this computer",
+        "keeps_own_book": own_book_chosen(),
+        "joined": joined_shop(),
+        "shop_computer": handler.is_shop_computer(),
+        "sign_in": {"required": auth_required(), "from_environment": bool(AUTH_PASSWORD),
+                    "chosen": bool(book_password()),
+                    "this_mac_asked": shop_mac_locks_itself()},
+        "awake": KEEP_AWAKE,
+        "hours": public_hours(shop_hours(), True),
+    }
 
 
 # ----------------------------------------------------------------------- sign-in
@@ -5857,6 +5937,12 @@ class Handler(BaseHTTPRequestHandler):
                 other = 0
             return 200, {"rev": "%d.%d" % (_book_writes["count"], other),
                          "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+
+        if method == "GET" and head == "counter":
+            # What the Settings screen is told about the machine answering it. Read-only, because a
+            # counter joined to the shop's book is served by the shop's own computer, and a control
+            # that wrote into this engine would be changing that computer on somebody else's say-so.
+            return 200, counter_facts(self)
 
         if method == "GET" and head == "bootstrap":
             return 200, {"shop": SHOP, "statuses": STATUSES, "categories": CATEGORIES,

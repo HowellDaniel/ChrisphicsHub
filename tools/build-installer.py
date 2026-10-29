@@ -118,8 +118,10 @@ SHELL_SRC = os.path.join(REPO, "tools", "portable-app-shell.m")
 MAC_MIN = "10.13"
 
 # The app is these files and nothing else. `tools/` stays behind on purpose: it is dev checks and the
-# launchd service, and a computer that owns its own book needs neither.
-APP_FILES = ("server.py", "schema.sql")
+# launchd service, and a computer that owns its own book needs neither. VERSION goes along because
+# Settings ▸ Updates on a counter asks its own engine what build it is, and an engine that cannot
+# answer is the one screen in the shop that has to lie.
+APP_FILES = ("server.py", "schema.sql", "VERSION")
 APP_DIRS = ("public",)
 
 # The shop's own records, on this Mac. Everything the shop configures — its name, address, phone,

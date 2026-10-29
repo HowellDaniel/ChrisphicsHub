@@ -30,6 +30,7 @@ went near it.
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import sqlite3
@@ -334,8 +335,9 @@ check("and it is the only place that can change it",
 check("the page posts to the route the engine guards",
       "api('/api/shop-origin', { method: 'PUT'" in app_js)
 sw = open(os.path.join(REPO, "public", "sw.js"), encoding="utf-8").read()
-check("the shell cache was bumped so the new card reaches every device",
-      "crispprint-shell-v17" in sw, [l for l in sw.splitlines() if "CACHE_NAME =" in l])
+cache_version = int(re.search(r"crispprint-shell-v(\d+)", sw).group(1))
+check("the shell cache is at or past the bump that carried the new card",
+      cache_version >= 17, [l for l in sw.splitlines() if "CACHE_NAME =" in l])
 
 live_hash_after = hashlib.sha256(open(LIVE, "rb").read()).hexdigest()
 check("the owner's live book is byte for byte as it was",

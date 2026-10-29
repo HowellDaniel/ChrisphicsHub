@@ -1,12 +1,14 @@
 'use strict';
 
-/* Bumped with the six picture themes: styles.css now points at six files under /img, and a counter
-   that kept the old shell would show a washed flat paper where the shop's chosen picture should be.
-   The pictures ride in the shell cache so a counter whose road to the shop is out still wears them.
+/* Bumped again for the screen a fresh window opens on: startHash() in app.js answered its default
+   "auto" as though it were a screen name, so a counter with nothing stored went to #/auto — a hash no
+   view reads — and never saw the dashboard or where they left off. A device still holding v18 has the
+   menu bar but opens blind. Nothing new is added to APP_SHELL
+   below — /api/counter is an API route, which the worker already lets past to the shop.
    The new worker prefills the shell from the shop, so this lands while the Mac is answering — and if
    it is asked for during an outage the install simply fails, leaving the device on the copy it
    already has rather than on nothing. */
-const CACHE_NAME = 'crispprint-shell-v17';
+const CACHE_NAME = 'crispprint-shell-v19';
 const APP_SHELL = [
   '/',
   '/index.html',

@@ -101,7 +101,11 @@
   --r-sm: 7px;
   --pad: clamp(14px, 1.6vw, 26px);
   --gap: clamp(10px, 1.1vw, 18px);
-  --fs: clamp(13px, .34vw + 12.2px, 15px);
+  --fs: calc(clamp(13px, .34vw + 12.2px, 15px) * var(--text-scale, 1));
+  /* The counter's own text size, kept by the page on a computer that has no app window to set it
+     in — see Settings ▸ General. One multiplier in one token, so every size written in `em` lifts
+     with it; the big display figures keep their own clamp and do not swell off the card. */
+  --text-scale: 1;
   --h: clamp(19px, 1.5vw + 12px, 27px);
   --face: "Poppins", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
   /* Figures keep the same face; tabular-nums is asked for so money lines up on any
@@ -341,6 +345,47 @@ code { font-family: var(--num); font-size: .88em; }
   display: flex; flex-direction: column; gap: 10px;
 }
 .view { padding: var(--pad); display: grid; gap: var(--gap); align-content: start; min-height: 0; flex: 1 0 auto; }
+/* ---------- the page's own menu bar ----------
+   The Mac opens the shop inside its app window and gets Apple's menu bar for free; a PC opened by the
+   launcher in a browser window gets none, so File, Edit, View, Data and Shop are drawn here instead.
+   app.js leaves this hidden inside the Mac's window and on a phone, and marks the root with
+   data-menubar="on" only while the strip is actually showing — which is the one time the title bar
+   below has to stick under it rather than to the top of the page. The strip does not follow the
+   scroll: a counter who wants a menu reaches the top of the window for it, exactly as on the Mac. */
+.menubar { display: flex; align-items: center; gap: 2px; padding: 3px var(--pad);
+  background: var(--surface-2); border-bottom: 1px solid var(--line); position: relative; z-index: 8; }
+.menubtn { border: 0; background: none; font: inherit; color: var(--text); padding: 5px 11px;
+  border-radius: var(--r-sm); cursor: pointer; font-size: .9em; font-weight: 500; }
+.menubtn:hover, .menubtn[aria-expanded="true"] { background: var(--brand-soft); color: var(--brand-ink); }
+.menuwrap { position: relative; }
+.menudrop { position: absolute; top: calc(100% + 3px); left: 0; z-index: 30; min-width: 264px;
+  background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--r);
+  box-shadow: var(--shadow-lg); padding: 5px; display: flex; flex-direction: column; gap: 1px; }
+.menuitem { display: flex; align-items: baseline; gap: 16px; border: 0; background: none; text-align: left;
+  font: inherit; color: var(--text); padding: 7px 9px; border-radius: var(--r-sm); cursor: pointer; }
+.menuitem:hover { background: var(--brand-soft); color: var(--brand-ink); }
+.menuitem i { flex: 1; text-align: right; font-style: normal; color: var(--muted); font-size: .8em;
+  white-space: nowrap; }
+.menusep { height: 1px; background: var(--line); margin: 4px 5px; }
+.menuhint { margin-left: auto; color: var(--muted); font-size: .78em; padding-right: 2px; }
+:root[data-menubar="on"] .topbar { top: 32px; }
+/* ---------- Settings rows ----------
+   The Mac's Settings window lays each pane out as a label column and a control column; the page's
+   Settings screen copies that, so the same four panes read the same way on either computer. */
+.srow { display: grid; grid-template-columns: minmax(130px, 182px) minmax(0, 1fr); gap: 12px;
+  align-items: start; padding: 9px 0; border-top: 1px solid var(--line); }
+.srow:first-child { border-top: 0; padding-top: 0; }
+.slabel { font-size: .88em; font-weight: 600; color: var(--muted); padding-top: 7px; }
+.sfield { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sfield code { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 6px 8px; overflow-wrap: anywhere; }
+.sfield .hint { margin: 0; }
+.schk { display: flex; align-items: flex-start; gap: 9px; font-size: .92em; }
+.schk input { margin-top: 3px; }
+@media (max-width: 720px) {
+  .srow { grid-template-columns: 1fr; gap: 3px; }
+  .slabel { padding-top: 0; }
+}
 /* A .view child is a grid item, and a grid item's automatic minimum size is its min-content:
    one wide table used to push the whole column past the window and give the page a horizontal
    scrollbar. Zero the minimum and .tablewrap scrolls the table where it sits. */

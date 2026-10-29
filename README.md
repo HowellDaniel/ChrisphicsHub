@@ -54,12 +54,13 @@ untouched as the safety copy. From then on only the new name is used.
 
 ### Settings `⌘,`
 
-`Chrisphics Hub ▸ Settings…` (`⌘,`) opens the app's own settings window — three panes in a toolbar,
+`Chrisphics Hub ▸ Settings…` (`⌘,`) opens the app's own settings window — four panes in a toolbar,
 and the window resizes to whichever pane you are in.
 
 | Pane | What it holds |
 | --- | --- |
 | **General** | open at login; which screen the app shows first (any of the ten, or "Where I left off"); text size 90–140%; keep this Mac awake while the shop is open; which records engine the window is attached to; where the book and the backups live, with Back up now / Show book in Finder / Open backups |
+| **Appearance** | the paper behind every screen — the shop's own plain page, a coloured paper or one of the wallpapers. The clock still decides light and dark, and a job sheet always keeps the white paper it must be |
 | **Profile** | the shop's name, tagline, phone and address, kept *in the book*; the MoMo number, the address devices install from, and the currency are read out but not editable here |
 | **Updates** | this build's version, commit and build date, the repository, **Check for update**, and a button to open the repository |
 
@@ -70,6 +71,20 @@ words, and a phone signing in to the same server sees them too. That is why the 
 profile writes only from the shop computer itself — and why the pane says so when it is refused.
 Clearing a field and saving drops it back to the default `server.py` (or its environment) seeded.
 **Check for update** is the only outward call in the window; see [Notes](#notes).
+
+**The same menus where there is no Mac.** A Windows PC opened by `Chrisphics Hub.cmd`, or any browser
+pointed at the shop's address, has no native menu bar and no `⌘,` to answer it — so the page draws the
+strip itself: **File, Edit, View, Data, Shop** across the top, each row printing the key that runs it
+under `Alt` (`Alt+N` books a job, `Alt+S` opens these settings), and **Settings** the same four tabs as
+the Mac's window. A phone gives the strip back — there is no room for it at 390 points — and inside the
+Mac's own window the page stands back from both the bar and the look, because the native menu and
+`Settings ▸ Appearance` already hold them. What the tabs offer differs in exactly one place: a counter
+that is not the shop's own Mac finds Profile shut and is told why, in the engine's own words, since the
+book only takes profile writes from the shop computer. Everything else the tabs hold — the screen to
+open on, the size of the words, the paper, keeping that machine awake — is stored in that browser alone
+and never travels to the server, so a PC cannot change the look on the Mac's window or on her machine.
+`tools/check-counter-settings.py` proves all of it, including that every printed key and every menu row
+are the same list, that a row does the one thing it says, and that none of it writes the shop's book.
 
 **In a browser instead.** Double-click **`Chrisphics Hub.command`**. A Terminal window opens and
 your browser goes to <http://127.0.0.1:8712/>. It reads and writes the same data file as the

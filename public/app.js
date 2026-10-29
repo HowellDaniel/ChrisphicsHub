@@ -3,7 +3,7 @@
    can still be handed off to WhatsApp or Mail for staff to send. */
 'use strict';
 
-const S = { boot: null, clients: [], route: null, timer: null, flash: null, settle: false, notify: { byId: {} }, offlineQueuedToast: false, connected: navigator.onLine, bookAge: 0, offlineCarried: null };
+const S = { boot: null, clients: [], route: null, timer: null, flash: null, settle: false, notify: { byId: {} }, offlineQueuedToast: false, connected: navigator.onLine, bookAge: 0, offlineCarried: null, counter: null };
 const OFFLINE_DB = 'crispprint-offline-v1';
 let offlineDbPromise = null;
 let syncingOfflineQueue = false;
@@ -1093,6 +1093,7 @@ function paintNav() {
     reports: '',
     sync: '',
     shop: '',
+    settings: '',
   };
   $$('.navlink[data-view]').forEach((a) => {
     const view = a.dataset.view;
@@ -1147,6 +1148,9 @@ function stash(node, parent) {
 function shellChrome() {
   const wide = !PHONE.matches;
   document.documentElement.dataset.shell = wide ? 'wide' : 'phone';
+  /* A phone has a tab bar and no room for a menu; a wide window has the menu bar. Asked again on
+     every change, because a tablet turned sideways is exactly the kind of thing a counter does. */
+  paintMenuBar();
   if (wide) {
     (phoneRestore || []).slice().reverse().forEach((entry) => {
       const node = entry[0], parent = entry[1], next = entry[2];
@@ -1311,6 +1315,10 @@ function go(view, params, id) {
 }
 async function render() {
   S.route = parseHash();
+  /* Where the shop was standing, kept so "Open this screen first ▸ Where I left off" means the
+     same thing here as it does in the Mac's own window. Only the screen is remembered, never the
+     filter or the row: a bookmark that reopens yesterday's search is a small trap of its own. */
+  if (/^#\/[a-z]+$/.test(location.hash)) savePref('last', location.hash);
   paintNav();
   paintNetworkStatus();
   const v = $('#view');
@@ -1330,6 +1338,7 @@ async function render() {
     else if (r.view === 'leads') await viewLeads(r);
     else if (r.view === 'expenses') await viewExpenses(r);
     else if (r.view === 'shop') await viewShop(r);
+    else if (r.view === 'settings') await viewSettings(r);
     else await viewDashboard(r);
     if (r.id && r.view === 'jobs') openJobDrawer(Number(r.id));
     if (r.id && r.view === 'clients') openClientDrawer(Number(r.id));
@@ -4646,6 +4655,14 @@ async function moveStage(id, status) {
                  : 'Marked as ' + status, 'good');
 }
 const ACTIONS = {
+  /* The page's own menu bar: one button opens one menu, one row does one thing. Everything a row
+     can ask for is already a name the Mac's menu bar asks for too, so the two can never drift. */
+  'menu-open'(el) {
+    const at = Number(el.dataset.menu);
+    if (menuOpen === at) closeMenus(); else openMenuAt(at);
+  },
+  'menu-item'(el) { closeMenus(); runMenuItem(el.dataset.do); },
+  'settings'() { go('settings'); },
   'install-app'() { installApp().catch(fail); },
   async 'shop-password'(el) {
     try { passwordForm((await api('/api/shop')).login); } catch (err) { fail(err); }
@@ -5088,6 +5105,574 @@ function paintTheme() {
   document.documentElement.dataset.theme = themeIsDark() ? "dark" : "light";
 }
 
+/* ------------------------------------------------- the counter's own window */
+/* The Mac app brings three things the shop reaches for without thinking: a menu bar, a Settings
+   window with four tabs, and a hand on the ⌘ keys. A Windows computer has none of them — its
+   launcher opens Edge at this page in a window with no address bar and no menu — so the page has to
+   carry all three itself.
+
+   Two rules keep this honest, and both come from the same fact: the page a counter opens may be
+   served by the shop's own Mac.
+   - A choice that belongs to the machine standing at the counter — the screen it opens on, the size
+     of its words, the paper behind them — is kept in that browser's own memory, never in the engine.
+     A setting that reached through the engine would be a setting on the shop's Mac, made by somebody
+     else. Only Settings ▸ Profile touches the book, because the shop's name and number ARE the book.
+   - A control the engine would refuse is not offered. Profile shows the refusal instead, in the
+     engine's own words, so the screen never promises a save it cannot make. */
+const IN_MAC_SHELL = !!(window.webkit && window.webkit.messageHandlers &&
+                        window.webkit.messageHandlers.sheetPrint);
+
+/* The same names the Mac's own Settings window writes into the machine's preferences, so one word
+   describes the choice on either kind of computer. */
+const PREF_NAMES = {
+  start: 'crispprint-start-route',
+  last: 'crispprint-last-route',
+  text: 'crispprint-text-size',
+  bg: 'crispprint-background',
+  awake: 'crispprint-keep-awake',
+};
+
+function pref(name, def) {
+  try {
+    const got = localStorage.getItem(PREF_NAMES[name] || name);
+    return got === null || got === '' ? def : got;
+  } catch (e) { return def; }
+}
+function savePref(name, value) {
+  try { localStorage.setItem(PREF_NAMES[name] || name, value); } catch (e) { /* a private window */ }
+}
+
+const SCREENS = [
+  ['dashboard', 'Dashboard'], ['jobs', 'Print jobs'], ['collect', 'Collect'],
+  ['spoiled', 'Spoiled work'], ['sync', 'Pending sync'], ['clients', 'Clients'],
+  ['leads', 'Enquiries'], ['accounts', 'Accounts'], ['expenses', 'Expenses'],
+  ['reports', 'Reports'], ['shop', 'Shop & devices'], ['settings', 'Settings'],
+];
+/* The steps the Mac's text-size slider covers (0.9 to 1.4), written as a choice instead of a
+   slider because a slider a counter has to drag with a mouse on a shop PC lands on odd numbers. */
+const TEXT_SIZES = [['0.9', 'Small'], ['1', 'Normal — the shop default'], ['1.1', 'Large'],
+                    ['1.25', 'Very large'], ['1.4', 'Largest']];
+/* The shop's own paper first, then the four colour washes and the wallpapers, in the same order and
+   the same words as Settings ▸ Appearance in the Mac's window. */
+const PAPERS = [
+  ['plain', 'Plain — the shop’s own paper'], ['sky', 'Sky'], ['leaf', 'Leaf'],
+  ['sand', 'Sand'], ['rose', 'Rose'], ['waves', 'Waves wallpaper'], ['dots', 'Dots wallpaper'],
+  ['linen', 'Linen wallpaper'], ['violet', 'Violet lines'], ['beams', 'Teal beams'],
+  ['circuit', 'Circuit'], ['constellation', 'Constellation'], ['dusk', 'Dusk'], ['bloom', 'Bloom'],
+];
+const SETTINGS_TABS = [['general', 'General'], ['appearance', 'Appearance'],
+                       ['profile', 'Profile'], ['updates', 'Updates']];
+const COUNTER_REPO = 'https://github.com/HowellDaniel/ChrisphicsHub';
+const COUNTER_VERSION_URL = 'https://raw.githubusercontent.com/HowellDaniel/ChrisphicsHub/main/VERSION';
+
+/* One control, one choice, kept on this computer. The engine is never told, because the engine may
+   be the shop's Mac — and the shop's Mac does not change its own screen because a counter pressed
+   something at a different one. */
+function setCounterPref(name, el) {
+  if (IN_MAC_SHELL) return;
+  if (name === 'awake') {
+    holdAwake(el.checked).then(() => {
+      const line = $('#awakeState');
+      if (line) line.textContent = awakeWords();
+      toast(el.checked ? 'This window will ask the computer not to sleep — ' + awakeWords()
+                       : 'The computer may sleep when it is left alone.',
+            el.checked && awakeHold ? 'good' : 'bad');
+    });
+    return;
+  }
+  savePref(name, el.value);
+  if (name === 'text' || name === 'bg') applyCounterLook();
+  const words = {
+    start: ['Next time this window opens, it opens on ',
+            (SCREENS.find((s) => s[0] === el.value) || ['', 'where you left off'])[1]],
+    text: ['The words are ', (TEXT_SIZES.find((s) => s[0] === el.value) || ['', 'normal'])[1]],
+    bg: ['The paper is ', (PAPERS.find((s) => s[0] === el.value) || ['', 'plain'])[1]],
+  }[name];
+  if (words) toast(words[0] + words[1], 'good');
+}
+
+/* What this computer asked the page to look like, applied to it. Held back inside the Mac's own
+   window, where Settings ▸ Appearance has already painted the paper before this file is loaded: the
+   app window's native panel owns that computer, and two owners of one wallpaper is how a screen ends
+   up flicking between them. */
+function applyCounterLook() {
+  if (IN_MAC_SHELL) return;
+  const scale = parseFloat(pref('text', '1')) || 1;
+  document.documentElement.style.setProperty('--text-scale', String(scale));
+  const paper = pref('bg', 'plain');
+  document.documentElement.dataset.bg = paper;
+}
+
+/* The start screen is stored as the bare name the rail uses ("jobs"), the way the Mac's own General
+   pane keeps it; "Where I left off" is the one value that is not a name at all — and it is also the
+   default, so treating it as a screen would put every fresh window at a hash no view answers (#/auto)
+   and never read the last screen back. A name only counts if the rail has that screen. */
+function startHash() {
+  const chosen = pref('start', 'auto');
+  if (SCREENS.some((screen) => screen[0] === chosen)) return '#/' + chosen;
+  const last = pref('last', '').replace(/^#\/?/, '');
+  return SCREENS.some((screen) => screen[0] === last) ? '#/' + last : '#/dashboard';
+}
+
+/* Keeping the screen awake. A Mac holds the shop open with an assertion of its own; a browser can
+   only ask not to be put to sleep while its own window is showing, and takes the ask back the moment
+   the window is hidden. The pane says which of the two this computer actually did, because a tick
+   box that claims to have kept a PC awake when the browser refused is worse than no tick box. */
+let awakeHold = null;
+let awakeWanted = pref('awake', '0') === '1';
+let awakeWhy = '';
+
+async function holdAwake(on) {
+  awakeWanted = !!on;
+  savePref('awake', awakeWanted ? '1' : '0');
+  if (!awakeWanted) {
+    if (awakeHold) { try { await awakeHold.release(); } catch (e) { /* already gone */ } }
+    awakeHold = null;
+    awakeWhy = '';
+    return;
+  }
+  if (!('wakeLock' in navigator)) {
+    awakeWhy = 'this browser does not offer it';
+    return;
+  }
+  try {
+    awakeHold = await navigator.wakeLock.request('screen');
+    awakeWhy = 'held while this window is showing';
+    awakeHold.addEventListener('release', () => {
+      awakeHold = null;
+      awakeWhy = 'given back while the window was hidden';
+      const line = $('#awakeState');
+      if (line) line.textContent = awakeWords();
+    });
+  } catch (e) {
+    awakeHold = null;
+    awakeWhy = 'the browser refused it just now';
+  }
+}
+
+function awakeWords() {
+  if (!awakeWanted) return 'not asked for';
+  if (awakeHold) return 'awake — ' + awakeWhy;
+  if (awakeWhy) return 'asked, but ' + awakeWhy;
+  return 'asked for';
+}
+/* The browser hands the ask back every time the window is hidden, so coming back to it is coming
+   back to the counter's own choice. */
+document.addEventListener('visibilitychange', () => {
+  if (awakeWanted && document.visibilityState === 'visible') holdAwake(true).then(() => {
+    const line = $('#awakeState');
+    if (line) line.textContent = awakeWords();
+  });
+});
+
+/* Cut, copy, paste and select-all in the Edit menu. The browser already does these with its own
+   keys; the menu is here because a counter who has only ever had a menu should not have to learn
+   which keys this window keeps. */
+function browserEdit(what) {
+  if (what === 'paste') {
+    const field = document.activeElement;
+    const into = field && /^(INPUT|TEXTAREA)$/.test(field.tagName);
+    if (!navigator.clipboard || !navigator.clipboard.readText || !into) {
+      return toast('Use ' + (IN_MAC_SHELL ? '⌘' : 'Ctrl') + '+V here — the browser will not let a' +
+                   ' page read the clipboard without asking first.', 'bad');
+    }
+    return navigator.clipboard.readText().then((said) => {
+      const from = field.selectionStart || 0, to = field.selectionEnd || 0;
+      field.value = field.value.slice(0, from) + said + field.value.slice(to);
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      field.focus();
+    }, () => toast('This browser would not hand the clipboard to the page. Use ' +
+                   (IN_MAC_SHELL ? '⌘' : 'Ctrl') + '+V.', 'bad'));
+  }
+  const command = { cut: 'cut', copy: 'copy', all: 'selectAll' }[what];
+  if (!command) return;
+  try {
+    document.execCommand(command);
+  } catch (e) {
+    toast('Use ' + (IN_MAC_SHELL ? '⌘' : 'Ctrl') + '+K for that — the browser keeps its own keys.', 'bad');
+  }
+}
+
+/* The sheet a client signs is its own page, printed from itself, exactly as it is in the Mac's
+   window: File ▸ Print Job Sheet works on the job that is open and says so when none is. */
+function printJobSheet() {
+  const open = (S.notify && S.notify.job && S.notify.job.id) || (S.route && S.route.id);
+  if (!open) return toast('Open a job first — the sheet a client signs is its own page.', 'bad');
+  const win = window.open('/print/' + open, '_blank');
+  if (!win) toast('This browser blocked the sheet window. Allow pop-ups for the shop, or press' +
+                  ' Job sheet on the job.', 'bad');
+}
+
+/* Every menu row and every Alt key lands here, so the words on the screen and the keys under the
+   hand can never be taught two different things. */
+function runMenuItem(what) {
+  if (!what) return;
+  if (what.indexOf('view:') === 0) return go(what.slice(5));
+  if (what.indexOf('edit:') === 0) return browserEdit(what.slice(5));
+  if (what.indexOf('settings:') === 0) return go('settings', { pane: what.slice(9) });
+  if (what === 'reload') return location.reload();
+  if (what === 'settings') return go('settings');
+  if (what === 'print-sheet') return printJobSheet();
+  if (what === 'settings-refresh') { S.counter = null; return render().catch(fail); }
+  if (what === 'settings-shop-save') return saveShopProfile();
+  if (what === 'settings-check') return checkForUpdate();
+  if (what === 'settings-repo') return window.open(COUNTER_REPO, '_blank');
+  if (what === 'focus-search') {
+    const box = $('#topbar input[data-filter="q"]');
+    if (box) { box.focus(); box.select(); }
+    return;
+  }
+  const handler = ACTIONS[what];
+  if (typeof handler === 'function') {
+    /* A menu carries no row, so nothing here has a client or a job to hand over — the same
+       request, made as if the counter had pressed the button on the screen itself. */
+    handler(document.body);
+    return;
+  }
+  toast('Nothing is bound to that yet.', 'bad');
+}
+
+/* The four fields Settings ▸ Profile shows on the Mac, written back the one way the book takes
+   them: a PUT the engine answers only for the shop's own computer. The engine's refusal is printed
+   in its own words rather than smoothed over, because a counter who is told "saved" when nothing
+   was saved loses the change and the trust in one go. */
+async function saveShopProfile() {
+  const grab = (id) => { const el = $('#' + id); return el ? el.value.trim() : ''; };
+  const line = $('#updateResult');
+  try {
+    const answer = await api('/api/shop', { method: 'PUT', body: JSON.stringify({
+      name: grab('setName'), tagline: grab('setTagline'),
+      phone: grab('setPhone'), address: grab('setAddress'),
+    }) });
+    const kept = answer.shop || {};
+    toast('Saved. New sheets and client messages carry ' + (kept.name || 'these words') +
+          ' from now on.', 'good');
+    await render();
+  } catch (err) {
+    if (line) line.textContent = err.message;
+    fail(err);
+  }
+}
+
+async function checkForUpdate() {
+  const line = $('#updateResult');
+  const say = (words) => { if (line) line.textContent = words; };
+  say('Asking the repository…');
+  const mine = (S.counter || {}).version || '';
+  try {
+    const asked = await fetch(COUNTER_VERSION_URL, {
+      headers: { 'Accept': 'text/plain' },
+    });
+    if (!asked.ok) throw new Error('answer ' + asked.status);
+    const remote = (await asked.text()).trim();
+    if (!remote) throw new Error('an empty answer');
+    if (!mine) {
+      say('The repository is on version ' + remote + '. The build answering here carries no' +
+          ' number, so the two cannot be compared — rebuild it with tools/build-installer.py or' +
+          ' desktop/build-app.sh to give it one.');
+      return;
+    }
+    const against = versionCompare(mine, remote);
+    say(against < 0
+      ? 'Version ' + remote + ' is on the repository and this build is ' + mine + '. Rebuild it to' +
+        ' take the newer version in.'
+      : against > 0
+        ? 'This build carries version ' + mine + ' — the repository is still on ' + remote + '.'
+        : 'This build (' + mine + ') is the newest version the repository has.');
+  } catch (e) {
+    say('The repository could not be reached just now (' + e.message + ').');
+  }
+}
+
+/* Alt is the menu key on a Windows computer, and it has to be: the browser itself keeps Ctrl+N for
+   a new window, Ctrl+W for this one, Ctrl+R for a reload and Ctrl+1 to Ctrl+9 for its own tabs, and
+   none of those reach the page however hard the shop presses. So the Mac's ⌘ keys come across as the
+   same letters under Alt, and each menu row prints the key it answers to.
+   This list and the rows below are one thing, not two: a key nobody printed on a row is a key no
+   counter will ever find, and a row that prints a key the page does not answer is a lie.
+   tools/check-counter-settings.py reads both and fails if they ever disagree. */
+const MENU_KEYS = {
+  n: 'new-job', 'shift+n': 'new-quote', i: 'new-lead', k: 'new-client',
+  r: 'receive-payment', e: 'new-expense', p: 'print-sheet', b: 'book-copy', c: 'carry-now',
+  s: 'settings', 'shift+r': 'reload',
+  1: 'view:dashboard', 2: 'view:jobs', 3: 'view:clients', 4: 'view:leads', 5: 'view:accounts',
+  6: 'view:expenses', 7: 'view:reports', 8: 'view:spoiled', 9: 'view:sync', 0: 'view:shop',
+};
+
+const MENU = [
+  { label: 'File', hint: 'Alt+F', rows: [
+      ['New Job', 'Alt+N', 'new-job'],
+      ['New Quote', 'Alt+Shift+N', 'new-quote'],
+      ['New Enquiry', 'Alt+I', 'new-lead'],
+      ['New Client', 'Alt+K', 'new-client'],
+      ['Receive Payment', 'Alt+R', 'receive-payment'],
+      ['Record Money Out', 'Alt+E', 'new-expense'],
+      ['-'],
+      ['Print Job Sheet', 'Alt+P', 'print-sheet'],
+      ['-'],
+      ['Copy the book onto this device', 'Alt+C', 'carry-now'],
+  ] },
+  { label: 'Edit', rows: [
+      ['Cut', 'Ctrl+X', 'edit:cut'], ['Copy', 'Ctrl+C', 'edit:copy'],
+      ['Paste', 'Ctrl+V', 'edit:paste'], ['Select All', 'Ctrl+A', 'edit:all'],
+      ['-'], ['Search this book', '/', 'focus-search'],
+  ] },
+  { label: 'View', rows: [
+      ['Reload this screen', 'Alt+Shift+R', 'reload'],
+      ['-'],
+      ['Dashboard', 'Alt+1', 'view:dashboard'],
+      ['Print Jobs', 'Alt+2', 'view:jobs'],
+      ['Collect', '', 'view:collect'],
+      ['Clients', 'Alt+3', 'view:clients'],
+      ['Enquiries', 'Alt+4', 'view:leads'],
+      ['Accounts', 'Alt+5', 'view:accounts'],
+      ['Expenses', 'Alt+6', 'view:expenses'],
+      ['Reports', 'Alt+7', 'view:reports'],
+      ['Spoiled Work', 'Alt+8', 'view:spoiled'],
+      ['Pending Sync', 'Alt+9', 'view:sync'],
+      ['Shop & Devices', 'Alt+0', 'view:shop'],
+  ] },
+  { label: 'Data', rows: [
+      ['Copy the Book Now', 'Alt+B', 'book-copy'],
+      ['Download the Copy', '', 'backup'],
+      ['-'],
+      ['Setup and Install Page', '', 'setup-page'],
+  ] },
+  { label: 'Shop', rows: [
+      ['Settings…', 'Alt+S', 'settings'],
+      ['-'],
+      ['Install This App', '', 'install-app'],
+      ['Change the Shop Password', '', 'shop-password'],
+      ['-'],
+      ['Sign Out of This Device', '', 'sign-out'],
+  ] },
+];
+
+function menuRowHtml(row) {
+  if (row[0] === '-') return '<span class="menusep" role="separator"></span>';
+  const [label, key, doWhat] = row;
+  return '<button type="button" role="menuitem" class="menuitem" data-action="menu-item"' +
+    ' data-do="' + esc(doWhat) + '"><span>' + esc(label) + '</span>' +
+    (key ? '<i>' + esc(key) + '</i>' : '') + '</button>';
+}
+
+let menuOpen = -1;
+
+function paintMenuBar() {
+  const bar = $('#menubar');
+  if (!bar) return;
+  /* The Mac's window has a real menu bar above it; a phone has a tab bar and no room; only a
+     computer opened straight in a browser window needs the page to carry one. PHONE is the same
+     turnstile the tab bar uses, so the two can never both be away or both be there. */
+  const showing = !IN_MAC_SHELL && !PHONE.matches;
+  bar.hidden = !showing;
+  /* The sticky title bar sits under the strip only while the strip exists — hence the flag rather
+     than a plain height, which would leave a dead gap in the Mac's own window. */
+  document.documentElement.dataset.menubar = showing ? 'on' : 'off';
+  if (!showing) return;
+  if (bar.childElementCount) return;
+  bar.innerHTML = MENU.map((menu, at) =>
+    '<span class="menuwrap">' +
+    '<button type="button" class="menubtn" data-action="menu-open" data-menu="' + at + '"' +
+    ' aria-haspopup="menu" aria-expanded="false">' + esc(menu.label) + '</button>' +
+    '<span class="menudrop" role="menu" hidden>' + menu.rows.map(menuRowHtml).join('') + '</span>' +
+    '</span>').join('') +
+    '<span class="spacer"></span>' +
+    '<span class="menuhint">Alt holds the keys &middot; Settings is Alt+S</span>';
+}
+
+function closeMenus() {
+  menuOpen = -1;
+  $$('#menubar .menudrop').forEach((drop) => { drop.hidden = true; });
+  $$('#menubar .menubtn').forEach((btn) => btn.setAttribute('aria-expanded', 'false'));
+}
+
+function openMenuAt(at) {
+  closeMenus();
+  const drop = $('#menubar .menudrop[data-drop="' + at + '"]') ||
+               $$('#menubar .menudrop')[at];
+  const btn = $$('#menubar .menubtn')[at];
+  if (!drop || !btn) return;
+  menuOpen = at;
+  drop.hidden = false;
+  btn.setAttribute('aria-expanded', 'true');
+}
+
+async function counterFacts(force) {
+  if (!force && S.counter) return S.counter;
+  S.counter = await api('/api/counter');
+  paintMenuBar();
+  return S.counter;
+}
+
+/* -------------------------------------------------------------------- Settings */
+function settingsTabs(active) {
+  return '<div class="tabs" role="tablist">' + SETTINGS_TABS.map((tab) =>
+    '<button type="button" class="tab' + (tab[0] === active ? ' on' : '') + '"' +
+    ' data-action="menu-item" data-do="settings:' + tab[0] + '"' +
+    ' role="tab" aria-selected="' + (tab[0] === active ? 'true' : 'false') + '">' +
+    esc(tab[1]) + '</button>').join('') + '</div>';
+}
+
+function settingsRow(label, control, note) {
+  return '<div class="srow"><label class="slabel">' + esc(label) + '</label>' +
+    '<div class="sfield">' + control +
+    (note ? '<p class="hint">' + note + '</p>' : '') + '</div></div>';
+}
+function settingsValue(text, title) {
+  return '<code' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text || '—') + '</code>';
+}
+function heldInShell() {
+  return IN_MAC_SHELL ? ' disabled' : '';
+}
+function selectOf(options, chosen, name) {
+  return '<select class="wide" data-pref="' + name + '"' + heldInShell() + '>' +
+    options.map((o) => '<option value="' + esc(o[0]) + '"' + (o[0] === chosen ? ' selected' : '') +
+      '>' + esc(o[1]) + '</option>').join('') + '</select>';
+}
+
+function settingsGeneral(facts) {
+  const joinedToShop = facts.answered_by === "the shop's own computer";
+  return '<div class="card"><h3>This computer</h3><div class="card-b">' +
+    settingsRow('Open this screen first:',
+      selectOf([['auto', 'Where I left off']].concat(SCREENS), pref('start', 'auto'), 'start'),
+      IN_MAC_SHELL ? 'The app window keeps this in its own Settings ▸ General.'
+                   : 'Kept on this computer only. The next time this window opens, it opens here.') +
+    settingsRow('Text size:', selectOf(TEXT_SIZES, pref('text', '1'), 'text'),
+      'Every screen grows and shrinks together. The sheet a client signs keeps the size it prints at.') +
+    settingsRow('Keep this screen awake:',
+      '<label class="schk"><input type="checkbox" data-pref="awake"' + (awakeWanted ? ' checked' : '') +
+      heldInShell() + '><span>Ask ' + (IN_MAC_SHELL ? 'this Mac' : 'this computer') +
+      ' not to sleep while the shop is open</span></label>' +
+      '<p class="hint" id="awakeState">' + esc(awakeWords()) + '</p>',
+      IN_MAC_SHELL
+        ? 'The app holds its own claim on the Mac. A browser can only ask while its own window is' +
+          ' showing, and gives the ask back when the window is hidden.'
+        : 'A browser can only ask while this window is showing, and takes the ask back the moment' +
+          ' it is hidden or the tab is put away.') +
+    '</div></div>' +
+    '<div class="card"><h3>The records engine answering this screen</h3><div class="card-b">' +
+    settingsRow('Answering for:', settingsValue(facts.answered_by + ' — ' + facts.system),
+      'the computer whose engine is serving this page') +
+    settingsRow('Computer:', settingsValue(facts.machine)) +
+    settingsRow('Address:', settingsValue(facts.address)) +
+    settingsRow('Book:', settingsValue(facts.book)) +
+    settingsRow('Copies:', settingsValue(facts.backups)) +
+    settingsRow('Sign-in:', settingsValue(facts.sign_in.required
+      ? (facts.sign_in.from_environment ? 'set by the service'
+                                         : 'one shop password, kept in the book')
+      : 'not required — anything on this Wi-Fi could read the book')) +
+    settingsRow('Version:', settingsValue(facts.version || 'no number carried in')) +
+    '<p><button class="btn sm" data-action="menu-item" data-do="settings-refresh">Read it again</button>' +
+    (joinedToShop
+      ? '<button class="btn sm ghost" data-action="menu-item" data-do="view:shop">Shop &amp; devices</button>'
+      : '') + '</p>' +
+    '<p class="hint">' + (facts.system.indexOf('Windows') === 0
+      ? 'Whether this PC keeps its own book or joins the shop’s is not a page choice: it is the two' +
+        ' links the setup put in this computer’s Start menu — <b>Join the shop’s book</b> and' +
+        ' <b>Keep this PC’s own book</b>. This computer keeps its own book: ' +
+        (facts.keeps_own_book ? 'yes' : 'no') + '; last shop address it wrote down: ' +
+        (facts.joined || 'none') + '.'
+      : 'This computer keeps its own book: ' + (facts.keeps_own_book ? 'yes' : 'no') +
+        '; the shop address it wrote down: ' + (facts.joined || 'none') + '.') + '</p>' +
+    '<p class="hint">Nothing in this tab is written into the book or into the engine. It lives in' +
+      ' this browser’s own memory, on this computer, because the engine answering the screen may be' +
+      ' the shop’s Mac and not the one you are standing at.</p>' +
+    '</div></div>';
+}
+
+function settingsAppearance() {
+  return '<div class="card"><h3>The paper behind the screens</h3><div class="card-b">' +
+    settingsRow('Background:', selectOf(PAPERS, pref('bg', 'plain'), 'bg'),
+      'The clock still owns day and night — this only repaints what the clock lights, and it stays' +
+      ' on this computer’s copy of the page. The job sheet a client signs always keeps the white' +
+      ' paper it must.') +
+    settingsRow('Text size:', selectOf(TEXT_SIZES, pref('text', '1'), 'text'),
+      'Kept with the paper because both are this screen’s own skin.') +
+    (IN_MAC_SHELL ? '<p class="hint">This window is the Mac’s own app: its Settings ▸ Appearance' +
+                    ' panel holds these, and the page leaves them to it.</p>' : '') +
+    '</div></div>';
+}
+
+function settingsProfile(facts, shop) {
+  const may = !!facts.shop_computer;
+  const values = shop.shop || {};
+  const entry = (id, label, value, limit) => settingsRow(label,
+    '<input class="wide" id="' + id + '" value="' + esc(value || '') + '"' +
+    (limit ? ' maxlength="' + limit + '"' : '') + (may ? '' : ' disabled') + '>');
+  return '<div class="card"><h3>The shop’s own details</h3><div class="card-b">' +
+    entry('setName', 'Shop name:', values.name, 120) +
+    entry('setTagline', 'Tagline:', values.tagline, 120) +
+    entry('setPhone', 'Phone:', values.phone, 40) +
+    entry('setAddress', 'Address:', values.address, 120) +
+    settingsRow('MoMo number:', settingsValue(shop.momo_number || 'not set')) +
+    settingsRow('Devices install from:', settingsValue(shop.address || '—')) +
+    settingsRow('Currency:', settingsValue((values.currency_symbol || '₵') + ' ' +
+                                           (values.currency || 'GHS'))) +
+    '<p>' +
+    '<button class="btn primary" data-action="menu-item" data-do="settings-shop-save"' +
+    (may ? '' : ' disabled') + '>Save</button>' +
+    '<button class="btn ghost" data-action="menu-item" data-do="settings-refresh">Load again</button>' +
+    '<button class="btn ghost" data-action="menu-item" data-do="view:shop">Sign-in and devices…</button>' +
+    '</p>' +
+    '<p class="hint">' + (may
+      ? 'Kept in the book, so every device and every printed sheet sees the same shop.'
+      : 'The shop’s own details are changed on the shop’s computer. This screen can read them, and' +
+        ' that is the whole of it — the box is shut, not broken.') + '</p>' +
+    '</div></div>';
+}
+
+function settingsUpdates(facts) {
+  return '<div class="card"><h3>Updates</h3><div class="card-b">' +
+    settingsRow('This build:', settingsValue(facts.version || 'no number carried in')) +
+    settingsRow('Engine:', settingsValue(facts.system + ' · Python ' + facts.python)) +
+    settingsRow('Repository:', settingsValue(COUNTER_REPO)) +
+    '<p><button class="btn" data-action="menu-item" data-do="settings-check">Check for update</button>' +
+    '<button class="btn ghost" data-action="menu-item" data-do="settings-repo">Open the repository</button></p>' +
+    '<p class="hint" id="updateResult">Nothing leaves this computer unless the Check button is' +
+      ' pressed: it asks the shop’s own repository for the newest version number and compares it' +
+      ' with the build answering here.</p>' +
+    (facts.answered_by === "the shop's own computer"
+      ? '<p class="hint">The version shown is the one on the computer answering this screen — the' +
+        ' shop’s own, while this counter is joined to its book. A computer working on a book of its' +
+        ' own answers for itself.</p>' : '') +
+    '</div></div>';
+}
+
+/* 1.2 against 1.10: every dotted part is a number, so ten is ten and never a one — the same rule
+   the Mac's Settings ▸ Updates pane uses, written out again here so a counter gets one answer. */
+function versionCompare(a, b) {
+  const pa = String(a || '0').split('.').map((part) => parseInt(part, 10) || 0);
+  const pb = String(b || '0').split('.').map((part) => parseInt(part, 10) || 0);
+  const long = Math.max(pa.length, pb.length);
+  while (pa.length < long) pa.push(0);
+  while (pb.length < long) pb.push(0);
+  for (let i = 0; i < long; i += 1) {
+    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+async function viewSettings(r) {
+  const asked = (r.params.get('pane') || 'general').toLowerCase();
+  const pane = SETTINGS_TABS.some((tab) => tab[0] === asked) ? asked : 'general';
+  const facts = await counterFacts();
+  topbar('Settings', 'One book, every screen — this tab belongs to ' +
+         esc(facts.machine) + ' alone', '',
+    [{ label: '+ New job', action: 'new-job' }]);
+  let body;
+  if (pane === 'profile') {
+    body = settingsProfile(facts, await api('/api/shop'));
+  } else if (pane === 'appearance') {
+    body = settingsAppearance();
+  } else if (pane === 'updates') {
+    body = settingsUpdates(facts);
+  } else {
+    body = settingsGeneral(facts);
+  }
+  $('#view').innerHTML = settingsTabs(pane) + body;
+}
+
 /* ------------------------------------------------------------------- wiring */
 const ACTION_SEL = ['[data-action]'].concat(Object.keys(ACTIONS).map((k) => '[data-' + k + ']')).join(',');
 function actionFor(el) {
@@ -5096,6 +5681,7 @@ function actionFor(el) {
   return hit ? ACTIONS[hit] : null;
 }
 document.addEventListener('click', (e) => {
+  if (!e.target.closest('#menubar')) closeMenus();
   if (e.target.closest('.drawer-scrim')) { closeDrawer(); return; }
   if (e.target.closest('.modal-scrim')) { closeModal(); return; }
   const cell = e.target.closest('.qe');
@@ -5121,6 +5707,8 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', (e) => {
   const ctl = e.target.closest('[data-filter]');
   if (ctl && (ctl.tagName === 'SELECT' || ctl.type === 'date')) setFilter(ctl.dataset.filter, ctl.value);
+  const held = e.target.closest('[data-pref]');
+  if (held) setCounterPref(held.dataset.pref, held);
 });
 document.addEventListener('input', (e) => {
   const ctl = e.target.closest('input[data-filter="q"]');
@@ -5152,8 +5740,18 @@ function setFilter(key, value, quiet) {
 }
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (menuOpen >= 0) { closeMenus(); return; }
     if (!$('#modal').hidden) closeModal();
     else if (!$('#drawer').hidden) closeDrawer();
+  }
+  /* The Mac's ⌘ keys, brought across under Alt — see MENU_KEYS for why not Ctrl. Every one of them
+     is also a row in the menu bar, so a hand that prefers the keyboard and a hand that prefers the
+     mouse are reading one list. */
+  if (e.altKey && !e.ctrlKey && !e.metaKey && e.key !== 'Alt') {
+    const chord = (e.shiftKey ? 'shift+' : '') + String(e.key).toLowerCase();
+    const hit = MENU_KEYS[chord];
+    if (hit) { e.preventDefault(); closeMenus(); runMenuItem(hit); }
+    return;
   }
   if (e.key === '/' && !/input|textarea|select/i.test(document.activeElement.tagName)) {
     const s = $('#topbar input[data-filter="q"]');
@@ -5208,6 +5806,10 @@ window.chrisphics = {
 };
 
 (async function start() {
+  applyCounterLook();
+  /* A counter who ticked "keep this screen awake" yesterday expects the window to be awake today,
+     not only after the next time it is hidden and shown again. */
+  if (awakeWanted) holdAwake(true);
   paintTheme();
   shellChrome();
   try {
@@ -5219,7 +5821,7 @@ window.chrisphics = {
     await boot();
     await refreshChrome();
     if (navigator.onLine) await syncOfflineQueue();
-    if (!location.hash) location.hash = '#/dashboard';
+    if (!location.hash) location.hash = startHash();
     await render();
     watchOfflineBook();
     watchBook();
