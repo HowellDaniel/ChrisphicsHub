@@ -5149,13 +5149,23 @@ const IN_MAC_SHELL = !!(window.webkit && window.webkit.messageHandlers &&
                         (window.webkit.messageHandlers.sheetPrint ||
                          window.webkit.messageHandlers.external));
 
+/* Whether this is a Mac app window at all — the shop's .app or a portable copy handed to another
+   Mac. Every WKWebView carries an object at window.webkit.messageHandlers even when no handler is
+   bound, which is exactly how the portable shell differs from Safari: Safari adds "Version/…
+   Safari/…" to the same Apple user agent, and every other browser has no webkit.messageHandlers. */
+const APPLE_OS = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '') ||
+                 /Mac OS X|iPhone|iPad|iPod/.test(navigator.userAgent || '');
+const IN_MAC_APP = APPLE_OS && !!(window.webkit && window.webkit.messageHandlers) &&
+                   !/Safari\//.test(navigator.userAgent || '');
+
 /* A Mac app window has Settings in its own menu bar — a native window with General, Appearance,
    Profile and Updates — so the page's Settings screen, its rail row and its Alt+S belong only to a
-   computer whose menu bar has no such item: a Windows or Linux unit opened in a browser. The owner
-   settled that on 2026-10-31: "Remove this and all it's property from the installed app on the
-   other mac machines ... because it's already at the top menu bar, and leave the windows own."
-   index.html asks the same question before the first paint, so the row is never drawn at all. */
-const SHELL_OWNS_SETTINGS = IN_MAC_SHELL;
+   computer whose menu bar has no such item: a Windows or Linux browser, or Safari on a Mac, which
+   is a browser and has no Settings of the shop's. The owner settled the app windows on 2026-10-31:
+   "Remove this and all it's property from the installed app on the other mac machines ... because
+   it's already at the top menu bar, and leave the windows own." index.html asks the same question
+   before the first paint, so the row is never drawn at all. */
+const SHELL_OWNS_SETTINGS = IN_MAC_APP;
 document.documentElement.dataset.pageSettings = SHELL_OWNS_SETTINGS ? 'shell' : 'page';
 if (SHELL_OWNS_SETTINGS) $$('.navlink[data-view="settings"]').forEach((a) => a.remove());
 
@@ -5626,8 +5636,6 @@ function paintMenuBar() {
      Linux box opened in a browser. Every Mac has the system's menu bar above the window — the
      shop's app, its portable copy, or Safari — so the strip is never drawn there. PHONE is the
      same turnstile the tab bar uses, so the two can never both be away or both be there. */
-  const APPLE_OS = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '') ||
-                   /Mac OS X|iPhone|iPad|iPod/.test(navigator.userAgent || '');
   const showing = !IN_MAC_SHELL && !APPLE_OS && !PHONE.matches;
   bar.hidden = !showing;
   /* The sticky title bar sits under the strip only while the strip exists — hence the flag rather

@@ -61,6 +61,24 @@ WINDOWS_USER_AGENT = (
     "  return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0 Safari/537.36';\n"
     "} });\n")
+
+# What Safari on this Mac says about itself, worn by every leg that means a Mac's browser rather
+# than a Mac app window. The app test rules Safari out by that "Safari/…" tail, because a browser's
+# menu bar carries no Settings of the shop's and the page's own row belongs there.
+MAC_BROWSER_USER_AGENT = (
+    "Object.defineProperty(navigator, 'platform', { get: function () { return 'MacIntel'; } });\n"
+    "Object.defineProperty(navigator, 'userAgent', { get: function () {\n"
+    "  return 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.6 Safari/605.1.15';\n"
+    "} });\n")
+
+# And a phone's Safari, for the leg that measures the narrow layout.
+PHONE_USER_AGENT = (
+    "Object.defineProperty(navigator, 'platform', { get: function () { return 'iPhone'; } });\n"
+    "Object.defineProperty(navigator, 'userAgent', { get: function () {\n"
+    "  return 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 "
+    "(KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1';\n"
+    "} });\n")
 PROXY = "http://127.0.0.1:%d" % PROXY_PORT
 shopcheck.require_free(PORT, PROXY_PORT)
 
@@ -440,7 +458,7 @@ macbrowser = probe([
                       "pageSettings:document.documentElement.dataset.pageSettings,"
                       "rail:document.querySelectorAll('#nav a[data-view=settings]').length,"
                       "top:getComputedStyle(document.querySelector('.topbar')).top})"),
-], fresh=True)
+], fresh=True, script=MAC_BROWSER_USER_AGENT)
 macbar = ask(macbrowser, "MACBROWSER")
 expect("a Mac's browser keeps the strip off the page altogether",
        (macbar.get("hidden"), macbar.get("flag")), (True, "off"))
@@ -481,7 +499,7 @@ tabs = probe([
     "eval|location.hash='#/settings?pane=nonsense'",
     "poll|document.querySelector('#view .tab.on').textContent==='General'",
     say("FELL", "JSON.stringify(document.querySelector('#view .tab.on').textContent)"),
-])
+], script=MAC_BROWSER_USER_AGENT)
 got = ask(tabs, "TABS")
 expect("Settings opens on the Mac's four tabs", got.get("tabs"), "General,Appearance,Profile,Updates")
 expect("and the first one is General", got.get("on"), "General")
@@ -523,7 +541,7 @@ kept = probe([
                  ".getPropertyValue('--text-scale').trim(),bg:document.documentElement.dataset.bg,"
                  "body:getComputedStyle(document.body).fontSize,"
                  "stored:localStorage.getItem('crispprint-start-route')})"),
-], route="/#/settings")
+], route="/#/settings", script=MAC_BROWSER_USER_AGENT)
 wrote = ask(kept, "WROTE")
 expect("the text size reaches the words on the screen", wrote.get("scale"), "1.25")
 expect("the paper changes", wrote.get("bg"), "sky")
@@ -536,7 +554,7 @@ again = probe([
                 ".getPropertyValue('--text-scale').trim(),bg:document.documentElement.dataset.bg,"
                 "stored:localStorage.getItem('crispprint-start-route'),"
                 "h1:document.querySelector('#topbar h1').textContent})"),
-])
+], script=MAC_BROWSER_USER_AGENT)
 back = ask(again, "BACK")
 expect("a fresh load opens on the screen this computer asked for", back.get("hash"), "#/accounts")
 check("the rail agrees it is standing there", back.get("h1"), "Accounts & payments")
@@ -559,7 +577,7 @@ chords = probe([
     "eval|document.dispatchEvent(new KeyboardEvent('keydown',{key:'4',altKey:true,bubbles:true}))",
     "poll|location.hash==='#/leads'",
     say("THREE", "JSON.stringify(location.hash)"),
-])
+], script=MAC_BROWSER_USER_AGENT)
 expect("Alt+1 walks to the Dashboard, wherever the counter was standing", ask(chords, "ONE"),
        "#/dashboard")
 expect("Alt+S opens Settings, the way the Mac's ⌘, does", ask(chords, "TWO"), "#/settings")
@@ -572,7 +590,7 @@ small = probe([
     say("PHONE", "JSON.stringify({hidden:document.getElementById('menubar').hidden,"
                  "flag:document.documentElement.dataset.menubar,"
                  "tabbar:!!document.getElementById('tabbar')})"),
-], size=(390, 844))
+], size=(390, 844), script=PHONE_USER_AGENT)
 phone = ask(small, "PHONE")
 expect("a phone keeps the tab bar", phone.get("tabbar"), True)
 expect("and gives up the menu bar it has no room for", (phone.get("hidden"), phone.get("flag")),
@@ -617,6 +635,35 @@ expect("Alt+S does nothing there",
 expect("and neither does a launch action that names Settings", ask(inmac, "ACT"), "#/dashboard")
 expect("while the Mac's Appearance pane alone owns the paper", ask(inmac, "PAPER"), "")
 
+# --- a portable copy handed to another Mac: its shell binds no native handlers at all, so the
+# only thing that tells it apart from Safari is the user agent. It is still a Mac app window, and
+# the owner's 2026-10-31 rule covers "the installed app on the other mac machines" as well.
+portable = probe([
+    "poll|document.documentElement.dataset.pageSettings==='shell'",
+    say("PORT", "JSON.stringify({flag:document.documentElement.dataset.pageSettings,"
+                "rail:document.querySelectorAll('#nav a[data-view=settings]').length,"
+                "said:document.getElementById('nav').textContent.indexOf('Settings')>=0,"
+                "screens:document.querySelectorAll('#nav a[data-view]').length})"),
+    "eval|location.hash='#/settings?pane=profile'",
+    "poll|location.hash==='#/dashboard'",
+    say("PGONE", "JSON.stringify({hash:location.hash,"
+                 "tabs:document.querySelectorAll('#view .tab').length,"
+                 "h1:document.querySelector('#topbar h1').textContent})"),
+    "eval|document.dispatchEvent(new KeyboardEvent('keydown',{key:'s',altKey:true,bubbles:true}))",
+    say("PKEY", "JSON.stringify({hash:location.hash,"
+                "tabs:document.querySelectorAll('#view .tab').length})"),
+], fresh=True)
+copy = ask(portable, "PORT")
+expect("a portable Mac app window — one with no native handlers — is marked before its first paint",
+       copy.get("flag"), "shell")
+expect("and its rail offers no Settings row either",
+       (copy.get("rail"), copy.get("said"), copy.get("screens")), (0, False, 11))
+pgone = ask(portable, "PGONE")
+expect("a Settings hash there opens the Dashboard, with no tabs painted",
+       (pgone.get("hash"), pgone.get("tabs"), pgone.get("h1")), ("#/dashboard", 0, "Dashboard"))
+expect("and Alt+S does nothing in that window",
+       (ask(portable, "PKEY").get("hash"), ask(portable, "PKEY").get("tabs")), ("#/dashboard", 0))
+
 # --- a computer the shop cannot vouch for is shown a shut Profile, not a refused save
 proxy = boot(PROXY_PORT, extra=["--trust-proxy"], logfile=proxy_log, folder=other_book)
 try:
@@ -626,7 +673,7 @@ try:
                     "phone:document.getElementById('setPhone').disabled,"
                     "save:document.querySelector('[data-do=settings-shop-save]').disabled,"
                     "said:document.querySelector('#view .card-b').textContent})"),
-    ], route="/#/settings?pane=profile", base=PROXY)
+    ], route="/#/settings?pane=profile", base=PROXY, script=MAC_BROWSER_USER_AGENT)
 finally:
     stop(proxy)
 refused = ask(shut, "SHUT")
@@ -664,6 +711,9 @@ check("the rail carries the Settings row for a computer whose menu bar has none"
 check("and a Mac app window is marked before its first paint, with a style that hides the row",
       'dataset.pageSettings' in index and 'data-page-settings="shell"' in styles,
       line_saying(styles, 'data-page-settings="shell"'))
+check("and both the page and that first frame rule Safari out, so a Mac's browser keeps the row",
+      "/Safari\\//" in index and "/Safari\\//" in app,
+      line_saying(index, "Safari\\/"))
 check("and the bar is in the page before the script runs", 'id="menubar"' in index)
 
 # ------------------------------------------------------------------------- the book, whole

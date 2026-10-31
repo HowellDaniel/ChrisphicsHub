@@ -5,8 +5,10 @@
    v19 would render "undefined" rows over a build that knows nothing about the cadence. The shell
    list itself is unchanged — /api/counter and /api/update-check are API routes, which the worker
    already lets past to the shop, and neither is prefilled: an update answer belongs to the computer
-   that got it, not to a phone that read it once on the bus. */
-const CACHE_NAME = 'crispprint-shell-v24';
+   that got it, not to a phone that read it once on the bus. v25 carries the Mac app windows that
+   own Settings, so a counter holding v24's page must not keep drawing the rail's row until the
+   background refresh happens to land. */
+const CACHE_NAME = 'crispprint-shell-v25';
 const APP_SHELL = [
   '/',
   '/index.html',

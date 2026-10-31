@@ -86,10 +86,12 @@ there is no room for it at 390 points.
 the native panel with the same four panes, so on 2026-10-31 the owner had the page's own Settings taken
 out of the installed app: "Remove this and all it's property from the installed app on the other mac
 machines including this machine too because it's already at the top menu bar, and leave the windows own
-like that". Inside the Mac's window there is no Settings row in the rail, no Settings screen, no tabs
-and no `Alt+S`, and an old `#/settings` bookmark, launch action or saved start screen opens the
-Dashboard instead. A Windows or Linux browser keeps every one of them, and a Mac's browser keeps them
-too, because Safari's menu bar has no Settings of the shop's. A counter that is not the shop's own Mac
+like that". Inside any Mac app window — the shop's own `.app` and a portable copy installed on another
+Mac, whose shell binds no native handlers and is recognised as a WKWebView all the same — there is no
+Settings row in the rail, no Settings screen, no tabs and no `Alt+S`, and an old `#/settings` bookmark,
+launch action or saved start screen opens the Dashboard instead. A Windows or Linux browser keeps every
+one of them, and a Mac's browser keeps them too, because Safari's menu bar has no Settings of the
+shop's. A counter that is not the shop's own Mac
 finds Profile shut and is told why, in the engine's own words, since the book only takes profile writes
 from the shop computer. What the page's tabs hold — the screen to open on, the size of the words, the
 paper, keeping that machine awake — is stored in that browser alone and never travels to the server, so

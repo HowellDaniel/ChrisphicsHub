@@ -8,8 +8,8 @@
   },
   {
    "name": "public/app.js",
-   "sha256": "d998f7a06fef97d24af56c814a51ace7ac12c3d09f8b57f11aedb4561767bc39",
-   "size": 352080
+   "sha256": "15cf45ece7a3a49adda55bf7500736ffeb1182cfabb7f73e72b5cf33d5ea1007",
+   "size": 352693
   },
   {
    "name": "public/img/apple-touch-icon.png",
@@ -73,8 +73,8 @@
   },
   {
    "name": "public/index.html",
-   "sha256": "7b7b1aa3640b3414eff42a14371584674347dde03ac6e552b494501fa1f5546d",
-   "size": 6807
+   "sha256": "b686960b599406a56d4a718ed95144d652c5ecb4369f5a2387b72a3d4604bc5c",
+   "size": 7219
   },
   {
    "name": "public/manifest.webmanifest",
@@ -88,8 +88,8 @@
   },
   {
    "name": "public/sw.js",
-   "sha256": "deecc67cd24cc41546e8115034910e1cb4ccf98ca7b34d0a536369b2e14ba930",
-   "size": 3521
+   "sha256": "fe7cdfbb7d7ce7337a058ec1c63f8b9bbf829f46dfe7b0bf5bad4d68188fdfe2",
+   "size": 3693
   },
   {
    "name": "schema.sql",
@@ -103,7 +103,7 @@
   }
  ],
  "folder": "chrisphics-hub-1.11",
- "notes": "The page's Settings leaves the Mac's app window, whose menu bar already carries it. Windows and a Mac's browser keep every part of it.",
- "size": 2258337,
+ "notes": "",
+ "size": 2259534,
  "version": "1.11"
 }

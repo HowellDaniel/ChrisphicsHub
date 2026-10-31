@@ -484,6 +484,17 @@ else:
     SERVED["hits"] = 0
     # One scenario per WebKit run: the page is opened, read, pressed once and read again. The press
     # goes to the engine over the same origin the page came from, so nothing here reaches GitHub.
+    # The Updates pane is a browser's screen now: a Mac app window keeps Settings on its own menu
+    # bar and sends #/settings to the Dashboard, so this leg wears Safari's user agent and stands
+    # where the counter's browser stands.
+    ua_script = os.path.join(work, "safari-ua.js")
+    with open(ua_script, "w", encoding="utf-8") as handle:
+        handle.write(
+            "Object.defineProperty(navigator, 'platform', { get: function () { return 'MacIntel'; } });\n"
+            "Object.defineProperty(navigator, 'userAgent', { get: function () {\n"
+            "  return 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+            "(KHTML, like Gecko) Version/17.6 Safari/605.1.15';\n"
+            "} });\n")
     said = subprocess.run(
         [PROBE, "http://127.0.0.1:%d" % PORT, work,
          "open|/index.html?cb=%d" % os.getpid(),
@@ -507,7 +518,8 @@ else:
          "document.querySelectorAll('#view .sfield code'),"
          "function(c){return c.textContent;}).join(' / '))",
          "say|'DL2='+JSON.stringify(Boolean(document.querySelector('[data-do=settings-download]')))"],
-        capture_output=True, text=True, timeout=240)
+        capture_output=True, text=True, timeout=240,
+        env=dict(os.environ, WKPROBE_SCRIPT=ua_script))
     prose = said.stdout or ""
 
     def read(tag):
