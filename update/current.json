@@ -8,8 +8,8 @@
   },
   {
    "name": "public/app.js",
-   "sha256": "15cf45ece7a3a49adda55bf7500736ffeb1182cfabb7f73e72b5cf33d5ea1007",
-   "size": 352693
+   "sha256": "51e6294fd6c65d4922e5f91b1bc06cc77ffe4be8eda991f51fd43b19b706bf86",
+   "size": 352845
   },
   {
    "name": "public/img/apple-touch-icon.png",
@@ -73,8 +73,8 @@
   },
   {
    "name": "public/index.html",
-   "sha256": "b686960b599406a56d4a718ed95144d652c5ecb4369f5a2387b72a3d4604bc5c",
-   "size": 7219
+   "sha256": "a9a78389b0949e65ce77261514f52329492743216962cf7a4ab477ea32c85971",
+   "size": 7546
   },
   {
    "name": "public/manifest.webmanifest",
@@ -104,6 +104,6 @@
  ],
  "folder": "chrisphics-hub-1.11",
  "notes": "",
- "size": 2259534,
+ "size": 2260013,
  "version": "1.11"
 }
