@@ -8,6 +8,11 @@ use the shop's configured WhatsApp Business and email providers.
     python3 server.py --seed          # start and load sample records (for a demo)
     python3 server.py --shop-copy F   # take the shop's book at F when this machine's is missing/empty
     python3 server.py --backup        # write a timestamped copy of the data and exit
+    python3 server.py --update-check  # ask the repository for the newest build and exit
+
+While it runs, the engine also asks the shop's own repository for the newest version once a week
+and keeps that answer beside the book, so Settings > Updates has something to say before anybody
+presses a button. It never installs anything, and it never writes into the book.
 """
 from __future__ import annotations
 
@@ -2574,7 +2579,632 @@ def counter_facts(handler):
                     "this_mac_asked": shop_mac_locks_itself()},
         "awake": KEEP_AWAKE,
         "hours": public_hours(shop_hours(), True),
+        "updates": update_facts(),
     }
+
+
+# ------------------------------------------------------------------ weekly software update
+#
+# The shop's book keeps itself copied every night; the software that reads it now keeps itself
+# checked once a week. Two things this answers deliberately does not do: it never writes into the
+# book — which build is newest is news about the software, not one of the shop's records — and it
+# never installs anything. It reads one number off the shop's own repository, keeps what it learned
+# in a file beside the book, and says plainly on every counter's Settings > Updates whether a newer
+# build is waiting. Rebuilding stays a person's decision, made on the shop's Mac.
+
+REPOSITORY = (os.environ.get("CHRISPHICS_REPO") or
+              "https://github.com/HowellDaniel/ChrisphicsHub").rstrip("/")
+UPDATE_URL = (os.environ.get("CHRISPHICS_UPDATE_URL") or
+              REPOSITORY.replace("github.com", "raw.githubusercontent.com", 1) + "/main/VERSION")
+UPDATE_FILE = os.environ.get("CHRISPHICS_UPDATE_FILE") or os.path.join(SUPPORT, "update-check.json")
+UPDATE_WEEK = 7 * 24 * 60 * 60      # the cadence the shop asked for: one week, in seconds
+UPDATE_RETRY = 60 * 60              # an ask that learned nothing is worth trying again within an hour
+UPDATE_ANSWER_BYTES = 200           # a version number arrives here, not a web page
+_update_lock = threading.Lock()
+
+
+def compare_versions(left, right):
+    """1.2 against 1.10: every dotted part is a number, so ten is ten and never a one — the same
+    rule the Mac's Settings > Updates pane and the page use, written once here for the engine."""
+
+    def parts(value):
+        return [int(bit) if bit.isdigit() else 0 for bit in str(value or "0").split(".")] or [0]
+
+    a, b = parts(left), parts(right)
+    long = max(len(a), len(b))
+    a += [0] * (long - len(a))
+    b += [0] * (long - len(b))
+    for x, y in zip(a, b):
+        if x != y:
+            return -1 if x < y else 1
+    return 0
+
+
+def read_update_check():
+    """The last answer the engine kept, or nothing when this computer has never asked — or when the
+    file cannot be read, which is treated as never asked rather than as an error the counter sees."""
+    try:
+        with open(UPDATE_FILE, encoding="utf-8") as handle:
+            saved = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def update_check_due(record=None):
+    """(is it time to ask, seconds until the next ask). A shop that has never asked is due the
+    moment its engine comes up, and a Mac that was asleep through its week asks when it wakes."""
+    record = record if record is not None else read_update_check()
+    try:
+        age = (dt.datetime.now() - dt.datetime.strptime(
+            record.get("asked_at") or "", "%Y-%m-%d %H:%M:%S")).total_seconds()
+    except (ValueError, TypeError):
+        return True, 0.0
+    # A week since an answer that meant something; an hour since an ask that reached nothing.
+    limit = UPDATE_RETRY if record.get("verdict") == "unknown" else UPDATE_WEEK
+    return age >= limit, max(0.0, limit - age)
+
+
+def ask_repository_for_version():
+    """One number, from the shop's own repository: (version, trouble). Nothing else about the
+    answer is trusted, so the road out cannot be turned into a general fetch."""
+    request = urllib.request.Request(UPDATE_URL, headers={
+        "User-Agent": "Chrisphics Hub/%s" % (counter_version() or "unknown"),
+        "Accept": "text/plain"})
+    raw = ""
+    try:
+        with urllib.request.urlopen(request, timeout=10) as answer:
+            if answer.status != 200:
+                return "", "the repository answered %s" % answer.status
+            raw = answer.read(UPDATE_ANSWER_BYTES).decode("utf-8", "replace")
+    except urllib.error.HTTPError as error:
+        return "", "the repository answered %s" % error.code
+    except (urllib.error.URLError, TimeoutError, ssl.SSLError, OSError):
+        return "", "the repository could not be reached from this computer"
+    remote = (raw.strip().splitlines() or [""])[0].strip()[:16]
+    if not remote:
+        return "", "the repository answered with nothing in it"
+    if not re.fullmatch(r"\d+(\.\d+){0,3}", remote):
+        return "", "what the repository sent is not a version number"
+    return remote, ""
+
+
+def run_update_check(reason=""):
+    """Ask the repository once and keep what it said beside the book. Returns the answer."""
+    record = {"asked_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+              "this": counter_version(), "remote": "", "verdict": "unknown",
+              "trouble": "", "reason": reason}
+    with _update_lock:
+        remote, trouble = ask_repository_for_version()
+        if trouble:
+            record["trouble"] = trouble
+        else:
+            record["remote"] = remote
+            if not record["this"]:
+                record["trouble"] = ("this build carries no version number, so the two could not be"
+                                     " compared — rebuild it to give it one")
+            else:
+                against = compare_versions(record["this"], remote)
+                record["verdict"] = ("newer" if against < 0
+                                     else "ahead" if against > 0 else "same")
+        try:
+            folder = os.path.dirname(UPDATE_FILE)
+            if folder:
+                os.makedirs(folder, exist_ok=True)
+            temp = UPDATE_FILE + ".writing"
+            with open(temp, "w", encoding="utf-8") as handle:
+                json.dump(record, handle)
+            os.replace(temp, UPDATE_FILE)
+        except OSError as error:
+            record["trouble"] = ((record["trouble"] + "; " if record["trouble"] else "")
+                                 + "the answer could not be kept here (%s)" % error)
+    return record
+
+
+def last_install_facts():
+    """What the last install this computer ran came to, written by the apply script. It is how the
+    app can say "already updated to 1.9 a minute ago" the moment it opens again."""
+    try:
+        with open(os.path.join(UPDATE_FOLDER, "last-install.json"), encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
+def update_facts():
+    """What the Settings screen is told about this software, read from the last weekly answer."""
+    record = read_update_check()
+    due, until = update_check_due(record)
+    return {"days": 7, "repository": REPOSITORY,
+            "asked_at": record.get("asked_at", ""),
+            "this": record.get("this", "") or counter_version(),
+            "remote": record.get("remote", ""),
+            "verdict": record.get("verdict", ""),
+            "trouble": record.get("trouble", ""),
+            "reason": record.get("reason", ""),
+            "next_in_hours": int(round(until / 3600)) if until else 0,
+            "due": due,
+            "package": package_facts(),
+            "installed": last_install_facts()}
+
+
+def watch_updates(check=None):
+    """The engine keeps the week on its own clock while it runs, so the answer is there before
+    anybody looks for it. The first look is shortly after start — a shop that slept through its
+    week should hear as soon as it wakes — and after that the clock is read every fifteen minutes.
+    A shop that is only ever opened by hand can set it more often; nothing here can block a counter."""
+    if check is None:
+        try:
+            check = max(5, int(os.environ.get("CHRISPHICS_UPDATE_CHECK", "900")))
+        except ValueError:
+            check = 900
+
+    def loop():
+        first = True
+        while True:
+            # The shop's Mac may have slept through the week it was meant to ask in, so the first
+            # look comes shortly after it wakes rather than one full interval in — but a run that
+            # asked for a shorter interval is a test or a small hosted box, and waits less.
+            time.sleep(min(45, check) if first else check)
+            first = False
+            try:
+                if update_check_due()[0]:
+                    run_update_check("the week came round")
+            except Exception as error:  # The shop must keep trading even if the repository cannot.
+                sys.stderr.write("The weekly check for a new build failed: %s: %s\n"
+                                 % (type(error).__name__, error))
+    threading.Thread(target=loop, daemon=True, name="update-check").start()
+
+
+# --------------------------------------------------------------------------- the newer build itself
+#
+# Knowing a newer build exists is only half of what the shop asked for. The other half is what the
+# owner said on 31 October: the cashier presses the button, the update comes down, the app asks her
+# before it does anything to itself, then it closes and opens again already the newer version.
+#
+# Three rules hold that shape together:
+#
+#   * only the shop's own repository is ever asked, and only for a folder the shop publishes with the
+#     version number in it, so the road out cannot be turned into a general download;
+#   * nothing that arrives is trusted because it arrived. Every file in the package carries a sha256
+#     from the manifest, the record is re-read after it lands, and the engine it would replace is
+#     proved to be a Python file that compiles before anything is armed;
+#   * the package is a *staging* the shop's own computer keeps. Applying it is not something the
+#     records engine does to itself on a stranger's word — the app on that computer asks its owner,
+#     closes, and runs tools/apply-update.sh against its own folder. A phone or a laptop reading this
+#     book over the Wi-Fi can watch the progress, but it cannot rewrite the shop's Mac.
+#
+# The book is never part of any of this: the package holds code only, the staging lives beside the
+# book in the support folder, and the apply step is given the folder the app runs from, never the
+# folder the records live in.
+UPDATE_META_URL = os.environ.get("CHRISPHICS_UPDATE_META_URL") or (
+    REPOSITORY.replace("github.com", "raw.githubusercontent.com", 1) + "/main/update/current.json")
+RAW_ROOT = os.environ.get("CHRISPHICS_UPDATE_RAW") or REPOSITORY.replace(
+    "github.com", "raw.githubusercontent.com", 1)
+UPDATE_FOLDER = os.environ.get("CHRISPHICS_UPDATE_FOLDER") or os.path.join(SUPPORT, "updates")
+UPDATE_PACKAGE = os.path.join(UPDATE_FOLDER, "package.json")
+UPDATE_BYTES_MAX = 120 * 1024 * 1024        # a build of this app is a few tens of MB; more is a fault
+UPDATE_PARTS_MAX = 400                      # and a package of a thousand files is not this app
+_package_lock = threading.Lock()
+_package_progress = {"stage": "idle", "said": "", "bytes": 0, "total": 0, "version": ""}
+
+
+def _package_note(stage, said="", size=0, version="", total=0):
+    """Where the download got to, kept in memory only — a counter asking twice must not fight a
+    second ask, and a fault part-way down is worth reading without opening a file."""
+    _package_progress.update({"stage": stage, "said": said, "bytes": size, "version": version,
+                              "total": total})
+    return dict(_package_progress)
+
+
+def human_bytes(count):
+    count = int(count or 0)
+    for unit, floor in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
+        if count >= floor:
+            return "%.1f %s" % (count / float(floor), unit)
+    return "%d bytes" % count
+
+
+def read_update_package():
+    """The staged newer build, as a plain dict — empty when there is none. Written by the tool the
+    shop publishes with, read by every screen that has to say what version is waiting."""
+    for path in (UPDATE_PACKAGE, os.path.join(ROOT, "update", "current.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                record = json.load(handle)
+            if isinstance(record, dict) and record.get("version"):
+                record.setdefault("staged_at", None)
+                record["_from"] = path
+                return record
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
+def write_update_package(record):
+    os.makedirs(UPDATE_FOLDER, exist_ok=True)
+    temporary = UPDATE_PACKAGE + ".writing"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=1, sort_keys=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, UPDATE_PACKAGE)
+
+
+def fetch_json(url, limit=20000, timeout=15):
+    """One small json answer from the shop's own repository. Kept tiny on purpose: the manifest is a
+    list of file names and numbers, and anything larger is not this app's update."""
+    request = urllib.request.Request(url, headers={
+        "User-Agent": "Chrisphics Hub/%s" % (counter_version() or "unknown"),
+        "Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as answer:
+        if answer.status != 200:
+            raise ValueError("the repository answered %s" % answer.status)
+        raw = answer.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError("what the repository sent is too large to be a build record")
+    return json.loads(raw.decode("utf-8"))
+
+
+def package_name(manifest):
+    """The folder the build was published in. The repository's own path decides it — a manifest that
+    named `../../etc` or an outside address is refused here, before any part of it is used."""
+    version = str(manifest.get("version") or "").strip()
+    if not re.fullmatch(r"\d+(\.\d+){0,3}", version):
+        raise ValueError("the build record names no version this shop can read")
+    folder = str(manifest.get("folder") or ("chrisphics-hub-" + version))
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", folder) or folder.startswith("."):
+        raise ValueError("the build record names a folder this shop will not open")
+    return version, folder
+
+
+def part_target(name):
+    """Where a part of the package belongs under the folder an app runs from. Only the four things
+    the app is made of, in the places they already have — never a new path, never the book."""
+    clean = str(name or "").replace("\\", "/").lstrip("./")
+    if clean in ("server.py", "schema.sql", "VERSION"):
+        return clean
+    if clean.startswith("public/") and not clean.endswith("/"):
+        depth = clean.count("/")
+        if 1 <= depth <= 3 and all(part and not part.startswith(".") for part in clean.split("/")):
+            return clean
+    return None
+
+
+def sha256_of(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download_update(reason=""):
+    """Bring the newest build the repository publishes down into the support folder and prove it.
+
+    Returns the package record, with `ready` True only when every file named in the manifest arrived
+    and every sha256 matched. Nothing is touched outside the support folder, so an update that stops
+    half-way leaves the shop exactly where it was."""
+    with _package_lock:
+        record = _download_update_locked(reason)
+    if not record.get("ready") and record.get("version"):
+        # An attempt that stopped half-way can have replaced some of the files a folder was proved
+        # against, so the older record must stop reading as a checked build. What is on disk is said
+        # plainly instead: the download did not finish, and nothing was installed.
+        _package_failed(str(record.get("version") or ""), str(record.get("trouble") or ""))
+    return record
+
+
+def _package_failed(version, trouble):
+    os.makedirs(UPDATE_FOLDER, exist_ok=True)
+    write_update_package({"version": version, "folder": "", "files": [], "size": 0, "path": "",
+                          "ready": False, "stage": "failed", "notes": "",
+                          "staged_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                          "for_this_build": counter_version(), "trouble": trouble,
+                          "said": trouble, "bytes": 0, "total": 0})
+
+
+def _download_update_locked(reason=""):
+    known = read_update_check()
+    if known.get("verdict") != "newer" and not reason.startswith("a counter"):
+        return {"ready": False, "trouble": "the repository has not been asked yet"}
+    _package_note("reading", "asking the repository for its build record", 0,
+                  known.get("remote") or "")
+    try:
+        manifest = fetch_json(UPDATE_META_URL)
+    except Exception as error:
+        _package_note("failed", "the repository's build record could not be read (%s)"
+                      % getattr(error, "status", type(error).__name__))
+        return {"ready": False, "trouble": _package_note("failed")["said"]}
+    try:
+        version, folder = package_name(manifest)
+    except ValueError as error:
+        _package_note("failed", str(error))
+        return {"ready": False, "trouble": str(error)}
+    files = manifest.get("files")
+    if not isinstance(files, list) or not 1 <= len(files) <= UPDATE_PARTS_MAX:
+        _package_note("failed", "the build record holds no files this shop could place")
+        return {"ready": False, "trouble": _package_progress["said"]}
+    base = manifest.get("base") or ("main/update/" + folder)
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", base) or ".." in base or not base.startswith("main/"):
+        _package_note("failed", "the build record points outside the shop's own repository")
+        return {"ready": False, "trouble": _package_progress["said"]}
+    raw_root = RAW_ROOT
+    destination = os.path.join(UPDATE_FOLDER, folder)
+    os.makedirs(destination, exist_ok=True)
+    parts, missing = [], []
+    total = 0
+    for entry in files:
+        name, wanted = str(entry.get("name") or ""), str(entry.get("sha256") or "")
+        where = part_target(name)
+        if where is None or not re.fullmatch(r"[0-9a-f]{64}", wanted):
+            missing.append(name or "(unnamed)")
+            continue
+        size = int(entry.get("size") or 0)
+        if size < 0 or total + size > UPDATE_BYTES_MAX:
+            missing.append(name)
+            break
+        total += size
+        parts.append({"name": where, "sha256": wanted, "size": size})
+    if missing:
+        _package_note("failed", "the build record lists files this shop will not take: "
+                      + ", ".join(sorted(set(missing))[:3]))
+        return {"ready": False, "trouble": _package_progress["said"]}
+    _package_note("downloading", "%d files, %s" % (len(parts), human_bytes(total)), 0, version,
+                  total)
+    arrived, faults = 0, []
+    for piece in parts:
+        url = "%s/%s/%s" % (raw_root, base, urllib.parse.quote(piece["name"]))
+        landing = os.path.join(destination, piece["name"])
+        os.makedirs(os.path.dirname(landing), exist_ok=True)
+        temporary = landing + ".part"
+        try:
+            request = urllib.request.Request(url, headers={
+                "User-Agent": "Chrisphics Hub/%s" % (counter_version() or "unknown")})
+            with urllib.request.urlopen(request, timeout=60) as answer, open(temporary, "wb") as out:
+                if answer.status != 200:
+                    raise ValueError("the repository answered %s" % answer.status)
+                got = 0
+                for block in iter(lambda: answer.read(1 << 16), b""):
+                    got += len(block)
+                    if got > max(piece["size"], 1) * 2 + 1024:
+                        raise ValueError("the repository sent more than the build record counted")
+                    out.write(block)
+            if piece["size"] and got != piece["size"]:
+                raise ValueError("it stopped at %d of %d bytes" % (got, piece["size"]))
+            if sha256_of(temporary) != piece["sha256"]:
+                raise ValueError("the bytes did not match the record")
+            os.replace(temporary, landing)
+            arrived += 1
+            _package_note("downloading", "%d of %d files" % (arrived, len(parts)), got, version, total)
+        except Exception as error:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            faults.append("%s: %s" % (piece["name"], getattr(error, "reason", None)
+                                      or getattr(error, "strerror", None) or error))
+    if faults:
+        _package_note("failed", "the newer build did not all come down — " + faults[0][:90])
+        return {"ready": False, "trouble": _package_progress["said"], "version": version}
+    # The engine being replaced has to be an engine. This is the only check that says the folder the
+    # app is about to run from is still going to start, and it costs nothing to make.
+    try:
+        with open(os.path.join(destination, "server.py"), encoding="utf-8") as handle:
+            compile(handle.read(), os.path.join(destination, "server.py"), "exec")
+    except (OSError, ValueError, SyntaxError) as error:
+        _package_note("failed", "the build that came down would not start here (%s)" % error)
+        return {"ready": False, "trouble": _package_progress["said"], "version": version}
+    record = {"version": version, "folder": folder, "files": parts, "size": total,
+              "path": destination, "ready": True, "notes": str(manifest.get("notes") or "")[:400],
+              "staged_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+              "for_this_build": known.get("this") or counter_version(),
+              "trouble": "", "stage": "ready", "said": "%d files, %s" % (len(parts), human_bytes(total)),
+              "bytes": total, "total": total}
+    write_update_package(record)
+    _package_note("ready", record["said"], total, version, total)
+    return record
+
+
+def package_facts():
+    """What every screen says about the newer build: whether one is waiting, how much of it has
+    arrived, and what pressing the button would do. Read from the staged record, never from a
+    guess, so a counter three rooms away says the same words as the Mac doing the work."""
+    known = read_update_check()
+    staged = read_update_package()
+    live = dict(_package_progress)
+    version = known.get("remote") or ""
+    # A record left from an older download is not news about the build the repository holds now, so
+    # the staged folder has to agree with the number the week's ask brought back.
+    matching = bool(staged.get("ready")) and str(staged.get("version") or "") == version
+    running = live.get("stage") or "idle"
+    if matching:
+        state = "ready"
+    elif running in ("reading", "downloading"):
+        state = running
+    elif running == "failed":
+        state = "failed"
+    elif str(staged.get("stage") or "") == "failed" and str(staged.get("version") or "") == version:
+        # The last attempt at exactly this build stopped half-way, so the folder beside the book
+        # cannot be called checked even though an older record once was.
+        state = "failed"
+    elif known.get("verdict") == "newer":
+        state = "waiting"
+    else:
+        state = "none"
+    said = live.get("said") or ""
+    if state == "failed" and not said:
+        said = str(staged.get("said") or "") if str(staged.get("stage") or "") == "failed" else ""
+    if state == "failed" and not said:
+        said = str(known.get("trouble") or "")
+    return {"days": UPDATE_WEEK // (24 * 60 * 60), "version": version, "state": state,
+            "stage": running, "said": said, "bytes": live.get("bytes") or 0,
+            "total": live.get("total") or 0, "ready": matching,
+            "install_version": str(staged.get("version") or "") if matching else "",
+            "notes": str(staged.get("notes") or "") if matching else "",
+            "files": len(staged.get("files") or []) if matching else 0,
+            "size": int(staged.get("size") or 0) if matching else 0,
+            "staged_at": staged.get("staged_at") or "", "path": str(staged.get("path") or ""),
+            "trouble": known.get("trouble") or (said if state == "failed" else "")}
+
+
+# The script that puts an installed copy in place lives here, in the engine, rather than in a file the
+# app bundle carries: a copy handed out months ago has this engine and no such file, and it still has
+# to be able to take the first update. One source, so the script that runs is the script that was
+# read. It waits for the shop to close, keeps the old files, copies the new ones, brings the shop
+# back, and puts the old ones back if the new build does not answer.
+APPLY_SCRIPT = r'''#!/bin/sh
+# Put the staged build in place, keep the old one, bring the shop back. Written by the records engine.
+# 1 from-folder  2 to-folder  3 support folder  4 version  5 pids to wait for
+# 6 launchd label  7 port  8 scheme  9 app to reopen
+set -u
+FROM=$1; TO=$2; SUPPORT=$3; VERSION=$4; PIDS=$5; LABEL=$6; PORT=$7; SCHEME=$8; APP=$9
+LOG="$SUPPORT/updates/apply.log"
+RECORD="$SUPPORT/updates/last-install.json"
+STAMP=$(date '+%Y-%m-%d %H:%M:%S')
+say() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG" 2>/dev/null; }
+record() { printf '{"version":"%s","at":"%s","result":"%s","reason":"%s"}\n' \
+           "$VERSION" "$STAMP" "$1" "$2" > "$RECORD"; }
+list() { cat "$FROM/files.list" 2>/dev/null; }
+
+say "asked to install $VERSION from $FROM into $TO"
+for pid in $PIDS; do
+  waited=0
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 300 ]; do
+    sleep 0.1; waited=$((waited + 1))
+  done
+done
+say "the shop has closed"
+
+BACKUP="$SUPPORT/updates/previous-$VERSION-$(date '+%Y%m%d%H%M%S')"
+mkdir -p "$BACKUP"
+restore() {
+  for part in $(list); do
+    if [ -f "$BACKUP/$part" ]; then
+      mkdir -p "$TO/$(dirname "$part")"
+      cp -p "$BACKUP/$part" "$TO/$part" || say "could not put $part back"
+    fi
+  done
+  say "the old build is back in place"
+}
+restart() {
+  if [ -n "$LABEL" ] && command -v launchctl >/dev/null 2>&1 \
+     && launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    launchctl kickstart -k "gui/$(id -u)/$LABEL" >> "$LOG" 2>&1
+  elif [ -n "$APP" ] && [ -d "$APP" ]; then
+    open "$APP" >> "$LOG" 2>&1
+  fi
+}
+healthy() {
+  probe="$SCHEME://127.0.0.1:$PORT/healthz"
+  tries=${CHRISPHICS_UPDATE_HEALTH_TRIES:-450}
+  waited=0
+  while [ "$waited" -lt "$tries" ]; do
+    if curl -sk --max-time 2 "$probe" >/dev/null 2>&1; then return 0; fi
+    sleep 0.1; waited=$((waited + 1))
+  done
+  return 1
+}
+
+for part in $(list); do
+  if [ -f "$TO/$part" ]; then
+    mkdir -p "$BACKUP/$(dirname "$part")"
+    cp -p "$TO/$part" "$BACKUP/$part" || say "could not keep a copy of $part"
+  fi
+done
+failed=""
+for part in $(list); do
+  mkdir -p "$TO/$(dirname "$part")"
+  if ! cp -p "$FROM/$part" "$TO/$part"; then failed="$part"; break; fi
+done
+chmod +x "$TO/server.py" 2>/dev/null
+say "copied the new build in"
+record installing ""
+if [ -n "$failed" ]; then
+  say "could not place $failed"
+  restore
+  record failed "could not place $failed"
+  restart
+  [ -n "$APP" ] && open "$APP" >> "$LOG" 2>&1
+  exit 2
+fi
+restart
+if ! healthy; then
+  say "the new build did not answer; putting the old one back"
+  restore
+  record failed "the newer build did not start, so the old one is back"
+  restart
+  [ -n "$APP" ] && open "$APP" >> "$LOG" 2>&1
+  exit 3
+fi
+say "the shop is back on $VERSION"
+record done ""
+if [ -n "$APP" ] && [ -d "$APP" ]; then open "$APP" >> "$LOG" 2>&1; fi
+rm -rf "$FROM"
+exit 0
+'''
+
+
+def staged_files(record):
+    """The relative paths the install is allowed to place, read back from the staged record rather
+    than from the script's arguments, so what runs and what was proved are the same list."""
+    return [str(entry.get("name")) for entry in (record.get("files") or [])
+            if part_target(entry.get("name"))]
+
+
+def arm_update_install(app_path="", service=""):
+    """Hand the staged build to the apply script and let the shop close.
+
+    Called only from this computer (the route refuses a request that came over the Wi-Fi), because
+    applying files changes *this* machine and the counter three rooms away must not be able to
+    restart the shop's Mac. Returns what will happen, so the screen can say it before it happens."""
+    record = read_update_package()
+    if not record.get("ready") or not record.get("path"):
+        return {"armed": False, "trouble": "no newer build has been brought down yet"}
+    staged = record["path"]
+    files = staged_files(record)
+    if not files or "server.py" not in files:
+        return {"armed": False, "trouble": "the staged build is not a build of this app"}
+    if os.name == "nt":
+        return {"armed": False,
+                "trouble": "this Windows copy updates by running the setup file from the shop's Mac"}
+    try:
+        with open(os.path.join(staged, "server.py"), encoding="utf-8") as handle:
+            compile(handle.read(), os.path.join(staged, "server.py"), "exec")
+    except (OSError, ValueError, SyntaxError) as error:
+        return {"armed": False, "trouble": "the staged build would not start here (%s)" % error}
+    with open(os.path.join(staged, "files.list"), "w", encoding="utf-8") as handle:
+        handle.write("\n".join(files) + "\n")
+    os.makedirs(UPDATE_FOLDER, exist_ok=True)
+    script = os.path.join(UPDATE_FOLDER, "apply-update.sh")
+    with open(script, "w", encoding="utf-8") as handle:
+        handle.write(APPLY_SCRIPT)
+    os.chmod(script, 0o700)
+    port = int(SERVE.get("port") or 0)
+    scheme = "https" if (SERVE.get("tls") or THROUGH_PROXY) else "http"
+    opened = app_path if app_path.endswith(".app") and os.path.isdir(app_path) else ""
+    command = ["/bin/sh", script, staged, ROOT, SUPPORT, str(record.get("version") or ""),
+               str(os.getpid()), service, str(port), scheme, opened]
+    try:
+        child = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 stdin=subprocess.DEVNULL, start_new_session=True, close_fds=True,
+                                 cwd=SUPPORT)
+    except OSError as error:
+        return {"armed": False, "trouble": "the installer could not be started (%s)" % error}
+    armed = {"armed": True, "version": str(record.get("version") or ""), "app": opened,
+             "files": len(files), "size": int(record.get("size") or 0),
+             "will_close_in": 2, "pid": child.pid}
+    sys.stderr.write("update: installing %s from %s; this engine closes in two seconds\n"
+                     % (armed["version"], staged))
+    sys.stderr.flush()
+    # The shop closes on purpose, so the script can replace the files it is running from. Nothing
+    # else is scheduled: if the script cannot bring the shop back, it puts the old build back first.
+    def close():
+        time.sleep(2.0)
+        os._exit(0)
+    threading.Thread(target=close, daemon=False, name="update-close").start()
+    return armed
 
 
 # ----------------------------------------------------------------------- sign-in
@@ -5438,6 +6068,14 @@ def shop_forecast(params):
 
 # -------------------------------------------------------------------------- http
 
+# Calls that change what this engine knows, but not one of the shop's records. They are kept out of
+# the book's write count (so no other counter repaints for them), out of the security note that says
+# somebody wrote in the book, and out of sync_requests — the table that remembers a write so a retry
+# does not book the same job twice. A note about software has no business in any of those.
+NON_BOOK_ROUTES = {"/api/login", "/api/logout", "/api/update-check", "/api/update-download",
+                   "/api/update-install"}
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ChrisphicsHub/1.0"
     # The Python version this Mac happens to run is not information the shop needs to hand out on
@@ -5605,8 +6243,8 @@ class Handler(BaseHTTPRequestHandler):
                     note_security("turned_away", self.client_ip(), self.headers.get("User-Agent", ""),
                                   "asked for %s with no sign-in" % path[:120])
                     return self.send(401, {"error": "Sign in is required to access the shop book"})
-                if method != "GET" and path.startswith("/api/") and path not in {
-                        "/api/login", "/api/logout"} and operation_id:
+                if method != "GET" and path.startswith("/api/") and path not in NON_BOOK_ROUTES \
+                        and operation_id:
                     replay = one("SELECT status, response FROM sync_requests WHERE operation_id=?",
                                  (operation_id,))
                     if replay:
@@ -5627,7 +6265,7 @@ class Handler(BaseHTTPRequestHandler):
                 # A change the shop accepted is what the other counters need to hear about; a
                 # refusal (a stale edit, a bad figure) changed nothing. Signing in is not the book.
                 if (method != "GET" and result is not None and path.startswith("/api/")
-                        and result[0] < 300 and path not in ("/api/login", "/api/logout")):
+                        and result[0] < 300 and path not in NON_BOOK_ROUTES):
                     _book_writes["count"] += 1
                     note_counter_write(self.client_ip(), self.headers.get("User-Agent", ""))
             if result is not None:
@@ -5635,7 +6273,7 @@ class Handler(BaseHTTPRequestHandler):
                 headers = dict(self.response_headers)
                 if method == "GET" and path.startswith("/api/") and code == 200 and not isinstance(payload, tuple):
                     headers["ETag"] = self.etag(payload)
-                if method != "GET" and path not in {"/api/login", "/api/logout"} and operation_id and code < 300 and not isinstance(payload, tuple):
+                if method != "GET" and path not in NON_BOOK_ROUTES and operation_id and code < 300 and not isinstance(payload, tuple):
                     response = json.dumps(payload, default=str, separators=(",", ":"))
                     with _lock:
                         _db.execute("INSERT OR IGNORE INTO sync_requests(operation_id,status,response) VALUES (?,?,?)",
@@ -5943,6 +6581,36 @@ class Handler(BaseHTTPRequestHandler):
             # counter joined to the shop's book is served by the shop's own computer, and a control
             # that wrote into this engine would be changing that computer on somebody else's say-so.
             return 200, counter_facts(self)
+
+        if method == "POST" and head == "update-check" and len(rest) == 1:
+            # The "Ask now" button. The engine makes the call rather than the browser, because the
+            # shop's Mac is the one computer here that is known to be able to reach the repository,
+            # and because an answer one counter got is then worth something to every other counter.
+            # It keeps the answer in a file beside the book and writes nothing into the book.
+            return 200, run_update_check("a counter asked for it")
+
+        if method == "POST" and head == "update-download" and len(rest) == 1:
+            # Bring the newer build down and prove it. This endpoint only ever fills the staging
+            # folder beside the book; the folder the app runs from is not touched until a person on
+            # that computer presses Install and the app hands the staged files to the apply script.
+            package = download_update("a counter asked for it")
+            return (200 if package.get("ready") else 502), package
+
+        if method == "POST" and head == "update-install" and len(rest) == 1:
+            # Only this computer may put a build in place. The shop's Mac answers counters over the
+            # Wi-Fi, and a phone pressing Install must not restart the computer that holds the book;
+            # an app on a joined laptop therefore updates its own copy, never the shop's.
+            try:
+                loopback = ipaddress.ip_address(self.client_ip()).is_loopback
+            except ValueError:
+                loopback = False
+            if not loopback:
+                return 403, {"armed": False,
+                             "trouble": "This screen is answered by the shop's own computer. The update"
+                                        " is installed on that Mac, by whoever is sitting at it."}
+            body = self.body() or {}
+            armed = arm_update_install(str(body.get("app") or ""), str(body.get("service") or ""))
+            return (200 if armed.get("armed") else 409), armed
 
         if method == "GET" and head == "bootstrap":
             return 200, {"shop": SHOP, "statuses": STATUSES, "categories": CATEGORIES,
@@ -7717,6 +8385,7 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
     watch_messages()
     watch_notifications()
     watch_backups()
+    watch_updates()
     httpd = ShopHTTPServer((host, port), Handler)
     context = None
     if tls_cert:
@@ -7802,6 +8471,9 @@ def main():
                     help="stop keeping a book of this computer's own, then look for the shop's")
     ap.add_argument("--own-book", action="store_true",
                     help="tell this computer to keep its own book whatever the Wi-Fi offers")
+    ap.add_argument("--update-check", action="store_true",
+                    help="ask the shop's repository for the newest version now, keep the answer in a"
+                         " file beside the book (never in it), and exit")
     args = ap.parse_args()
     if args.own_book:
         print(choose_own_book(True))
@@ -7820,6 +8492,29 @@ def main():
         # Nothing to print on stdout: a launcher decides what to do next by whether it got a URL.
         print("No shop book answered under the shop's own certificate.", file=sys.stderr)
         raise SystemExit(1)
+    if args.update_check:
+        # Before connect(), and on purpose: a note about which build is newest belongs beside the
+        # book, not in it, and an engine that never opened the book cannot have written into it.
+        answer = run_update_check("the shop asked by hand")
+        if answer["verdict"] == "newer":
+            print("Asked the repository at %s — a newer build is waiting." % answer["asked_at"])
+            print("Version %s is on the repository and this engine is on %s."
+                  % (answer["remote"], answer["this"]))
+            print("Open Settings ▸ Updates and press Download it, then Install and reopen — the shop"
+                  " closes for a few seconds and comes back on the new build. The book is not part"
+                  " of it, so every record stays exactly where it is.")
+        elif answer["verdict"] == "same":
+            print("Asked the repository at %s — nothing newer. This build (%s) is the newest"
+                  " the repository has." % (answer["asked_at"], answer["this"]))
+        elif answer["verdict"] == "ahead":
+            print("Asked the repository at %s — this build (%s) carries a higher number than the"
+                  " repository (%s), which usually means a push is still owed."
+                  % (answer["asked_at"], answer["this"], answer["remote"]))
+        else:
+            print("The weekly check could not learn anything: %s"
+                  % (answer["trouble"] or "the repository gave no answer"), file=sys.stderr)
+            raise SystemExit(1)
+        return
     if args.shop_copy:
         # Before connect(): opening a book that is not there yet would create an empty one, and an
         # empty book is exactly what this step is allowed to replace — so the question has to be

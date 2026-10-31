@@ -1,0 +1,5997 @@
+/* CRISPprint Ghana — front end. Vanilla JS, no build step, local server with offline sync.
+   Selected job-status updates are delivered by the configured shop server; other messages
+   can still be handed off to WhatsApp or Mail for staff to send. */
+'use strict';
+
+const S = { boot: null, clients: [], route: null, timer: null, flash: null, settle: false, notify: { byId: {} }, offlineQueuedToast: false, connected: navigator.onLine, bookAge: 0, offlineCarried: null, counter: null };
+const OFFLINE_DB = 'crispprint-offline-v1';
+let offlineDbPromise = null;
+let syncingOfflineQueue = false;
+let nextOfflineId = -Date.now();
+let nextOfflineSequence = 0;
+let deferredInstallPrompt = null;
+
+/* --------------------------------------------------------------- tiny helpers */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const esc = (v) => String(v === null || v === undefined ? '' : v)
+  .replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const sym = () => (S.boot ? S.boot.shop.currency_symbol : '₵');
+const n2 = (v) => Number(v === null || v === undefined || v === '' ? 0 : v).toFixed(2);
+const money = (v) => {
+  const n = Number(v || 0);
+  const body = Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return (n < 0 ? '-' : '') + sym() + ' ' + body;
+};
+const compact = (v) => {
+  const n = Number(v || 0);
+  if (Math.abs(n) >= 1000) return sym() + (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  return sym() + n.toFixed(0);
+};
+/* Figures as the counter actually types them. A browser number box answers with an EMPTY STRING
+   for anything it does not like — "1,200", "1200 ", "₵1200" — and the shop used to book that job at
+   ₵0.00 or refuse the payment with "enter an amount greater than zero", with nothing typed left to
+   look at. So the money and quantity fields are text now, the figure is read here, and the field is
+   settled into plain digits the moment the counter leaves it. The server's own num() strips commas
+   too, but the old build answering the shop right now is not guaranteed to, so nothing with a comma
+   in it ever leaves this side. */
+const shopNum = (v) => {
+  if (typeof v === 'number') return isFinite(v) ? v : 0;
+  let s = String(v === null || v === undefined ? '' : v)
+    .replace(/[^\d.,-]/g, '').replace(/,/g, '').trim();
+  if (s === '' || s === '-' || s === '.') return 0;
+  const n = Number(s);
+  return isFinite(n) ? n : 0;
+};
+const shopInt = (v) => Math.round(Math.abs(shopNum(v)));
+/* One door for every figure the counter types. cls carries the field's own class so the item table
+   can style and find its cells, and extra carries the odd attribute (an id, a required). */
+const moneyBox = (name, val, ph, cls, extra) =>
+  '<input' + (name ? ' name="' + name + '"' : '') + ' class="money' + (cls ? ' ' + cls : '') +
+  '" inputmode="decimal" autocomplete="off" spellcheck="false"' +
+  ' placeholder="' + (ph || '0.00') + '" value="' + esc(val === null || val === undefined || val === '' ?
+    '' : n2(shopNum(val))) + '"' + (extra || '') + '>';
+const qtyBox = (name, val, ph, cls, extra) =>
+  '<input' + (name ? ' name="' + name + '"' : '') + ' class="qty' + (cls ? ' ' + cls : '') +
+  '" inputmode="numeric" autocomplete="off" spellcheck="false"' +
+  ' placeholder="' + (ph || '1') + '" value="' + esc(val === null || val === undefined || val === '' ?
+    '' : shopInt(val)) + '"' + (extra || '') + '>';
+/* Money on the way out of a field becomes digits the book can hold, so the counter sees the figure
+   the shop recorded rather than the shape they happened to type. */
+document.addEventListener('focusout', (e) => {
+  const el = e.target;
+  if (!el || !el.classList) return;
+  if (el.classList.contains('money') && el.value !== '') el.value = n2(shopNum(el.value));
+  else if (el.classList.contains('qty') && el.value !== '') el.value = String(shopInt(el.value));
+});
+const day10 = (s) => (s ? String(s).slice(0, 10) : '');
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const fdate = (s) => {
+  if (!s) return '—';
+  const d = new Date(day10(s) + 'T00:00:00');
+  if (isNaN(d)) return esc(s);
+  return d.getDate() + ' ' + MON[d.getMonth()];
+};
+const fdatetime = (s) => {
+  if (!s) return '—';
+  const d = new Date(String(s).replace(' ', 'T'));
+  if (isNaN(d)) return esc(s);
+  return d.getDate() + ' ' + MON[d.getMonth()] + ' ' + d.getFullYear() + ', ' +
+    String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+};
+const todayISO = () => {
+  const d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+};
+const daysBetween = (a, b) => Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 86400000);
+const dueLabel = (job) => {
+  if (!job.due_date) return '<span class="due">no due date</span>';
+  const due = day10(job.due_date);
+  const open = job.status !== 'Delivered' && job.status !== 'Cancelled';
+  const diff = daysBetween(todayISO(), due);
+  if (diff < 0 && open) return '<span class="due late">' + esc(fdate(due)) + ' · ' + (-diff) + 'd late</span>';
+  if (diff === 0) return '<span class="due late">due today</span>';
+  if (diff <= 2 && open) return '<span class="due">' + esc(fdate(due)) + ' · in ' + diff + 'd</span>';
+  return '<span class="due">' + esc(fdate(due)) + '</span>';
+};
+const pill = (status) => '<span class="pill s-' + esc(status) + '">' + esc(status) + '</span>';
+const prio = (p) => (p === 'Urgent' ? ' <span class="pill p-Urgent">Urgent</span>' : '');
+const kindTag = (j) => (j.kind === 'Quote' ? ' <span class="pill k-Quote">Quote</span>' : '');
+/* Billed work whose balance has come down to nothing. Overpayment leaves a negative balance,
+   which is credit rather than a settlement, so it does not count as paid in full here. */
+const isSettled = (j) => (j.kind !== 'Quote' && j.status !== 'Cancelled' &&
+  Number(j.total) > 0 && Number(j.balance) >= -0.005 && Number(j.balance) <= 0.005);
+// A job with item lines is priced by its lines, so the header quantity no longer means much.
+const linesLabel = (j) => (j.item_count
+  ? j.item_count + ' item line' + (j.item_count === 1 ? '' : 's')
+  : (j.quantity ? j.quantity + ' ' + (j.unit || 'pcs') : ''));
+const validityLabel = (j) => {
+  if (!j.valid_until) return '<span class="due">no expiry</span>';
+  const diff = daysBetween(todayISO(), day10(j.valid_until));
+  if (diff < 0) return '<span class="due late">expired ' + esc(fdate(j.valid_until)) + '</span>';
+  if (diff === 0) return '<span class="due late">last day today</span>';
+  return '<span class="due">valid ' + esc(fdate(j.valid_until)) + ' · ' + diff + 'd left</span>';
+};
+const dateLabel = (j) => (j.kind === 'Quote' ? validityLabel(j) : dueLabel(j));
+const qs = (obj) => Object.keys(obj).filter((k) => obj[k] !== '' && obj[k] !== null && obj[k] !== undefined && obj[k] !== 'all')
+  .map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(obj[k])).join('&');
+
+function offlineDB() {
+  if (!offlineDbPromise) offlineDbPromise = new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) return reject(new Error('This browser cannot store offline changes safely.'));
+    const request = indexedDB.open(OFFLINE_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      db.createObjectStore('responses', { keyPath: 'key' });
+      db.createObjectStore('outbox', { keyPath: 'operationId' });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Could not open offline storage.'));
+  });
+  return offlineDbPromise;
+}
+async function offlineRead(store, key) {
+  const db = await offlineDB();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(store, 'readonly').objectStore(store).get(key);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error('Could not read offline storage.'));
+  });
+}
+async function offlineWrite(store, value) {
+  const db = await offlineDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readwrite');
+    tx.objectStore(store).put(value);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('Could not save offline data.'));
+    tx.onabort = () => reject(tx.error || new Error('Offline save was cancelled.'));
+  });
+}
+async function offlineAll(store) {
+  const db = await offlineDB();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(store, 'readonly').objectStore(store).getAll();
+    request.onsuccess = () => resolve(request.result || []);
+    request.onerror = () => reject(request.error || new Error('Could not read offline storage.'));
+  });
+}
+function apiUrl(path) {
+  const url = new URL(path, location.href);
+  return url.pathname + url.search;
+}
+function mutationResource(path) {
+  const parts = new URL(path, location.href).pathname.split('/').filter(Boolean);
+  return parts.length >= 3 && parts[0] === 'api' &&
+    ['jobs', 'clients', 'leads', 'expenses', 'spoiled'].includes(parts[1])
+    ? '/' + parts.slice(0, 3).join('/') : '';
+}
+function makeOfflineResponse(path, payload, id) {
+  if (path === '/api/leads' || path === '/api/clients' || path === '/api/jobs' ||
+      path === '/api/expenses' || path === '/api/payments' || path === '/api/spoiled') {
+    return Object.assign({ id, offlineQueued: true, ref: 'Pending sync' }, payload || {});
+  }
+  if (/^\/api\/leads\/\d+\/convert$/.test(path)) {
+    return { offlineQueued: true, job: { id, ref: 'Pending sync' }, lead: { id: Number(path.split('/')[3]), name: 'Enquiry' } };
+  }
+  return { id, offlineQueued: true };
+}
+/* A Mac that is switched off does not refuse a call — nothing is there to refuse it, so the address
+   simply never answers and every read waits out the network's own timeout. Two things follow: the
+   first read that fails for no other reason than nobody answering marks the shop dark for a while,
+   and every read after that goes straight to the copy this device carries. And while the shop's
+   state is still unknown, a read that has a copy to fall back on is given a deadline rather than an
+   endless wait, so the counter paints a remembered screen in seconds instead of a blank one for
+   half a minute. A new knock happens when that window closes, or the moment the network changes. */
+const SHOP_DARK_MS = 45000;
+const SHOP_WAIT_MS = 7000;
+const NO_SAVED_COPY = 'No saved copy of this screen is available offline. Connect to the shop Wi-Fi and try again.';
+let shopDarkUntil = 0;
+function shopIsDark() { return Date.now() < shopDarkUntil; }
+function knock(path, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SHOP_WAIT_MS);
+  return fetch(path, Object.assign({}, options, { signal: controller.signal }))
+    .then((response) => { clearTimeout(timer); return response; },
+          (error) => { clearTimeout(timer); throw error; });
+}
+async function cachedAnswer(key) {
+  const cached = await offlineRead('responses', key);
+  if (!cached) {
+    if (WARM_NEWEST_ALONE.indexOf(key.split('?')[0]) < 0) return null;
+    const held = (await offlineAll('responses'))
+      .filter((row) => String(row.key).split('?')[0] === key.split('?')[0])
+      .sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0))[0];
+    return held || null;
+  }
+  return cached;
+}
+async function api(path, opts) {
+  const options = opts || {};
+  const method = String(options.method || 'GET').toUpperCase();
+  const key = apiUrl(path);
+  if (method === 'GET') {
+    const held = await cachedAnswer(key);
+    if (shopIsDark()) {
+      /* The shop is already known not to answer, so a second knock buys nothing: either this device
+         holds the screen or it says so at once instead of making the counter wait. */
+      S.connected = false;
+      paintNetworkStatus();
+      if (!held) return await heldOrGhost(key);
+      const at = held.savedAt || 0;
+      if (!S.bookAge || (at && at < S.bookAge)) S.bookAge = at;
+      return await paintPending(key, held.value);
+    }
+    try {
+      const response = await (held ? knock(path, options) : fetch(path, options));
+      const ct = response.headers.get('Content-Type') || '';
+      const body = ct.indexOf('json') >= 0 ? await response.json() : await response.text();
+      if (!response.ok) {
+        const error = new Error((body && body.error) || 'Something went wrong (' + response.status + ')');
+        error.status = response.status;
+        error.body = body;
+        throw error;
+      }
+      if (ct.indexOf('json') >= 0 && !key.startsWith('/api/backup')) {
+        await offlineWrite('responses', { key, value: body, etag: response.headers.get('ETag') || '', savedAt: Date.now() });
+      }
+      S.bookAge = 0;
+      S.connected = true;
+      shopDarkUntil = 0;
+      paintNetworkStatus();
+      return body;
+    } catch (error) {
+      const stopped = error instanceof TypeError || (error && error.name === 'AbortError');
+      if (stopped || !navigator.onLine) {
+        S.connected = false;
+        shopDarkUntil = Date.now() + SHOP_DARK_MS;
+        if (held) {
+          // The oldest read on screen is the honest age of the whole screen: a figure remembered
+          // since the morning must not wear the timestamp of one remembered at noon.
+          const at = held.savedAt || 0;
+          if (!S.bookAge || (at && at < S.bookAge)) S.bookAge = at;
+          paintNetworkStatus();
+          return await paintPending(key, held.value);
+        }
+        paintNetworkStatus();
+        return await heldOrGhost(key);
+      }
+      throw error;
+    }
+  }
+
+  let payload = {};
+  try { payload = typeof options.body === 'string' ? JSON.parse(options.body) : (options.body || {}); } catch (_) {}
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
+  if (!headers['X-Operation-Id']) headers['X-Operation-Id'] =
+    (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+  const resource = mutationResource(path);
+  if (resource && !headers['If-Match']) {
+    const cached = await offlineRead('responses', resource);
+    if (cached && cached.etag) headers['If-Match'] = cached.etag;
+  }
+  const queue = async () => {
+    S.connected = false;
+    const tempId = nextOfflineId--;
+    const entry = {
+      operationId: headers['X-Operation-Id'], method, path: key,
+      body: payload, baseEtag: headers['If-Match'] || '',
+      tempId: method === 'POST' && /^\/api\/(clients|jobs|leads|expenses|payments|spoiled)(\/\d+\/convert)?$/.test(new URL(path, location.href).pathname)
+        ? tempId : null,
+      createdAt: new Date().toISOString(), sequence: nextOfflineSequence++, state: 'pending', error: '',
+    };
+    await offlineWrite('outbox', entry);
+    S.offlineQueuedToast = true;
+    paintNetworkStatus();
+    return makeOfflineResponse(new URL(path, location.href).pathname, payload, entry.tempId);
+  };
+  if (shopIsDark()) return queue();
+  try {
+    const response = await fetch(path, Object.assign({}, options, { headers }));
+    const ct = response.headers.get('Content-Type') || '';
+    const body = ct.indexOf('json') >= 0 ? await response.json() : await response.text();
+    if (!response.ok) {
+      /* A refusal because somebody else moved the record arrives with that record as it is now, and
+         the tag that describes it. Keeping the pair is what makes the counter's next attempt land:
+         without it the page goes on quoting the same stale tag and is locked out of the job. */
+      if (response.status === 409 && resource && body && body.etag && body.current) {
+        await offlineWrite('responses', { key: resource, value: body.current,
+                                          etag: body.etag, savedAt: Date.now() });
+      }
+      const error = new Error((body && body.error) || 'Something went wrong (' + response.status + ')');
+      error.status = response.status;
+      error.body = body;
+      throw error;
+    }
+    S.connected = true;
+    shopDarkUntil = 0;
+    paintNetworkStatus();
+    return body;
+  } catch (error) {
+    if (!(error instanceof TypeError) && navigator.onLine) throw error;
+    shopDarkUntil = Date.now() + SHOP_DARK_MS;
+    return queue();
+  }
+}
+async function paintNetworkStatus() {
+  const el = $('#networkStatus');
+  if (!el) return;
+  let pending = 0;
+  try { pending = (await offlineAll('outbox')).filter((row) => row.state === 'pending' || row.state === 'conflict').length; }
+  catch (_) {}
+  // A dark screen full of money figures has to wear its age. "Offline" alone says the wire is down;
+  // it does not tell the counter whether today's takings stopped being true at 9 am or at 5 pm, and
+  // that is exactly the difference between quoting a remembered figure and deciding on a live one.
+  const when = S.bookAge ? wxReadAt(S.bookAge) : 'this device';
+  el.textContent = S.connected
+    ? (pending ? 'Connected · ' + pending + ' changes waiting' : 'Connected to the book')
+    : 'Offline · book as of ' + when + (pending ? ' · ' + pending + ' waiting' : '');
+  el.classList.toggle('offline', !S.connected || pending > 0);
+  const sync = $('.navlink[data-view="sync"]');
+  if (sync) {
+    const old = sync.querySelector('span');
+    if (old) old.remove();
+    if (pending) sync.insertAdjacentHTML('beforeend', '<span>' + pending + ' waiting</span>');
+  }
+}
+/* --------------------------------------------------- carrying the whole book */
+/* With the Mac switched off the counter's question is never "is this screen alive" but "what did he
+   order, and has he paid". So every read the rail can reach is copied onto the device while the shop
+   *is* answering, not only the screen somebody happened to open last. This list mirrors the rail: a
+   destination left out of it is a destination that goes blind on the night the machine does. */
+const WARM_OPEN_JOBS = '/api/jobs?' + qs({ status: 'open', kind: 'Job' });
+/* The first two are not destinations on the rail — they are what the page asks before it can show
+   any destination at all. Without them, a device whose memory was filled only by the screens it
+   happened to open still cannot open the door with the Mac off. */
+const WARM_SCREENS = [
+  '/api/bootstrap', '/api/session',
+  '/api/dashboard', WARM_OPEN_JOBS,
+  '/api/jobs?' + qs({ status: 'open', kind: 'Quote' }),
+  '/api/jobs?' + qs({ status: 'Ready', kind: 'Job' }),
+  '/api/handover', '/api/clients', '/api/leads?' + qs({ stage: 'open' }),
+  '/api/accounts', '/api/expenses', '/api/spoiled', '/api/shop',
+];
+/* One job's own sheet is its own read, and a client at the counter is answered from it. Only what
+   is live now is carried, or the copy would grow with the shop's whole history. */
+const WARM_JOB_SHEETS = 24;
+const WARM_EVERY = 20 * 60 * 1000;
+/* A screen whose address carries the date asks a new question every morning, so yesterday's copy is
+   a different key. For these, and only these, the newest copy the device holds wins over nothing. */
+const WARM_NEWEST_ALONE = ['/api/report'];
+let warmingBook = false;
+let warmBookAt = 0;
+async function warmOfflineBook() {
+  if (warmingBook || !navigator.onLine) return;
+  warmingBook = true;
+  try {
+    const monthStart = todayISO().slice(0, 8) + '01';
+    const paths = WARM_SCREENS.concat([
+      '/api/report?from=' + monthStart + '&to=' + todayISO() + '&period=day',
+    ]);
+    const open = await api(WARM_OPEN_JOBS).catch(() => []);
+    /* The walk only counts as a carry while the shop is truly answering. With the Mac off, every
+       read below is met from the copy the device already holds, and stamping that copy as if it
+       were fresh would make an old book look current on the Sync screen. */
+    if (!S.connected) return;
+    (Array.isArray(open) ? open : []).slice(0, WARM_JOB_SHEETS).forEach((j) => {
+      if (j && j.id) paths.push('/api/jobs/' + j.id);
+    });
+    let kept = 0;
+    for (const path of paths) {
+      if (!S.connected) return;
+      // One screen this device is not allowed to read must not cost it the rest of the book, so a
+      // refusal is stepped over rather than thrown out of the walk.
+      try { await api(path); kept += 1; } catch (e) { /* this one it cannot hold */ }
+      await new Promise((wait) => setTimeout(wait, 120));
+    }
+    warmBookAt = Date.now();
+    S.offlineCarried = { at: warmBookAt, screens: kept };
+  } catch (error) {
+    /* The shop stopped answering halfway through the walk. What the device already holds stays
+       usable, and the next connected pass picks up the rest. */
+  } finally {
+    warmingBook = false;
+  }
+}
+function watchOfflineBook() {
+  setTimeout(warmOfflineBook, 4000);
+  setInterval(() => { if (document.visibilityState !== 'hidden') warmOfflineBook(); }, WARM_EVERY);
+}
+/* A shop is one book with several counters on it. Each screen asks whether the book moved and, when
+   it did, paints its own screen again — except under somebody's hands: an open form, an open job
+   sheet, or a box with the caret in it is never rewritten mid-entry. Coming back to a window asks
+   at once, so the Mac somebody just walked up to shows the counter's book, not the one it saw at
+   breakfast. */
+const BOOK_WATCH_MS = 10000;
+let bookWatchRev = '';
+let bookWatchBusy = false;
+function bookIsUnderHands() {
+  if ($('#modal') && !$('#modal').hidden) return true;
+  if ($('#drawer') && !$('#drawer').hidden) return true;
+  const el = document.activeElement;
+  // A closed form leaves its last box as the active element; a box nobody can see is nobody's hands.
+  if (!el || el.offsetParent === null) return false;
+  if (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return true;
+  return !!el.isContentEditable;
+}
+async function checkBookChanged() {
+  if (bookWatchBusy || document.visibilityState === 'hidden') return;
+  bookWatchBusy = true;
+  try {
+    const response = await fetch('/api/book-rev', { cache: 'no-store' });
+    if (!response.ok) return;
+    const answer = await response.json();
+    const rev = String(answer.rev || '');
+    if (!rev) return;
+    if (!bookWatchRev) { bookWatchRev = rev; return; }
+    if (rev === bookWatchRev) return;
+    // The change is not lost by waiting: the next look still sees a different revision.
+    if (bookIsUnderHands()) return;
+    bookWatchRev = rev;
+    const at = window.scrollY;
+    await refreshChrome();
+    await render();
+    window.scrollTo(0, at);
+  } catch (_) {
+    /* The shop is out of reach; the page's own reads already say so. */
+  } finally {
+    bookWatchBusy = false;
+  }
+}
+function watchBook() {
+  checkBookChanged();
+  setInterval(checkBookChanged, BOOK_WATCH_MS);
+  window.addEventListener('focus', checkBookChanged);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkBookChanged();
+  });
+}
+function replaceTemporaryIds(value, map) {
+  if (typeof value === 'number' && value < 0 && map[String(value)]) return map[String(value)];
+  if (typeof value === 'string' && /^-\d+$/.test(value) && map[value]) return map[value];
+  if (Array.isArray(value)) return value.map((item) => replaceTemporaryIds(item, map));
+  if (value && typeof value === 'object') {
+    const copy = {};
+    Object.keys(value).forEach((key) => { copy[key] = replaceTemporaryIds(value[key], map); });
+    return copy;
+  }
+  return value;
+}
+async function syncOfflineQueue() {
+  if (syncingOfflineQueue || !navigator.onLine) return;
+  syncingOfflineQueue = true;
+  let reachedServer = true;
+  try {
+    const entries = (await offlineAll('outbox')).sort((a, b) =>
+      a.createdAt.localeCompare(b.createdAt) || a.sequence - b.sequence);
+    if (!entries.some((entry) => entry.state === 'pending')) return;
+    let syncedAny = false;
+    const idMap = {};
+    entries.filter((entry) => entry.state === 'synced' && entry.tempId && entry.serverId)
+      .forEach((entry) => { idMap[String(entry.tempId)] = entry.serverId; });
+    for (const entry of entries) {
+      if (entry.state === 'synced' || entry.state === 'discarded') continue;
+      if (entry.state === 'conflict') break;
+      let path = entry.path;
+      Object.keys(idMap).forEach((temp) => { path = path.replace('/' + temp, '/' + idMap[temp]); });
+      const headers = {
+        'Content-Type': 'application/json',
+        'X-Operation-Id': entry.operationId,
+      };
+      if (entry.baseEtag) headers['If-Match'] = entry.baseEtag;
+      let response;
+      try {
+        response = await fetch(path, {
+          method: entry.method, headers,
+          body: entry.method === 'DELETE' ? undefined : JSON.stringify(replaceTemporaryIds(entry.body, idMap)),
+        });
+      } catch (_) { reachedServer = false; break; }
+      const ct = response.headers.get('Content-Type') || '';
+      const body = ct.includes('json') ? await response.json() : await response.text();
+      if (response.status === 401) {
+        S.connected = true;
+        loginScreen('Sign in again to sync saved changes.');
+        break;
+      }
+      if (response.status >= 500) { reachedServer = false; break; }
+      if (response.status === 409 || !response.ok) {
+        entry.state = 'conflict';
+        entry.error = (body && body.error) || 'This change needs review before it can sync.';
+        entry.current = body && body.current;
+        entry.currentEtag = body && body.etag;
+        await offlineWrite('outbox', entry);
+        break;
+      }
+      entry.state = 'synced';
+      entry.serverId = body && (body.id || (body.job && body.job.id)) || null;
+      await offlineWrite('outbox', entry);
+      syncedAny = true;
+      if (entry.tempId && entry.serverId) idMap[String(entry.tempId)] = entry.serverId;
+    }
+    if (syncedAny) {
+      const db = await offlineDB();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction('responses', 'readwrite');
+        tx.objectStore('responses').clear();
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error || new Error('Could not refresh offline copies.'));
+      });
+    }
+    S.connected = reachedServer;
+    await paintNetworkStatus();
+    if (S.route && S.route.view === 'sync') await render();
+  } finally {
+    syncingOfflineQueue = false;
+  }
+}
+/* ------------------------------------ what this device has written, painted
+   A photograph of the book is not the book. With the Mac off, the counter still takes orders and
+   still takes money, and until the shop answers again those figures live only in this machine's own
+   queue. Shown exactly as the shop last sent them, a job booked at ten is nowhere on the jobs screen
+   at eleven and the day's takings still read nothing — so every remembered screen is folded together
+   with what this device has written since. Every line that came from this machine says so, because a
+   number the shop has never seen must never be mistaken at the counter for one it has. */
+const round2 = (v) => Math.round((Number(v) + Number.EPSILON) * 100) / 100;
+const OPEN_STATUSES = ['Pending', 'Printing', 'Ready'];
+const JOB_FIELDS = ['title', 'category', 'kind', 'status', 'priority', 'due_date', 'valid_until',
+  'quantity', 'unit', 'unit_price', 'extras', 'discount', 'size', 'description'];
+const CLIENT_FIELDS = ['name', 'phone', 'whatsapp', 'email', 'kind', 'address', 'notes',
+  'whatsapp_updates', 'email_updates'];
+const LEAD_FIELDS = ['name', 'phone', 'whatsapp', 'email', 'source', 'interest', 'value', 'stage',
+  'follow_up', 'note'];
+const HELD_ON_DEVICE = 'Held on this device';
+/* The mark a folded line wears. Two states, because they are two different facts: this line only
+   exists on this machine, or this line is the shop's own with money this machine is still holding. */
+const pendingTag = (row) => (row.pendingSync
+  ? ' <span class="pill s-Pending">' + esc(HELD_ON_DEVICE) + '</span>'
+  : (row.pendingMoney ? ' <span class="pill s-Pending">money held here</span>' : ''));
+/* A refund takes money back out of every figure it touches, so it travels as a negative delta. */
+function payDelta(body) {
+  const amount = Number((body || {}).amount || 0);
+  return String((body || {}).kind) === 'Refund' ? -amount : amount;
+}
+/* The shop's own price maths, run here so a job booked in the dark shows the figure it will carry
+   the moment the Mac answers: item lines first, otherwise the header quantity at its price, plus
+   extras, less the discount, and never below nothing. */
+function priceOf(payload) {
+  const P = payload || {};
+  const lines = Array.isArray(P.items) ? P.items : [];
+  const gross = lines.length
+    ? lines.reduce((a, l) => a + (Number(l && l.quantity) || 0) * (Number(l && l.unit_price) || 0), 0)
+    : (Number(P.quantity) || 0) * (Number(P.unit_price) || 0);
+  return round2(Math.max(gross + (Number(P.extras) || 0) - (Number(P.discount) || 0), 0));
+}
+async function pendingWrites() {
+  let rows;
+  try { rows = await offlineAll('outbox'); } catch (e) { return []; }
+  return rows.filter((r) => r && r.state === 'pending' && r.body)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) ||
+      (Number(a.sequence) || 0) - (Number(b.sequence) || 0));
+}
+/* The queue keeps the address a write was aimed at; this turns it back into the few shapes a screen
+   can fold in. Everything else in the queue — a note, a send, a delete, a settings press — changes no
+   figure this device could paint, so it stays named on the Pending sync screen and nowhere else. */
+function writeShape(entry) {
+  const parts = String(entry.path || '').split('?')[0].split('/').filter(Boolean);
+  const id = Number(parts[2]);
+  const sub = parts[3];
+  const onRecord = parts.length >= 3 && isFinite(id);
+  if (parts[1] === 'jobs') {
+    if (entry.method === 'POST' && parts.length === 2) return { kind: 'job-new' };
+    if (entry.method === 'PUT' && onRecord) return { kind: 'job-edit', id: id };
+    if (entry.method === 'POST' && onRecord && sub === 'status') return { kind: 'job-status', id: id };
+    if (entry.method === 'POST' && onRecord && sub === 'payment') return { kind: 'pay-new', jobId: id };
+    if (entry.method === 'POST' && onRecord && sub === 'convert') return { kind: 'quote-convert', id: id };
+  }
+  if (parts[1] === 'payments' && entry.method === 'POST') return { kind: 'pay-new' };
+  if (parts[1] === 'clients') {
+    if (entry.method === 'POST' && parts.length === 2) return { kind: 'client-new' };
+    if (entry.method === 'PUT' && onRecord) return { kind: 'client-edit', id: id };
+  }
+  if (parts[1] === 'leads') {
+    if (entry.method === 'POST' && parts.length === 2) return { kind: 'lead-new' };
+    if (entry.method === 'PUT' && onRecord) return { kind: 'lead-edit', id: id };
+    if (entry.method === 'POST' && onRecord && sub === 'convert') return { kind: 'lead-convert', id: id };
+  }
+  if (parts[1] === 'expenses' && entry.method === 'POST' && parts.length === 2) return { kind: 'expense-new' };
+  return null;
+}
+function fieldPatch(P, fields) {
+  const patch = {};
+  fields.forEach((k) => { if (P[k] !== undefined) patch[k] = P[k]; });
+  return patch;
+}
+function pendingJobRow(tempId, createdAt, P, who) {
+  const total = priceOf(P);
+  const quote = P.kind === 'Quote';
+  return {
+    id: tempId, ref: HELD_ON_DEVICE, kind: quote ? 'Quote' : 'Job',
+    title: P.title || (quote ? 'Quote written on this device' : 'Job written on this device'),
+    category: P.category || '', status: P.status || 'Pending', priority: P.priority || 'Normal',
+    due_date: P.due_date || null, valid_until: P.valid_until || null, converted_at: null,
+    quantity: P.quantity || 0, unit: P.unit || '', unit_price: P.unit_price || 0,
+    extras: P.extras || 0, discount: P.discount || 0, size: P.size || '',
+    description: P.description || '', client_id: P.client_id || null,
+    client: (who && who.name) || 'client not on file yet', client_phone: (who && who.phone) || '',
+    total: total, paid: 0, balance: total, cost: 0, profit: 0,
+    item_count: Array.isArray(P.items) ? P.items.length : 0, to_send: 0,
+    created_at: createdAt, updated_at: createdAt,
+    items: Array.isArray(P.items) ? P.items.slice() : [], payments: [], expenses: [],
+    spoilage: [], events: [], pendingSync: true,
+  };
+}
+async function buildShadow() {
+  const writes = await pendingWrites();
+  const sh = { count: writes.length, jobs: [], clients: [], leads: [], expenses: [], payments: [],
+    jobFields: {}, clientFields: {}, leadFields: {} };
+  if (!writes.length) return sh;
+  const heldClients = (await offlineRead('responses', '/api/clients')) || {};
+  const heldLeads = (await offlineRead('responses', '/api/leads?stage=open')) || {};
+  const clientRows = Array.isArray(heldClients.value) ? heldClients.value : [];
+  const leadRows = (heldLeads && Array.isArray(heldLeads.rows) ? heldLeads.rows : []).slice();
+  const nameOf = (id) => {
+    const hit = clientRows.concat(sh.clients).filter((c) => c.id === id && id)[0];
+    return hit ? { name: hit.name, phone: hit.phone || '' } : null;
+  };
+  for (const entry of writes) {
+    const shape = writeShape(entry);
+    if (!shape) continue;
+    const P = entry.body || {};
+    if (shape.kind === 'job-new') { sh.jobs.push(pendingJobRow(entry.tempId, entry.createdAt, P, nameOf(P.client_id))); continue; }
+    if (shape.kind === 'lead-convert' && entry.tempId) {
+      const lead = leadRows.concat(sh.leads).filter((l) => l.id === shape.id)[0] || {};
+      sh.jobs.push(pendingJobRow(entry.tempId, entry.createdAt,
+        Object.assign({ kind: 'Job', status: 'Pending' }, P, { client_id: lead.client_id || null }),
+        nameOf(lead.client_id)));
+      continue;
+    }
+    if (shape.kind === 'job-edit' || shape.kind === 'job-status') {
+      const patch = fieldPatch(P, JOB_FIELDS);
+      const priced = ['items', 'quantity', 'unit_price', 'extras', 'discount'].some((k) => P[k] !== undefined);
+      if (priced) patch.total = priceOf(Object.assign({}, (sh.jobs.filter((j) => j.id === shape.id)[0] || {}), P));
+      sh.jobFields[shape.id] = Object.assign(sh.jobFields[shape.id] || {}, patch);
+      continue;
+    }
+    if (shape.kind === 'quote-convert') {
+      sh.jobFields[shape.id] = Object.assign(sh.jobFields[shape.id] || {},
+        { kind: 'Job', status: P.status || 'Pending', converted_at: entry.createdAt });
+      continue;
+    }
+    if (shape.kind === 'client-new') {
+      sh.clients.push(Object.assign({ id: entry.tempId, archived: 0, jobs: 0, active_jobs: 0,
+        billed: 0, received: 0, balance_due: 0, open_job_balance: 0, account_credit: 0,
+        open_quotes: 0, last_job: null, created_at: entry.createdAt, pendingSync: true },
+        fieldPatch(P, CLIENT_FIELDS)));
+      continue;
+    }
+    if (shape.kind === 'client-edit') { sh.clientFields[shape.id] = Object.assign(sh.clientFields[shape.id] || {}, fieldPatch(P, CLIENT_FIELDS)); continue; }
+    if (shape.kind === 'lead-new') {
+      sh.leads.push(Object.assign({ id: entry.tempId, client: '', job_id: null, ref: null,
+        job_title: null, closed_at: null, created_at: entry.createdAt, updated_at: entry.createdAt,
+        days_to_follow: null, pendingSync: true }, fieldPatch(P, LEAD_FIELDS)));
+      continue;
+    }
+    if (shape.kind === 'lead-edit') { sh.leadFields[shape.id] = Object.assign(sh.leadFields[shape.id] || {}, fieldPatch(P, LEAD_FIELDS)); continue; }
+    if (shape.kind === 'expense-new') {
+      sh.expenses.push({ id: entry.tempId, amount: Number(P.amount) || 0, category: P.category || 'Other',
+        payee: P.payee || '', method: P.method || 'Cash', spent_on: P.spent_on || day10(entry.createdAt),
+        reference: P.reference || '', job_id: P.job_id ? Number(P.job_id) : null, note: P.note || '',
+        ref: null, job_title: null, is_spoilage: 0, created_at: entry.createdAt, pendingSync: true });
+      continue;
+    }
+    if (shape.kind === 'pay-new') {
+      const jobId = shape.jobId !== undefined ? shape.jobId
+        : (P.job_id === '' || P.job_id === null || P.job_id === undefined ? null : Number(P.job_id));
+      const onDevice = jobId === null ? null : sh.jobs.filter((j) => j.id === jobId)[0];
+      let clientId = P.client_id ? Number(P.client_id) : null;
+      if (onDevice) clientId = onDevice.client_id;
+      else if (jobId !== null && !clientId) {
+        /* The money names a job, and it is the job that says whose money it is. The walk carries each
+           live job's own sheet, so that is where the name comes from when the queue does not say it.
+           The body sent to the shop is left exactly as it was typed: the book works the client off
+           the job itself, and this is only ever about what to show on the screen meanwhile. */
+        const sheet = (await offlineRead('responses', '/api/jobs/' + jobId) || {}).value;
+        if (sheet && sheet.client_id) clientId = sheet.client_id;
+      }
+      sh.payments.push({ id: entry.tempId || -Math.abs(Number(entry.sequence) || 1) - 1000000,
+        jobId: jobId, clientId: clientId,
+        delta: payDelta(P), amount: Number(P.amount) || 0, kind: P.kind || 'Payment',
+        method: P.method || 'Cash', reference: P.reference || '', note: P.note || '',
+        paid_at: P.paid_at || entry.createdAt, job: onDevice || null,
+        createdAt: entry.createdAt, pendingSync: true });
+    }
+  }
+  const names = {};
+  clientRows.concat(sh.clients).forEach((c) => { names[c.id] = { name: c.name, phone: c.phone || '' }; });
+  sh.names = names;
+  /* Money handed over against an order this device booked belongs on that order's own line. The shop
+     works a job's paid figure off every payment naming it, so a line showing ₵180 billed with ₵100
+     taken against it would be wrong twice at the counter: the balance it shows, and every account
+     figure worked off that balance afterwards. */
+  sh.jobs.forEach((j) => {
+    const delta = moneyOnJob(sh, j.id);
+    if (!delta) return;
+    j.paid = round2(Number(j.paid || 0) + delta);
+    j.balance = round2(Number(j.total || 0) - j.paid);
+  });
+  return sh;
+}
+const moneyOnJob = (sh, id) => sh.payments.filter((p) => p.jobId === id).reduce((a, p) => a + p.delta, 0);
+const moneyOnClient = (sh, id) => sh.payments.filter((p) => p.clientId === id).reduce((a, p) => a + p.delta, 0);
+const creditOnClient = (sh, id) => sh.payments.filter((p) => p.clientId === id && p.jobId === null)
+  .reduce((a, p) => a + p.delta, 0);
+/* One remembered job, read as it now stands on this device: an edit, then the money handed over
+   against it. A job this device booked itself needs no fold — it was built that way. */
+function paintJobRow(j, sh) {
+  if (j.pendingSync) return j;
+  const patch = sh.jobFields[j.id];
+  if (patch) Object.keys(patch).forEach((k) => { j[k] = patch[k]; });
+  const delta = moneyOnJob(sh, j.id);
+  if (delta) {
+    j.paid = round2(Number(j.paid || 0) + delta);
+    j.balance = round2(Number(j.total || 0) - j.paid);
+    j.pendingMoney = true;
+  } else if (patch && patch.total !== undefined) {
+    j.balance = round2(Number(patch.total) - Number(j.paid || 0));
+    j.pendingMoney = true;
+  }
+  return j;
+}
+function pendingJobRows(sh) { return sh.jobs.slice().reverse(); }
+function jobsMatchFilter(j, kind, status) {
+  if (kind && String(j.kind) !== String(kind)) return false;
+  if (status === 'all' || !status) return true;
+  if (status === 'open') return OPEN_STATUSES.indexOf(j.status) >= 0;
+  return String(j.status) === String(status);
+}
+/* A queued line is only dropped into a list the shop filtered in ways this device can still judge.
+   A search, a date window, a category or a "still owing" tab is the shop's own SQL over records that
+   do not exist yet, so those screens stay as they were rather than show a row that may not belong. */
+function listIsPaintable(query) {
+  return !['q', 'from', 'to', 'category', 'overdue', 'debtors', 'paid', 'client', 'sort'].
+    some((k) => query.get(k));
+}
+function paintJobsList(rows, sh, query) {
+  rows.forEach((j) => paintJobRow(j, sh));
+  if (!listIsPaintable(query)) return rows;
+  const extra = pendingJobRows(sh).filter((j) => jobsMatchFilter(j, query.get('kind') || 'Job',
+    query.get('status') || 'open'));
+  return extra.concat(rows);
+}
+function paintClientRow(c, sh) {
+  if (c.pendingSync) return c;
+  const patch = sh.clientFields[c.id];
+  if (patch) Object.keys(patch).forEach((k) => { c[k] = patch[k]; });
+  const booked = sh.jobs.filter((j) => j.client_id === c.id);
+  const money = moneyOnClient(sh, c.id);
+  if (!booked.length && !money) return c;
+  booked.forEach((j) => {
+    c.jobs = (c.jobs || 0) + 1;
+    if (j.kind === 'Quote') { c.open_quotes = (c.open_quotes || 0) + 1; return; }
+    c.active_jobs = (c.active_jobs || 0) + 1;
+    c.billed = round2(Number(c.billed || 0) + j.total);
+    c.open_job_balance = round2(Number(c.open_job_balance || 0) + j.balance);
+    c.last_job = j.created_at;
+  });
+  if (money) {
+    c.received = round2(Number(c.received || 0) + money);
+    c.account_credit = round2(Number(c.account_credit || 0) + creditOnClient(sh, c.id));
+    c.pendingMoney = true;
+  }
+  c.balance_due = round2(Number(c.open_job_balance || 0) - Number(c.account_credit || 0));
+  return c;
+}
+function paintClients(list, sh, append) {
+  const painted = list.map((c) => paintClientRow(c, sh));
+  return append ? sh.clients.slice().reverse().concat(painted) : painted;
+}
+/* What the shop is owed: every client's job balances, less the money they left on their account, and
+   never below nothing for a client who has paid up. Same rule the book itself works to. */
+const outstandingFrom = (clients) => round2(clients
+  .filter((c) => !c.archived)
+  .reduce((a, c) => a + Math.max(Number(c.balance_due || 0), 0), 0));
+function paintLeads(d, sh) {
+  if (!d || !Array.isArray(d.rows)) return d;
+  d.rows.forEach((l) => {
+    if (l.pendingSync) return;
+    const patch = sh.leadFields[l.id];
+    if (patch) Object.keys(patch).forEach((k) => { l[k] = patch[k]; });
+  });
+  const openOf = (l) => l.stage !== 'Won' && l.stage !== 'Lost';
+  d.rows = (sh.leads.slice().reverse()).concat(d.rows);
+  d.count = d.rows.length;
+  const stages = {};
+  d.rows.filter(openOf).forEach((l) => {
+    const hit = stages[l.stage] || (stages[l.stage] = { stage: l.stage, n: 0, value: 0 });
+    hit.n += 1; hit.value = round2(hit.value + (Number(l.value) || 0));
+  });
+  d.pipeline = Object.keys(stages).map((k) => stages[k]);
+  const t = d.totals || {};
+  t.total = (Number(t.total) || 0) + sh.leads.length;
+  t.open = d.rows.filter(openOf).length;
+  t.open_value = round2(d.rows.filter(openOf).reduce((a, l) => a + (Number(l.value) || 0), 0));
+  t.due_today = d.rows.filter((l) => openOf(l) && l.follow_up && day10(l.follow_up) <= todayISO()).length;
+  d.totals = t;
+  return d;
+}
+function paintExpenses(d, sh) {
+  if (!d || !Array.isArray(d.rows)) return d;
+  const monthStart = todayISO().slice(0, 8) + '01';
+  const week = weekStart();
+  d.rows = sh.expenses.slice().reverse().concat(d.rows);
+  d.count = d.rows.length;
+  d.total = round2(d.rows.reduce((a, e) => a + Number(e.amount || 0), 0));
+  const t = d.totals || {};
+  sh.expenses.forEach((e) => {
+    const amount = Number(e.amount) || 0;
+    t.all_time = round2((Number(t.all_time) || 0) + amount);
+    if (day10(e.spent_on) >= monthStart) t.this_month = round2((Number(t.this_month) || 0) + amount);
+    if (day10(e.spent_on) >= week) t.this_week = round2((Number(t.this_week) || 0) + amount);
+    t[e.job_id ? 'on_jobs' : 'overhead'] = round2((Number(t[e.job_id ? 'on_jobs' : 'overhead']) || 0) + amount);
+  });
+  d.totals = t;
+  if (Array.isArray(d.by_category)) {
+    sh.expenses.forEach((e) => {
+      if (day10(e.spent_on) < monthStart) return;
+      const hit = d.by_category.filter((c) => c.category === e.category)[0];
+      if (hit) { hit.n += 1; hit.amount = round2(hit.amount + Number(e.amount || 0)); }
+      else d.by_category.push({ category: e.category, n: 1, amount: round2(Number(e.amount || 0)) });
+    });
+    d.by_category.sort((a, b) => b.amount - a.amount);
+  }
+  return d;
+}
+async function paintDashboard(d, sh) {
+  const k = d.kpi, today = day10(d.today), monthStart = today.slice(0, 8) + '01';
+  const week = (d.trend && d.trend.length) ? d.trend[Math.max(0, d.trend.length - 7)].day : weekStart();
+  const bumpDay = (field, day, amount) => {
+    const hit = (d.trend || []).filter((x) => x.day === day)[0];
+    if (hit) hit[field] = round2(Number(hit[field] || 0) + amount);
+  };
+  sh.jobs.forEach((j) => {
+    const day = day10(j.created_at);
+    if (j.kind === 'Quote') { k.open_quotes += 1; k.quoted_value = round2(k.quoted_value + j.total); return; }
+    if (day === today) k.jobs_today += 1;
+    if (day >= week) k.jobs_week += 1;
+    if (OPEN_STATUSES.indexOf(j.status) >= 0) k.open_jobs += 1;
+    if (j.status === 'Ready') k.ready_jobs += 1;
+    if (j.due_date && day10(j.due_date) < today && j.status !== 'Delivered' && j.status !== 'Cancelled') k.overdue_jobs += 1;
+    if (day >= monthStart) k.billed_month = round2(k.billed_month + j.total);
+    bumpDay('new_jobs', day, 1);
+    const by = d.by_status || {};
+    if (OPEN_STATUSES.indexOf(j.status) >= 0) by[j.status] = (by[j.status] || 0) + 1;
+    d.by_status = by;
+  });
+  sh.payments.forEach((p) => {
+    const day = day10(p.paid_at);
+    if (day === today) k.collected_today = round2(k.collected_today + p.delta);
+    if (day >= week) k.collected_week = round2(k.collected_week + p.delta);
+    if (day >= monthStart) k.collected_month = round2(k.collected_month + p.delta);
+    if (p.kind === 'Refund') k.refunds_total = round2(k.refunds_total + Number(p.amount || 0));
+    bumpDay('collected', day, p.delta);
+  });
+  sh.expenses.forEach((e) => { if (day10(e.spent_on) >= monthStart) k.spent_month = round2(k.spent_month + Number(e.amount || 0)); });
+  sh.clients.forEach(() => { k.clients += 1; });
+  sh.leads.forEach((l) => {
+    if (l.stage === 'Won' || l.stage === 'Lost') return;
+    k.open_leads += 1;
+    k.pipeline_value = round2(k.pipeline_value + (Number(l.value) || 0));
+    if (l.follow_up && day10(l.follow_up) <= today) k.leads_due += 1;
+  });
+  d.recent = paintJobsList(d.recent || [], sh, new URLSearchParams('status=all'));
+  d.overdue = paintJobsList(d.overdue || [], sh, new URLSearchParams('kind=Job&status=all'))
+    .filter((j) => j.due_date && day10(j.due_date) < today);
+  d.quotes = paintJobsList(d.quotes || [], sh, new URLSearchParams('kind=Quote&status=open'));
+  /* The money a client still owes is worked off the client book rather than guessed at: the shop's own
+     figure nets each client's account credit against their job balances, one client at a time. */
+  const held = await offlineRead('responses', '/api/clients');
+  if (held && Array.isArray(held.value)) {
+    const clients = paintClients(JSON.parse(JSON.stringify(held.value)), sh, true);
+    k.outstanding = outstandingFrom(clients);
+    d.debtors = clients.filter((c) => !c.archived && Number(c.balance_due) > 0.005)
+      .map((c) => ({ id: c.id, name: c.name, phone: c.phone, owed: round2(c.balance_due), jobs: c.jobs || 0 }))
+      .sort((a, b) => b.owed - a.owed).slice(0, 8);
+  }
+  return d;
+}
+async function paintAccounts(d, sh) {
+  const today = todayISO();
+  const monthStart = today.slice(0, 8) + '01';
+  const ledger = d.ledger || {};
+  const added = sh.payments.slice().reverse().map((p) => ({
+    id: p.id, amount: p.amount, kind: p.kind, method: p.method, reference: p.reference,
+    paid_at: p.paid_at, client_id: p.clientId,
+    client: p.job ? p.job.client
+      : ((nameOfCached(sh, p.clientId) || {}).name || 'money kept on an account'),
+    job_id: p.jobId, ref: p.job ? p.job.ref : null, title: p.job ? p.job.title : null,
+    pendingSync: true,
+  }));
+  ledger.rows = added.concat(ledger.rows || []);
+  ledger.count = (Number(ledger.count) || 0) + added.length;
+  ledger.total = round2(Number(ledger.total || 0) + sh.payments.reduce((a, p) => a + p.delta, 0));
+  d.ledger = ledger;
+  const held = {};
+  d.credit = (d.credit || []).map((c) => {
+    const money = creditOnClient(sh, c.id);
+    if (money) { c.credit = round2(Number(c.credit) + money); c.pendingMoney = true; }
+    return c;
+  });
+  sh.payments.filter((p) => p.jobId === null && p.clientId).forEach((p) => {
+    if (d.credit.filter((c) => c.id === p.clientId)[0]) return;
+    const who = nameOfCached(sh, p.clientId);
+    if (who) d.credit.push({ id: p.clientId, name: who.name, phone: who.phone || '',
+      credit: creditOnClient(sh, p.clientId), pendingSync: true });
+  });
+  d.credit.forEach((c) => { if (c.credit > 0) held[c.id] = c.credit; });
+  const debtors = (d.debtors || []).map((j) => paintJobRow(j, sh)).filter((j) => j.balance > 0.005);
+  const settledNow = [];
+  (d.debtors || []).forEach((j) => {
+    if (j.balance <= 0.005) { j.settled_on = j.settled_on || day10(j.updated_at || today); settledNow.push(j); }
+  });
+  sh.jobs.filter((j) => j.kind === 'Job' && j.status !== 'Cancelled').forEach((j) => {
+    const row = Object.assign({}, j, { phone: j.client_phone });
+    if (row.balance > 0.005) debtors.push(row); else settledNow.push(Object.assign(row, { settled_on: day10(today) }));
+  });
+  const avail = {};
+  Object.keys(held).forEach((k) => { avail[k] = held[k]; });
+  debtors.forEach((j) => {
+    const have = Number(avail[j.client_id] || 0);
+    j.covered_by_credit = round2(Math.min(have, Number(j.balance)));
+    j.still_owed = round2(Number(j.balance) - j.covered_by_credit);
+    avail[j.client_id] = round2(have - j.covered_by_credit);
+  });
+  debtors.sort((a, b) => Number(b.balance) - Number(a.balance));
+  d.debtors = debtors.slice(0, 500);
+  d.settled = settledNow.concat(d.settled || []);
+  const totals = d.totals || {};
+  totals.overdue_value = round2(debtors.filter((j) => j.due_date && day10(j.due_date) < today &&
+    j.status !== 'Delivered' && j.status !== 'Cancelled').reduce((a, j) => a + Number(j.balance), 0));
+  const book = await offlineRead('responses', '/api/clients');
+  if (book && Array.isArray(book.value)) {
+    totals.receivable = outstandingFrom(paintClients(JSON.parse(JSON.stringify(book.value)), sh, true));
+  }
+  d.totals = totals;
+  const spent = d.spent_total || {};
+  sh.expenses.forEach((e) => {
+    spent.all_time = round2((Number(spent.all_time) || 0) + Number(e.amount || 0));
+    if (day10(e.spent_on) >= monthStart) spent.this_month = round2((Number(spent.this_month) || 0) + Number(e.amount || 0));
+  });
+  d.spent_total = spent;
+  return d;
+}
+async function paintBootstrap(b, sh) {
+  const counts = b.counts || {};
+  sh.jobs.forEach((j) => {
+    if (j.kind === 'Quote') { b.open_quotes = (Number(b.open_quotes) || 0) + 1; return; }
+    counts[j.status] = (Number(counts[j.status]) || 0) + 1;
+    if (OPEN_STATUSES.indexOf(j.status) >= 0) b.open_jobs = (Number(b.open_jobs) || 0) + 1;
+  });
+  b.counts = counts;
+  if (sh.leads.length) b.open_leads = (Number(b.open_leads) || 0) + sh.leads.length;
+  return b;
+}
+/* A record this device made has no page in the shop's copy at all, so it is built here instead of
+   refused: the same figures the list shows, with the money handed over against it folded in. */
+async function pendingGhost(key) {
+  const path = String(key).split('?')[0];
+  const jobHit = path.match(/^\/api\/jobs\/(-\d+)$/);
+  const noteHit = path.match(/^\/api\/jobs\/(-\d+)\/notifications$/);
+  const clientHit = path.match(/^\/api\/clients\/(-\d+)$/);
+  const leadHit = path.match(/^\/api\/leads\/(-\d+)$/);
+  if (!jobHit && !noteHit && !clientHit && !leadHit) return null;
+  const sh = await buildShadow();
+  if (!sh.count) return null;
+  /* The sheet asks for the message card in the shop's own shape, so an order the shop has not seen
+     answers in that same shape with nothing in it: the messages are written by the book when the
+     order arrives there, so until the Mac answers again there genuinely are none. */
+  if (noteHit) return { messages: [], client: null, events: [], whatsapp_to: null, email_to: null,
+    missing: [], to_send: 0, not_consented: [], blocked: [] };
+  if (jobHit) {
+    const hit = sh.jobs.filter((j) => j.id === Number(jobHit[1]))[0];
+    if (!hit) return null;
+    /* The money is already on this line: buildShadow folded every payment naming the order into its
+       paid figure and balance when the order was built. The sheet only has to list the payments
+       themselves now, or a ₵100 deposit would read as ₵200 the moment the cashier opened the job. */
+    hit.payments = sh.payments.filter((p) => p.jobId === hit.id).map((p) => ({
+      id: p.id, amount: p.amount, kind: p.kind, method: p.method, reference: p.reference,
+      paid_at: p.paid_at, note: p.note, job_id: p.jobId, client_id: p.clientId, pendingSync: true,
+    }));
+    return hit;
+  }
+  if (clientHit) {
+    const hit = sh.clients.filter((c) => c.id === Number(clientHit[1]))[0];
+    if (!hit) return null;
+    return Object.assign({}, hit, {
+      jobs: sh.jobs.filter((j) => j.client_id === hit.id),
+      payments: sh.payments.filter((p) => p.clientId === hit.id),
+    });
+  }
+  const lead = sh.leads.filter((l) => l.id === Number(leadHit[1]))[0];
+  return lead || null;
+}
+/* An address with a negative record number names something only this device knows about, so it is
+   built from the queue rather than refused; anything else with nothing remembered is said plainly. */
+async function heldOrGhost(key) {
+  const ghost = await pendingGhost(key);
+  if (ghost) return ghost;
+  if (/\/-\d+/.test(String(key).split('?')[0])) {
+    throw new Error('That record is kept on this device — its full sheet comes once the shop’s Mac answers again.');
+  }
+  throw new Error(NO_SAVED_COPY);
+}
+function nameOfCached(sh, id) {
+  const hit = (sh.names || {})[id];
+  return hit && hit.name ? hit : null;
+}
+/* The one door every remembered screen goes through. A fold that cannot be made must not cost the
+   counter the screen: the remembered figures paint as they are and the queue stays named on Sync. */
+async function paintPending(key, value) {
+  let sh;
+  try { sh = await buildShadow(); } catch (e) { return value; }
+  try { sh = await buildShadow(); } catch (e) { return value; }
+  if (!sh || !sh.count || !value) return value;
+  const path = String(key).split('?')[0];
+  const query = new URLSearchParams(String(key).split('?')[1] || '');
+  try {
+    if (path === '/api/jobs' && Array.isArray(value)) return paintJobsList(value, sh, query);
+    if (/^\/api\/jobs\/\d+$/.test(path)) { paintJobRow(value, sh); return value; }
+    if (path === '/api/clients' && Array.isArray(value)) return paintClients(value, sh, !listIsPaintable(query));
+    if (/^\/api\/clients\/\d+$/.test(path)) {
+      paintClientRow(value, sh);
+      value.jobs = pendingJobRows(sh).filter((j) => j.client_id === value.id).concat(value.jobs || []);
+      return value;
+    }
+    if (path === '/api/dashboard') return await paintDashboard(value, sh);
+    if (path === '/api/accounts') return await paintAccounts(value, sh);
+    if (path === '/api/leads') return paintLeads(value, sh);
+    if (path === '/api/expenses') return paintExpenses(value, sh);
+    if (path === '/api/bootstrap') return await paintBootstrap(value, sh);
+  } catch (e) { return value; }
+  return value;
+}
+function toast(msg, kind) {
+  if (S.offlineQueuedToast) {
+    S.offlineQueuedToast = false;
+    /* The change is kept here, but it is not invisible: every screen this device can judge already
+       carries it, wearing the mark. Saying only "waiting to sync" leaves a cashier who has just taken
+       money hunting the takings figure for something the screen is already showing. */
+    msg = 'Saved on this device — it is on the screens, marked Held on this device, until the shop answers.';
+    kind = 'good';
+  }
+  const t = document.createElement('div');
+  t.className = 'toast ' + (kind || '');
+  t.textContent = msg;
+  $('#toasts').appendChild(t);
+  setTimeout(() => t.remove(), 3200);
+}
+function fail(err) { toast(err.message || String(err), 'bad'); }
+
+/* ------------------------------------------------------------------- chrome */
+async function boot() {
+  S.boot = await api('/api/bootstrap');
+  if (S.boot.db) $('#footDb').textContent = S.boot.db;
+  paintNav();
+}
+/* Whether *this* device is holding the book open with a session of its own. The shop's own
+   computer never does — it is the machine the records sit on — so it gets no sign-out button. */
+function paintSession() {
+  const btn = $('#signOut');
+  if (!btn) return;
+  const s = S.session || {};
+  btn.hidden = !(s.required && s.authenticated && !s.this_is_the_shop_computer);
+}
+function paintNav() {
+  const b = S.boot;
+  const badges = {
+    jobs: b.open_jobs || '',
+    leads: b.open_leads || '',
+    quotes: '',
+    clients: '',
+    accounts: '',
+    expenses: '',
+    dashboard: '',
+    reports: '',
+    sync: '',
+    shop: '',
+    settings: '',
+  };
+  $$('.navlink[data-view]').forEach((a) => {
+    const view = a.dataset.view;
+    a.classList.toggle('on', S.route && S.route.view === view);
+    const old = a.querySelector('span');
+    if (old) old.remove();
+    let text = badges[view];
+    if (view === 'jobs' && b.open_quotes) text += ' · ' + pluralise(b.open_quotes, 'quote');
+    if (view === 'jobs' && b.to_send) text += ' · ' + pluralise(b.to_send, 'message') + ' to send';
+    if (text) a.insertAdjacentHTML('beforeend', '<span>' + text + '</span>');
+  });
+}
+const pluralise = (n, word) => n + ' ' + (n === 1 ? word
+  : word.endsWith('y') ? word.slice(0, -1) + 'ies' : word + 's');
+function paintFoot() {
+  const plural = pluralise;
+  const b = S.boot;
+  const bits = [plural(b.open_jobs, 'open job'), plural(b.clients, 'client')];
+  if (b.open_quotes) bits.push(plural(b.open_quotes, 'quote'));
+  if (b.open_leads) bits.push(plural(b.open_leads, 'enquiry'));
+  $('#footCounts').textContent = bits.join(' · ');
+  // One book, in one file, on one Mac: how recently it was copied belongs where it can be seen
+  // from any screen, because the screens that need it are the ones that come after a loss.
+  const foot = $('#footBackup');
+  const copy = b.backup || {};
+  if (foot) {
+    foot.textContent = copy.at ? fdate(copy.at.slice(0, 10)) : 'never';
+    foot.classList.toggle('late', !!copy.stale);
+  }
+}
+async function refreshChrome() {
+  try { S.boot = await api('/api/bootstrap'); } catch (e) { /* keep going */ }
+  paintNav();
+  paintFoot();
+}
+
+/* ---------------------------------------------------------------- phone shell */
+/* A phone has no room for a rail, so the same destinations become a tab bar a thumb
+   reaches and everything that does not fit moves into a sheet behind its last slot.
+   Links and buttons are moved rather than copied, so the router, the active state and
+   the "3 waiting" badges keep working wherever they end up living. */
+const PHONE = window.matchMedia('(max-width: 720px)');
+const TABS = { dashboard: 'Desk', jobs: 'Jobs', collect: 'Collect', accounts: 'Money', clients: 'Clients' };
+let phoneRestore = null;
+
+function stash(node, parent) {
+  if (!node || node.parentNode === parent) return;
+  phoneRestore.push([node, node.parentNode, node.nextElementSibling]);
+  parent.appendChild(node);
+}
+
+function shellChrome() {
+  const wide = !PHONE.matches;
+  document.documentElement.dataset.shell = wide ? 'wide' : 'phone';
+  /* A phone has a tab bar and no room for a menu; a wide window has the menu bar. Asked again on
+     every change, because a tablet turned sideways is exactly the kind of thing a counter does. */
+  paintMenuBar();
+  if (wide) {
+    (phoneRestore || []).slice().reverse().forEach((entry) => {
+      const node = entry[0], parent = entry[1], next = entry[2];
+      if (parent) parent.insertBefore(node, next && next.parentNode === parent ? next : null);
+    });
+    phoneRestore = null;
+    ['#phonetop', '#tabbar', '#moresheet'].forEach((sel) => {
+      const el = $(sel);
+      if (el) el.remove();
+    });
+    return;
+  }
+  if (document.getElementById('tabbar')) return;
+  phoneRestore = [];
+  const side = $('#side');
+  const top = document.createElement('div');
+  top.className = 'phonetop';
+  top.id = 'phonetop';
+  $('.main').insertBefore(top, $('#topbar'));
+  stash($('#networkStatus'), top);
+
+  const bar = document.createElement('nav');
+  bar.className = 'tabbar';
+  bar.id = 'tabbar';
+  bar.setAttribute('aria-label', 'Main screens');
+  Object.keys(TABS).forEach((view) => {
+    const link = $('#nav .navlink[data-view="' + view + '"]');
+    if (!link) return;
+    link.dataset.short = TABS[view];
+    stash(link, bar);
+  });
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'navlink more';
+  more.id = 'moreTab';
+  more.dataset.short = 'More';
+  more.dataset.action = 'toggle-more';
+  more.setAttribute('aria-expanded', 'false');
+  bar.appendChild(more);
+
+  const sheet = document.createElement('div');
+  sheet.className = 'moresheet';
+  sheet.id = 'moresheet';
+  sheet.hidden = true;
+  side.appendChild(sheet);
+  side.appendChild(bar);
+  $$('#nav .navlink').forEach((link) => stash(link, sheet));
+  stash($('.side-cta'), sheet);
+  stash($('#pagefoot'), sheet);
+}
+
+function closeMore() {
+  const sheet = $('#moresheet');
+  if (!sheet || sheet.hidden) return;
+  sheet.hidden = true;
+  const tab = $('#moreTab');
+  if (tab) tab.setAttribute('aria-expanded', 'false');
+}
+PHONE.addEventListener('change', shellChrome);
+
+/* A launcher shortcut opens the app already part-way into a job: ?action= names the
+   button the tap stood for, and the address is tidied away once it has been honoured. */
+function launchShortcut() {
+  const asked = new URLSearchParams(location.search).get('action');
+  if (!asked) return;
+  history.replaceState(null, '', location.pathname + location.hash);
+  if (!/^[a-z][a-z-]{2,30}$/.test(asked)) return;
+  const handler = ACTIONS[asked];
+  if (typeof handler === 'function') {
+    handler(document.querySelector('[data-action="' + asked + '"]') || document.body);
+  }
+}
+function topbar(title, sub, controls, buttons) {
+  const list = buttons || [{ label: '+ New job', action: 'new-job', primary: true }];
+  $('#topbar').innerHTML =
+    '<div class="title"><h1>' + esc(title) + '</h1>' +
+    (sub ? '<span class="sub">' + sub + '</span>' : '') +
+    '<span class="spacer"></span>' +
+    list.map((b) => '<button class="btn' + (b.primary ? ' primary' : '') + '" data-action="' + b.action + '">' +
+      esc(b.label) + '</button>').join('') + '</div>' +
+    (controls || '');
+}
+function emptyState(title, note, action) {
+  return '<div class="empty"><b>' + esc(title) + '</b><span>' + esc(note) + '</span>' +
+    (action || '') + '</div>';
+}
+/* Written once, in the shop's own words, so nobody types a password into a box that is about to
+   say no. Deliberately without a countdown here: this card is left on a screen while someone walks
+   to the counter, and a number that quietly goes stale is worse than none. */
+function loginHoursNote(h) {
+  if (!h || !h.written) return '';
+  return '<p class="hint hours-note">' + (h.open
+    ? 'New devices sign in ' + esc(h.when_text) + '.'
+    : 'The shop lets new devices sign in ' + esc(h.when_text) + ', and right now it is outside'
+      + ' that window. A device already signed in keeps working.') +
+    ' A machine the counter has named as one of the shop’s own signs in at any hour — tick the'
+    + ' box below and take its name plate to it.</p>';
+}
+function loginScreen(message, hours) {
+  S.session = { required: true, authenticated: false };
+  paintSession();
+  $('#topbar').innerHTML = '';
+  $('#view').innerHTML = '<div class="login-card card"><h1>Sign in to the shop book</h1>' +
+    '<p class="hint">Enter the shop password to access shared records.</p>' +
+    (message ? '<p class="err">' + esc(message) + '</p>' : '') +
+    loginHoursNote(hours) +
+    '<form id="loginForm"><label class="field"><span>Shop password</span>' +
+    '<input name="password" type="password" autocomplete="current-password" required autofocus></label>' +
+    '<label class="consent wide"><input type="checkbox" id="shopMachine">' +
+    '<span>This is one of the shop’s own machines</span></label>' +
+    '<label class="field wide" id="plateField" hidden><span>Name plate from the counter</span>' +
+    '<input name="shop_code" maxlength="9" autocomplete="off" spellcheck="false"' +
+    ' autocapitalize="characters" placeholder="KR7P-M2XQ"></label>' +
+    '<button class="btn primary">Sign in</button><div class="err" id="loginErr"></div></form></div>';
+  $('#shopMachine').addEventListener('change', (event) => {
+    const field = $('#plateField');
+    field.hidden = !event.target.checked;
+    if (field.hidden) $('#loginForm').shop_code.value = '';
+    else field.querySelector('input').focus();
+  });
+  $('#loginForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    $('#loginErr').textContent = '';
+    try {
+      const plate = form.shop_code.value.trim();
+      const response = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(plate ? { password: form.password.value, shop_code: plate }
+                                   : { password: form.password.value }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'Sign-in failed');
+      // The plate is the counter's business, so a wrong one is said out loud rather than
+      // swallowed by the reload that follows a sign-in that worked anyway.
+      if (body.shop_computer_note) {
+        try { sessionStorage.setItem('chrisphics-note', body.shop_computer_note); } catch (e) {}
+      }
+      location.reload();
+    } catch (error) {
+      $('#loginErr').textContent = error.message || 'Could not sign in. Reconnect to the shop server and try again.';
+    }
+  });
+}
+
+/* ------------------------------------------------------------------- router */
+function parseHash() {
+  const raw = (location.hash || '#/dashboard').replace(/^#\/?/, '');
+  const cut = raw.indexOf('?');
+  const path = cut < 0 ? raw : raw.slice(0, cut);
+  const parts = path.split('/').filter(Boolean);
+  return {
+    view: parts[0] || 'dashboard',
+    id: parts[1] || null,
+    params: new URLSearchParams(cut < 0 ? '' : raw.slice(cut + 1)),
+  };
+}
+function go(view, params, id) {
+  const p = params || {};
+  location.hash = '#/' + view + (id ? '/' + id : '') + (Object.keys(p).length && qs(p) ? '?' + qs(p) : '');
+}
+async function render() {
+  S.route = parseHash();
+  /* Where the shop was standing, kept so "Open this screen first ▸ Where I left off" means the
+     same thing here as it does in the Mac's own window. Only the screen is remembered, never the
+     filter or the row: a bookmark that reopens yesterday's search is a small trap of its own. */
+  if (/^#\/[a-z]+$/.test(location.hash)) savePref('last', location.hash);
+  paintNav();
+  paintNetworkStatus();
+  const v = $('#view');
+  const r = S.route;
+  /* One class is the whole gate: every screen the counter works on gets the glass, and changing this
+     one word takes the pass back to the dashboard alone. Two things stay solid by rule, not by route —
+     the alarm cards, and the printed job sheet, which is its own document and never sees this class. */
+  v.classList.add('glass');
+  try {
+    if (r.view === 'jobs') await viewJobs(r);
+    else if (r.view === 'spoiled') await viewSpoiled(r);
+    else if (r.view === 'collect') await viewCollect();
+    else if (r.view === 'sync') await viewSyncQueue();
+    else if (r.view === 'clients') await viewClients(r);
+    else if (r.view === 'accounts') await viewAccounts(r);
+    else if (r.view === 'reports') await viewReports(r);
+    else if (r.view === 'leads') await viewLeads(r);
+    else if (r.view === 'expenses') await viewExpenses(r);
+    else if (r.view === 'shop') await viewShop(r);
+    else if (r.view === 'settings') await viewSettings(r);
+    else await viewDashboard(r);
+    if (r.id && r.view === 'jobs') openJobDrawer(Number(r.id));
+    if (r.id && r.view === 'clients') openClientDrawer(Number(r.id));
+    if (r.id && r.view === 'leads') openLeadDrawer(Number(r.id));
+  } catch (err) {
+    if (err.status === 401) { loginScreen('This device has been out of the book for a while. Enter the shop password again.'); return; }
+    v.innerHTML = emptyState('Could not load this page', err.message,
+      '<button class="btn" onclick="location.reload()">Try again</button>');
+  }
+  if (S.settle) {
+    S.settle = false;
+    v.classList.remove('settle');
+    void v.offsetWidth;  /* without a reflow the browser sees no change and skips the animation */
+    v.classList.add('settle');
+    setTimeout(() => { S.flash = null; }, 1400);
+  }
+}
+
+function filtersBar(view, defs) {
+  if (!defs.length) return '';
+  const p = S.route.params;
+  const ctrl = defs.map((d) => {
+    if (d.type === 'tabs') {
+      return '<div class="tabs" role="tablist">' + d.options.map((o) =>
+        '<button class="tab' + ((p.get(d.key) || d.def) === o.v ? ' on' : '') + '" data-filter="' + d.key + '" data-value="' +
+        esc(o.v) + '">' + esc(o.label) + (o.count !== undefined ? ' <b>' + o.count + '</b>' : '') + '</button>').join('') + '</div>';
+    }
+    if (d.type === 'select') {
+      const cur = p.get(d.key) || '';
+      return '<select data-filter="' + d.key + '">' + d.options.map((o) =>
+        '<option value="' + esc(o[0]) + '"' + (cur === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>').join('') + '</select>';
+    }
+    if (d.type === 'date') {
+      return '<label class="datef"><span>' + esc(d.label) + '</span><input type="date" data-filter="' + d.key +
+        '" value="' + esc(p.get(d.key) || d.def || '') + '"></label>';
+    }
+    return '<div class="search"><input data-filter="' + d.key + '" placeholder="' + esc(d.placeholder || 'Search') +
+      '" value="' + esc(p.get(d.key) || '') + '"></div>';
+  }).join('');
+  return '<div class="toolbar">' + ctrl +
+    '<span class="spacer" style="flex:1"></span>' +
+    '<button class="btn sm ghost" data-action="clear-filters">Clear</button>' +
+    '</div>';
+}
+function paramOrDefault(key, def) {
+  const v = S.route.params.get(key);
+  return v === null || v === '' ? def : v;
+}
+
+/* ------------------------------------------------------ click-to-change cells */
+/* A counter book gets nudged all day: a date slips, a stage moves, a name was typed
+   wrong. Rather than open the whole form for that, these cells edit themselves in place
+   and post one field, so nothing else on the row can be overwritten by the change. */
+const QUICK = {
+  'jobs/title': { type: 'text', max: 120 },
+  'jobs/status': { type: 'choice', options: () => S.boot.statuses },
+  'jobs/priority': { type: 'choice', options: () => ['Normal', 'Urgent'] },
+  'jobs/due_date': { type: 'date' },
+  'jobs/valid_until': { type: 'date' },
+  'leads/interest': { type: 'text', max: 160 },
+  'leads/value': { type: 'money' },
+  'leads/stage': { type: 'choice', options: () => S.boot.lead_stages },
+  'leads/follow_up': { type: 'date' },
+};
+const QUICK_HINT = {
+  title: 'Click to rename', status: 'Click to change the status', priority: 'Click to set priority',
+  due_date: 'Click to move the due date', valid_until: 'Click to change how long the price holds',
+  interest: 'Click to write what they want', value: 'Click to change the estimate',
+  stage: 'Click to move the enquiry along', follow_up: 'Click to set the next chase date',
+};
+function qe(path, current, label) {
+  const field = path.slice(path.lastIndexOf('/') + 1);
+  return '<button type="button" class="qe' + (S.flash === path ? ' saved' : '') + '" data-qe="' + esc(path) +
+    '" data-cur="' + esc(current === null || current === undefined ? '' : current) + '" title="' +
+    esc(QUICK_HINT[field] || 'Click to change') + '">' + label + '</button>';
+}
+let editor = null;
+function openEditor(cell, startValue) {
+  if (editor && editor.cell === cell) return;
+  if (editor) saveEditor();
+  const cut = cell.dataset.qe.split('/');
+  const spec = QUICK[cut[0] + '/' + cut[2]];
+  if (!spec) return;
+  const cur = (startValue === undefined || startValue === null) ? cell.dataset.cur : String(startValue);
+  let input;
+  if (spec.type === 'choice') {
+    input = document.createElement('select');
+    input.innerHTML = spec.options().map((o) => '<option' + (o === cur ? ' selected' : '') + '>' + esc(o) + '</option>').join('');
+  } else if (spec.type === 'money') {
+    /* A counter types money the way it is said out loud — 1,200 or 2000.5 — so this
+       field is plain text that gets read with the same shop parser everything else
+       uses. An input type=number erases anything it does not recognise, which is how
+       a figure was lost without anyone being told. */
+    input = document.createElement('input');
+    input.type = 'text';
+    input.inputMode = 'decimal';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    input.classList.add('money');
+    input.placeholder = '0.00';
+    input.value = cur;
+  } else {
+    input = document.createElement('input');
+    if (spec.type === 'date') input.type = 'date';
+    else { input.type = 'text'; if (spec.max) input.maxLength = spec.max; }
+    input.value = cur;
+  }
+  input.classList.add('qe-in');
+  // The field sits beside the cell, not inside it: a control nested in a button is not
+  // valid markup, and the date picker stops working in some engines.
+  cell.parentNode.insertBefore(input, cell);
+  cell.hidden = true;
+  const ed = { cell: cell, input: input, focused: false };
+  /* A web view that is not the key window can hand back a field that never took focus, so
+     blur alone would close the editor the instant it opened. Clicking away settles it too. */
+  ed.away = (ev) => {
+    if (editor !== ed || ev.target === input || input.contains(ev.target)) return;
+    saveEditor();
+  };
+  editor = ed;
+  document.addEventListener('click', ed.away, true);
+  input.addEventListener('focus', () => { ed.focused = true; });
+  input.addEventListener('blur', () => { if (ed.focused && editor === ed) saveEditor(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); cancelEditor(); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); saveEditor(); }
+  });
+  if (spec.type !== 'text' && spec.type !== 'number' && spec.type !== 'money') input.addEventListener('change', () => saveEditor());
+  input.focus();
+  if (input.setSelectionRange && (spec.type === 'text' || spec.type === 'money')) input.setSelectionRange(input.value.length, input.value.length);
+}
+function closeEditor() {
+  if (!editor) return;
+  document.removeEventListener('click', editor.away, true);
+  editor.cell.hidden = false;
+  editor.input.remove();
+  editor = null;
+}
+function cancelEditor() {
+  if (!editor) return;
+  editor.cell.classList.remove('saving');
+  closeEditor();
+}
+function saveEditor() {
+  if (!editor) return;
+  const cell = editor.cell;
+  const cut = cell.dataset.qe.split('/');
+  const spec = QUICK[cut[0] + '/' + cut[2]];
+  let value = editor.input.value;
+  const isMoney = !!spec && spec.type === 'money';
+  if (isMoney) {
+    if (String(value).trim() === '') return cancelEditor();
+    value = n2(shopNum(value));
+  }
+  closeEditor();
+  if (isMoney ? Math.abs(shopNum(value) - shopNum(cell.dataset.cur)) < 0.005 : value === cell.dataset.cur) return;
+  cell.classList.add('saving');
+  api('/api/' + cut[0] + '/' + cut[1] + '/quick', { method: 'POST', body: JSON.stringify({ field: cut[2], value: value }) })
+    .then(() => { S.flash = cell.dataset.qe; refreshQuiet(); })
+    .catch((err) => {
+      cell.classList.remove('saving');
+      /* The shop just typed something; if the book refused it, that typing is the most
+         expensive thing in the room. Put it back in the field instead of wiping it and
+         leaving a flash nobody can read back. */
+      if (cell.isConnected) { setTimeout(() => openEditor(cell, value), 60); }
+      else { cell.classList.add('bad'); setTimeout(() => cell.classList.remove('bad'), 1200); }
+      fail(err);
+    });
+}
+/* Re-read the book after a change without the page jumping back to the top. */
+function refreshQuiet() {
+  const y = window.scrollY;
+  S.settle = true;
+  return Promise.all([boot(), render()])
+    .then(() => window.scrollTo(0, y))
+    .catch(() => window.scrollTo(0, y));
+}
+
+/* --------------------------------------------------------------- shop hours
+   The countdown is measured in the shop, not on the phone reading it: the server hands over the
+   seconds left on its own clock and this only subtracts what has gone by since it was read. A
+   device whose clock is two hours off therefore still shows the right number — and still cannot
+   sign in early, because the server decides that on its own clock too. */
+let hoursTick = null;
+let hoursRead = 0;
+let hoursRetryAt = 0;
+
+function hoursCard(h) {
+  if (!h || (!h.written && !h.limit)) return '';
+  S.hours = h;
+  hoursRead = Date.now();
+  return '<div class="card hours' + (h.open ? '' : ' shut') + '" id="hoursCard">' + hoursInner(h) + '</div>';
+}
+function hoursInner(h) {
+  const own = h.own_devices || 0;
+  const places = (h.limit
+    ? plural(h.devices, 'device') + ' signed in of ' + plural(h.limit, 'place') +
+      ' allowed' + (h.device_names && h.device_names.length ? ' — ' + esc(h.device_names.join(', ')) : '')
+    : plural(h.devices || 0, 'device') + ' signed in · the shop caps nobody') +
+    (own ? ' · ' + plural(own, 'machine') + ' named here as the shop’s own' +
+      (h.own_computers && h.own_computers.length
+        ? ' (' + esc(h.own_computers.join(', ')) + ')' : '') : '');
+  return '<h3><span class="pill ' + (h.open ? 'in' : 'out') + '">' +
+    esc(h.open ? (h.written ? 'Open now' : 'Always open') : 'Closed') + '</span>' +
+    '<span>' + esc(h.when_text) + '</span><span class="spacer"></span>' +
+    '<b class="hours-count" id="hoursCount">' + esc(hoursWords(h, h.seconds_to_change)) + '</b></h3>' +
+    '<div class="card-b"><p class="hint">' + places + '</p>' +
+    (h.limit ? '<p class="hint">The shop’s own Mac is the counter standing at the counter: it is'
+      + ' never turned away, and it does not use one of the places meant for visiting devices.'
+      + ' Neither does a machine the counter has written down as one of the shop’s own — those'
+      + ' sign in at any hour and keep their sign-in, so a visiting device waits until one of the'
+      + ' places is signed out here.</p>'
+      : '<p class="hint">New sign-ins are let in whenever the window above says they are.</p>') +
+    '</div>';
+}
+function hoursWords(h, seconds) {
+  if (seconds === null || seconds === undefined) return h.open ? 'open all the time' : 'shut';
+  return (h.open ? 'closes in ' : 'opens in ') + clockCountdown(seconds);
+}
+function clockCountdown(total) {
+  const secs = Math.max(0, Math.floor(total));
+  /* A wait of days is not a stopwatch: nobody reads the seconds off a shop that opens Monday. */
+  if (secs >= 86400) {
+    return Math.floor(secs / 86400) + 'd ' + String(Math.floor(secs % 86400 / 3600)).padStart(2, '0')
+      + 'h ' + String(Math.floor(secs % 3600 / 60)).padStart(2, '0') + 'm';
+  }
+  const parts = [Math.floor(secs / 3600), Math.floor(secs % 3600 / 60), secs % 60];
+  let out = parts[0] ? parts[0] + 'h ' : '';
+  out += String(parts[1]).padStart(out ? 2 : 1, '0') + 'm ' + String(parts[2]).padStart(2, '0') + 's';
+  return out;
+}
+function watchShopHours() {
+  if (hoursTick) return;
+  hoursTick = setInterval(() => {
+    const el = $('#hoursCount');
+    const h = S.hours;
+    if (!el || !h || h.seconds_to_change === null || h.seconds_to_change === undefined) return;
+    const left = h.seconds_to_change - Math.floor((Date.now() - hoursRead) / 1000);
+    if (left > 0) { el.textContent = hoursWords(h, left); return; }
+    /* The window has turned over. Ask the shop rather than guess, and never more than every few
+       seconds in case the answer does not come back. */
+    if (Date.now() - hoursRetryAt < 5000) return;
+    hoursRetryAt = Date.now();
+    api('/api/session').then((s) => {
+      if (!s.hours) return;
+      S.hours = Object.assign({ devices: h.devices, limit: h.limit, device_names: h.device_names }, s.hours);
+      hoursRead = Date.now();
+      const card = $('#hoursCard');
+      if (card) {
+        card.innerHTML = hoursInner(S.hours);
+        card.classList.toggle('shut', !S.hours.open);
+      }
+    }).catch(() => {});
+  }, 1000);
+}
+
+/* ------------------------------------------------------------------ the day's clock
+   The date and the running time, kept on the dashboard so the counter sees the shop's day rather
+   than a static headline. Built three times before it landed: a line of small text, then a tile in
+   the corner of a card, then a single day number — the iPhone's *small* widget — and the answer to
+   each was that he could not see it. It is now the two widgets he named: the medium calendar widget
+   (every day of the month on one face, today in a crimson roundel) and a clock the size of a lock
+   screen. Written in the 12-hour words the owner used for the daylight band ("8:00am - 5:00 pm"),
+   and it is this same timer that changes the look when the evening comes — nobody presses anything.
+   A machine that slept through
+   5:00 pm corrects itself on waking, because the look is re-derived from the clock every second
+   rather than set once by a timer that may not have been running when the hour turned. */
+let todayTick = null;
+let calStamp = '';
+
+function hour12(h) { return h % 12 === 0 ? 12 : h % 12; }
+function meridiem(h) { return h < 12 ? 'am' : 'pm'; }
+function hourWords(h) { return hour12(h) + ':00 ' + meridiem(h); }
+/* The time the way an iPhone writes it: the hour and minute carry all the size, the seconds ride
+   small, and am/pm smaller still. Three spans so they can be sized apart — and their textContent
+   still spells the one plain string ("8:05:00 pm") that the checks read off the page. */
+function clockHtml(d) {
+  return '<i>' + hour12(d.getHours()) + ':' + String(d.getMinutes()).padStart(2, '0') + '</i>' +
+    '<s>:' + String(d.getSeconds()).padStart(2, '0') + '</s><u> ' + meridiem(d.getHours()) + '</u>';
+}
+/* The calendar the way an iPhone's medium widget draws it: the whole month on one face, six rows of
+   seven, the week opening on Monday as every date in this shop's strings does, the days belonging to
+   the neighbouring months kept in the quiet ink, and today set in a roundel whose colour its own date
+   picks — the seven inks turn with the days, and the number rides small and white in whatever circle
+   it lands on. The pass before it carried a single day number, which is the iPhone's *small* widget —
+   "let the calendar widget be the medium type with all the days on it, not small". Always forty-two
+   cells, whatever the month, so the face never changes height under the clock. */
+const CAL_DOW = ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'];
+const CAL_MARKS = 7;
+function monthCells(now) {
+  const lead = (new Date(now.getFullYear(), now.getMonth(), 1).getDay() + 6) % 7;
+  const count = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const before = new Date(now.getFullYear(), now.getMonth(), 0).getDate();
+  let out = '';
+  for (let i = 0; i < 42; i++) {
+    const n = i + 1 - lead;
+    const inMonth = n >= 1 && n <= count;
+    const today = inMonth && n === now.getDate();
+    const label = n < 1 ? before + n : (n > count ? n - count : n);
+    const mark = today ? ' is-today mark-' + ((n - 1) % CAL_MARKS) : '';
+    out += '<span class="cal-cell' + (inMonth ? '' : ' edge') + mark + '"' +
+      (today ? ' id="todayNum"' : '') + '>' + label + '</span>';
+  }
+  return out;
+}
+function dateWords(d) {
+  return d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+}
+function monthWords(d) { return d.toLocaleDateString('en-GB', { month: 'long' }); }
+function calAria(d) {
+  return monthWords(d) + ' ' + d.getFullYear() + '. Today is ' +
+    d.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric' }) + '.';
+}
+function calInner(now) {
+  return '<div class="cal-head"><span class="cal-mon" id="todayMonth">' + esc(monthWords(now)) +
+    '</span><span class="cal-year" id="todayYear">' + now.getFullYear() + '</span></div>' +
+    '<div class="cal-dows">' + CAL_DOW.map(function (w) { return '<span>' + w + '</span>'; }).join('') +
+    '</div><div class="cal-grid">' + monthCells(now) + '</div>';
+}
+function lookWords(d) {
+  return themeIsDark(d) ? 'Evening · light from ' + hourWords(DAY_START)
+    : 'Daytime · dark from ' + hourWords(DAY_END);
+}
+/* ---------- the weather, in the tile the calendar is the size of ----------
+   The shop works in Accra, so these three lines are Accra: the name printed on the tile and the
+   coordinates asked for. They are constants rather than something read out of the book, because the
+   book's own address field holds the server's network address for the shop's other machines, not a
+   town — if the shop ever moves, this is the one place to say so. The figure in the tile is the figure
+   the forecast service answered with, read from the machine looking at the screen; when that machine
+   has no road to the service, the shop's own engine is asked and hands the same answer across (see
+   loadWeather below). When nothing answers, nothing is invented: the tile says so, or keeps the last
+   reading it really did get and says when it was read. */
+const WX_PLACE = 'Accra', WX_LAT = 5.5560, WX_LON = -0.1969;
+const WX_HOURS = 6, WX_OLD = 20 * 60 * 1000, WX_RETRY = 60 * 1000, WX_KEY = 'crispprint-weather';
+const WX_CODE = {
+  0: ['Clear', 'sun'], 1: ['Mostly clear', 'sun'], 2: ['Partly cloudy', 'part'],
+  3: ['Overcast', 'cloud'], 45: ['Fog', 'fog'], 48: ['Fog', 'fog'],
+  51: ['Drizzle', 'rain'], 53: ['Drizzle', 'rain'], 55: ['Drizzle', 'rain'],
+  61: ['Light rain', 'rain'], 63: ['Rain', 'rain'], 65: ['Heavy rain', 'rain'],
+  66: ['Freezing rain', 'rain'], 67: ['Freezing rain', 'rain'],
+  71: ['Light snow', 'snow'], 73: ['Snow', 'snow'], 75: ['Heavy snow', 'snow'],
+  77: ['Snow', 'snow'], 80: ['Showers', 'rain'], 81: ['Showers', 'rain'],
+  82: ['Heavy showers', 'rain'], 85: ['Snow showers', 'snow'], 86: ['Snow showers', 'snow'],
+  95: ['Thunderstorm', 'storm'], 96: ['Thunderstorm', 'storm'], 99: ['Thunderstorm', 'storm'],
+};
+function wxLoaded() {
+  try {
+    const w = JSON.parse(localStorage.getItem(WX_KEY) || 'null');
+    return w && typeof w.temperature === 'number' ? w : null;
+  } catch (e) { return null; }
+}
+function wxSaved(w) { try { localStorage.setItem(WX_KEY, JSON.stringify(w)); } catch (e) {} }
+/* wxAsked is when the page last *sent* an ask, which is what paces the retries. wxDown is a separate
+   thing: whether that ask came back refused. Conflating them made a tile shout "No weather — this
+   machine cannot reach the forecast." during the second the request was still in the air, on a
+   machine that was reaching it perfectly well. */
+let wxState = wxLoaded(), wxAsked = 0, wxDown = false, wxPainted = '';
+function wxDeg(v) { return typeof v === 'number' ? Math.round(v) + '°' : '—'; }
+function wxWord(t, first) {
+  if (first) return 'now';
+  let h = +String(t).slice(11, 13);
+  const ap = h < 12 ? 'am' : 'pm';
+  h = h % 12;
+  return (h || 12) + ap;
+}
+function wxReadAt(at) {
+  return new Date(at).toLocaleTimeString('en-GB', { hour: 'numeric', minute: '2-digit', hour12: true });
+}
+function wxGlyph(kind, isDay) {
+  const line = ' fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"';
+  const cloud = '<path d="M6.6 15.2h10.7a3.7 3.7 0 0 0 .5-7.36 5.3 5.3 0 0 0-10-1.4 4 4 0 0 0-1.2 ' +
+    '8.76z" fill="currentColor"/>';
+  const open = '<svg viewBox="0 0 24 24" aria-hidden="true">';
+  if (kind === 'sun') {
+    if (isDay === 0) {
+      return open + '<path d="M20.6 14.2A8.6 8.6 0 0 1 9.8 3.4a7.9 7.9 0 1 0 10.8 10.8z" ' +
+        'fill="currentColor"/></svg>';
+    }
+    return open + '<circle cx="12" cy="12" r="4.3" fill="currentColor"/><g' + line +
+      '><path d="M12 2.8v2.1M12 19.1v2.1M2.8 12h2.1M19.1 12h2.1M5.5 5.5l1.5 1.5M17 17l1.5 1.5' +
+      'M18.5 5.5 17 7M7 17l-1.5 1.5"/></g></svg>';
+  }
+  if (kind === 'part') {
+    return open + '<circle cx="16.8" cy="7" r="3.1" fill="currentColor"/><path d="M4.6 19.4h10.1' +
+      'a3.6 3.6 0 0 0 .4-7.16 5 5 0 0 0-9.4-1.3 3.8 3.8 0 0 0-1.1 8.46z" fill="currentColor"/></svg>';
+  }
+  if (kind === 'rain') {
+    return open + cloud + '<g' + line + '><path d="M8.4 18.2l-1 2.4M12.4 18.2l-1 2.4M16.4 18.2l-1 2.4' +
+      '"/></g></svg>';
+  }
+  if (kind === 'snow') {
+    return open + cloud + '<g fill="currentColor"><circle cx="8.6" cy="19.6" r="1.1"/>' +
+      '<circle cx="12.4" cy="19.6" r="1.1"/><circle cx="16.2" cy="19.6" r="1.1"/></g></svg>';
+  }
+  if (kind === 'fog') {
+    return open + '<path d="M6.8 10.6h9.8a3.4 3.4 0 0 0 .4-6.76A4.9 4.9 0 0 0 7.4 2.4a3.7 3.7 0 0 ' +
+      '0-.6 8.2z" fill="currentColor"/><g' + line + '><path d="M4 14.6h16M4 17.8h16M6.6 21h11"/></g></svg>';
+  }
+  if (kind === 'storm') {
+    return open + cloud + '<polygon points="13.2 17 9.6 22.4 11.9 22.4 11 24 15 18.8 12.6 18.8 13.6 17" ' +
+      'fill="currentColor"/></svg>';
+  }
+  return open + cloud + '</svg>';
+}
+function wxKind(w) { return (WX_CODE[w.code] || ['—', 'cloud'])[1]; }
+function wxLabel(w) {
+  const word = (WX_CODE[w.code] || ['—', 'cloud'])[0];
+  return w.place + ': ' + word + ', ' + Math.round(w.temperature) + ' degrees, feels like ' +
+    Math.round(w.feels) + ', high ' + Math.round(w.hi) + ', low ' + Math.round(w.lo) + '.';
+}
+function wxInner(w) {
+  const word = (WX_CODE[w.code] || ['—', 'cloud'])[0];
+  const night = w.isDay === 0;
+  return '<div class="wx-head"><span class="wx-place">' + esc(w.place) + '</span>' +
+    '<span class="wx-glyph wx-' + wxKind(w) + (night ? ' is-night' : '') + '">' +
+    wxGlyph(wxKind(w), w.isDay) + '</span></div>' +
+    '<div class="wx-main"><span class="wx-temp" id="todayTemp">' + wxDeg(w.temperature) + '</span>' +
+    '<span class="wx-side"><span class="wx-cond">' + esc(word) + '</span>' +
+    '<span class="wx-hilo">H ' + wxDeg(w.hi) + ' · L ' + wxDeg(w.lo) + '</span></span></div>' +
+    '<p class="wx-feels">Feels ' + wxDeg(w.feels) + ' · Humidity ' +
+    (typeof w.humidity === 'number' ? Math.round(w.humidity) + '%' : '—') + '</p>' +
+    '<div class="wx-hours">' + (w.hours || []).map(function (h, i) {
+      return '<span><b>' + wxWord(h.t, i === 0) + '</b><i>' + wxDeg(h.temp) + '</i></span>';
+    }).join('') + '</div>' +
+    (Date.now() - w.at > WX_OLD ? '<p class="wx-age">read at ' + esc(wxReadAt(w.at)) + '</p>' : '');
+}
+function wxBody() {
+  if (wxState) return wxInner(wxState);
+  return '<div class="wx-head"><span class="wx-place">' + esc(WX_PLACE) + '</span></div>' +
+    '<p class="wx-none">' + (wxDown ? 'No weather — this machine cannot reach the forecast.'
+      : 'Getting the weather…') + '</p>';
+}
+function wxMarkup() {
+  return '<div class="today-wx" id="todayWx" role="img" aria-label="' +
+    esc(wxState ? wxLabel(wxState) : WX_PLACE + ', no reading yet.') + '">' + wxBody() + '</div>';
+}
+/* The forecast is asked for down two roads. The first is the service itself, straight from the
+   machine reading the screen. When that road is out — a counter whose own internet is down while
+   the shop's is fine — the second is the shop's own engine, asked on this page's own origin. Both
+   answer in the same shape, so one reader below serves both, and the tile cannot tell them apart. */
+function wxReading(d) {
+  const c = (d && d.current) || {};
+  if (typeof c.temperature_2m !== 'number') throw new Error('no reading');
+  const ht = (d.hourly || {}).time || [], hp = (d.hourly || {}).temperature_2m || [];
+  const hc = (d.hourly || {}).weather_code || [];
+  let from = ht.indexOf(String(c.time || '').slice(0, 13) + ':00');
+  if (from < 0) from = 0;
+  const hours = [];
+  for (let i = from; i < ht.length && hours.length < WX_HOURS; i++) {
+    if (typeof hp[i] === 'number') hours.push({ t: ht[i], temp: hp[i], code: hc[i] });
+  }
+  const hi = (d.daily || {}).temperature_2m_max || [], lo = (d.daily || {}).temperature_2m_min || [];
+  return {
+    place: WX_PLACE, temperature: c.temperature_2m, feels: c.apparent_temperature,
+    humidity: c.relative_humidity_2m, code: c.weather_code, isDay: c.is_day,
+    hi: hi[0], lo: lo[0], hours: hours, at: Date.now(),
+  };
+}
+function wxAsk(url) {
+  /* Each road gets its own eight seconds. One shared clock would abort the shop's road exactly as
+     it was starting, on the machine whose own road had just used all the time up. */
+  const ctrl = new AbortController();
+  const off = setTimeout(() => { try { ctrl.abort(); } catch (e) {} }, 8000);
+  return fetch(url, { signal: ctrl.signal }).then((r) => {
+    clearTimeout(off);
+    if (!r.ok) throw new Error('http ' + r.status);
+    return r.json();
+  }, (err) => { clearTimeout(off); throw err; });
+}
+function loadWeather() {
+  wxAsked = Date.now();
+  const query = '?latitude=' + WX_LAT + '&longitude=' + WX_LON +
+    '&current=temperature_2m,apparent_temperature,relative_humidity_2m,is_day,weather_code' +
+    '&hourly=temperature_2m,weather_code&daily=temperature_2m_max,temperature_2m_min' +
+    '&timezone=auto&forecast_days=2';
+  wxAsk('https://api.open-meteo.com/v1/forecast' + query)
+    .then(wxReading)
+    .catch(() => wxAsk('/api/weather' + query).then(wxReading))
+    .then((reading) => {
+      wxState = reading;
+      wxSaved(wxState);
+      wxDown = false;
+    }).catch(() => {
+      wxDown = true;
+    });
+}
+function todayCard(k) {
+  const now = new Date();
+  const evening = themeIsDark(now);
+  const applied = document.documentElement.dataset.theme === 'dark';
+  calStamp = stampOf(now);
+  const booked = Number((k || {}).jobs_today || 0);
+  const taken = Number((k || {}).collected_today || 0);
+  const glance = booked || taken
+    ? plural(booked, 'job') + ' booked today · ' + money(taken) + ' taken'
+    : 'Nothing booked yet today — the first entry starts the day.';
+  return '<div class="card today' + (applied ? ' night' : '') + '" id="todayCard">' +
+    '<div class="card-b today-face">' +
+    '<div class="today-cal" id="todayCal" role="img" aria-label="' + esc(calAria(now)) + '">' +
+    calInner(now) + '</div>' +
+    wxMarkup() +
+    '<div class="today-when">' +
+    '<div class="today-clock" id="todayClock">' + clockHtml(now) + '</div>' +
+    '<p class="today-date" id="todayDate">' + esc(dateWords(now)) + '</p>' +
+    '<p class="today-glance" id="todayGlance">' + esc(glance) + '</p>' +
+    '<div class="today-line"><span class="pill ' + (evening ? 'maybe' : 'stage') + '" id="todayLook">' +
+    esc(lookWords(now)) + '</span><span class="spacer"></span></div>' +
+    '<p class="hint">The screen keeps the light look between ' + hourWords(DAY_START) + ' and ' +
+    hourWords(DAY_END) + ' and turns dark outside them by itself.</p></div></div></div>';
+}
+function stampOf(d) { return d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate(); }
+function watchToday() {
+  if (todayTick) return;
+  todayTick = setInterval(() => {
+    const now = new Date();
+    const clock = $('#todayClock');
+    if (clock) clock.innerHTML = clockHtml(now);
+    const date = $('#todayDate');
+    if (date) date.textContent = dateWords(now);
+    /* The month face only changes at midnight or a month-end, so the stamp is compared before
+       anything is written: a machine left open overnight rolls its day — and at month-end its whole
+       grid — over by itself, and the DOM is only touched when a day actually moved. */
+    const stamp = stampOf(now);
+    if (stamp !== calStamp) {
+      calStamp = stamp;
+      const cal = $('#todayCal');
+      if (cal) {
+        cal.innerHTML = calInner(now);
+        cal.setAttribute('aria-label', calAria(now));
+      }
+    }
+    const evening = themeIsDark(now);
+    const look = $('#todayLook');
+    if (look) {
+      look.textContent = lookWords(now);
+      look.className = 'pill ' + (evening ? 'maybe' : 'stage');
+    }
+    /* The weather is not asked every second: a forecast that changed in the last minute is the same
+       forecast. A reading that is actually on the screen is refreshed on twenty minutes; a screen with
+       no usable reading is chased again a minute later. That distinction is the whole point — an
+       earlier version stamped the attempt and then waited the full twenty minutes whatever happened,
+       and one slow answer at 8am left a counter saying "No weather" until 8:20. The tile is only
+       rewritten when its own markup changed, so a machine left open overnight neither hangs on the
+       network nor re-draws the hour strip for nothing. */
+    const held = wxState && Date.now() - wxState.at < WX_OLD;
+    if (!wxAsked || Date.now() - wxAsked > (held ? WX_OLD : WX_RETRY)) loadWeather();
+    const wxHtml = wxBody();
+    if (wxHtml !== wxPainted) {
+      wxPainted = wxHtml;
+      const wx = $('#todayWx');
+      if (wx) {
+        wx.innerHTML = wxHtml;
+        wx.setAttribute('aria-label', wxState ? wxLabel(wxState) : WX_PLACE + ', no reading yet.');
+      }
+    }
+    /* The turn of the hour is the whole point of this timer: nobody presses anything, the screen
+       just changes. */
+    if ((document.documentElement.dataset.theme === 'dark') !== evening) paintTheme();
+    const card = $('#todayCard');
+    if (card) card.classList.toggle('night', document.documentElement.dataset.theme === 'dark');
+  }, 1000);
+}
+
+/* --------------------------------------------------------------- dashboard */
+async function viewDashboard() {
+  const d = await api('/api/dashboard');
+  /* The open-work cards are honest zeros in a shop whose work is finished, and a row of zeros
+     reads as an empty program. So the book's own totals — and the last finished jobs, with
+     their clients and money — are put on the screen beside them. */
+  const counts = (S.boot && S.boot.counts) || {};
+  const onFile = Object.values(counts).reduce((a, b) => a + b, 0);
+  const delivered = counts.Delivered || 0;
+  const finished = delivered ? await api('/api/jobs?status=Delivered') : [];
+  watchShopHours();
+  watchToday();
+  const k = d.kpi;
+  const in15 = d.trend.reduce((a, t) => a + t.collected, 0);
+  const out15 = d.trend.reduce((a, t) => a + t.spent, 0);
+  const maxIn = Math.max.apply(null, d.trend.map((x) => x.collected)) || 1;
+  const bars = d.trend.map((t) => {
+    const pct = Math.round((t.collected / maxIn) * 100);
+    return '<div class="bar' + (t.collected > 0 ? '' : ' zero') + '" title="' + esc(t.day) + ': in ' + esc(money(t.collected)) +
+      ', out ' + esc(money(t.spent)) + ', ' + t.new_jobs + (t.new_jobs === 1 ? ' new job' : ' new jobs') + '"><u>' +
+      (t.collected > 0 ? compact(t.collected) : '') + '</u>' +
+      '<i style="height:' + Math.max(pct, 2) + '%"></i><s>' + fdate(t.day).replace(/ \w+$/, '') + '</s></div>';
+  }).join('');
+  const maxMix = Math.max.apply(null, d.mix.map((m) => m.billed).concat([1]));
+  const maxSpend = Math.max.apply(null, d.spend.map((m) => m.amount).concat([1]));
+  const shown = finished.slice(0, 8);
+  const finishedRows = shown.map((j) => '<tr data-open="jobs/' + j.id + '"><td class="strong">' +
+    esc(j.title || 'Untitled job') + '<div class="ref">' + esc(j.ref) + ' · ' + esc(j.category) + '</div></td>' +
+    '<td>' + esc(j.client || 'Walk-in') + (j.client_phone ? '<div class="ref">' + esc(j.client_phone) + '</div>' : '') + '</td>' +
+    '<td class="num">' + money(j.total) + '</td>' +
+    '<td class="when">' + esc(day10(j.updated_at)) + '</td>' +
+    '<td class=num><a class="btn sm" href="#/jobs/' + j.id + '">Open</a></td></tr>').join('');
+  /* With no quote out, the dead "no open quotes" table is the emptiest thing on the screen; the
+     shop's finished work is far more useful in its place. */
+  const firstSplit = d.quotes.length
+    ? cardTable('Quotes waiting on an answer', '<a href="#/jobs?kind=Quote" class="btn sm ghost">All quotes</a>',
+      d.quotes.map((q) => '<tr data-open="jobs/' + q.id + '"><td class="strong">' +
+        qe('jobs/' + q.id + '/title', q.title, esc(q.title)) +
+        '<div class="ref">' + esc(q.ref) + ' · ' + esc(q.client) + '</div></td>' +
+        '<td class="num">' + money(q.total) + '</td>' +
+        '<td class="when">' + qe('jobs/' + q.id + '/valid_until', day10(q.valid_until), validityLabel(q)) + '</td>' +
+        '<td class=num><a class="btn sm" href="#/jobs/' + q.id + '">Open</a></td></tr>').join(''),
+      ['Quote', 'Worth', 'Price holds', ''])
+    : finishedRows
+      ? cardTable('Finished work — the last ' + shown.length + ' of ' + delivered,
+        '<a href="#/jobs?status=Delivered" class="btn sm ghost">All ' + delivered + ' delivered</a>',
+        finishedRows, ['Job', 'Client', 'Total', 'Finished', ''])
+      : cardTable('Quotes waiting on an answer', '<a href="#/jobs?kind=Quote" class="btn sm ghost">All quotes</a>',
+        '<tr><td colspan="4" class="hint">No open quotes. Anything asked for has been booked or nothing is waiting.</td></tr>',
+        ['Quote', 'Worth', 'Price holds', '']);
+
+  topbar('Dashboard', '', filtersBar('dashboard', []));
+  /* The day and the shop's hours answer different questions and both are short, so they share one
+     row instead of pushing every figure down the screen. Under them the figures are grouped in the
+     order a counter thinks in — money, the floor, then what is priced and what went out — and each
+     group says its name so none of the twelve needs a second look to be placed. */
+  $('#view').innerHTML =
+    '<div class="grid split dash-top">' +
+    todayCard(d.kpi) +
+    hoursCard(d.hours) +
+    '</div>' +
+    '<div class="card bookband" role="status" aria-label="What the book holds">' +
+    '<span><b>' + onFile + '</b>jobs on file</span>' +
+    '<span><b>' + delivered + '</b>finished</span>' +
+    '<span><b>' + (k.open_jobs || 0) + '</b>open</span>' +
+    '<span><b>' + k.clients + '</b>clients</span>' +
+    '<span><b>' + money(k.billed_month) + '</b>billed this month</span>' +
+    '</div>' +
+    '<p class="band-title">Money</p>' +
+    '<div class="grid kpis money">' +
+    stat('Collected today', money(k.collected_today), k.collected_today > 0 ? 'payments entered' : 'nothing entered yet', 'amt good hero',
+      '#/accounts', 'Click to see money in and out') +
+    stat('This week', money(k.collected_week), 'last 7 days', 'amt', '#/accounts', 'Click to see the accounts book') +
+    stat('Month to date', money(k.collected_month), monthName(day10(d.today)), 'amt', '#/reports', 'Click for this month in reports') +
+    /* 'less money kept on accounts' would be the precise wording here, but this screen has nothing to
+       prove it with: the dashboard's own rows look identical whichever server answered, and the shop's
+       running server can be a build behind the page. The Accounts screen, which can tell, says it there. */
+    stat('Owed to the shop', money(k.outstanding), 'job balances not yet paid', k.outstanding > 0 ? 'amt warn' : 'amt',
+      '#/accounts', 'Click to work the balances') +
+    '</div>' +
+    '<p class="band-title">The floor</p>' +
+    '<div class="grid kpis">' +
+    stat('Open jobs', k.open_jobs, k.open_jobs ? statusLine(d.by_status) + ' in the pipeline'
+      : delivered + ' on file, all finished — nothing waiting', '', '#/jobs', 'Click to see the queue') +
+    stat('Ready for pickup', k.ready_jobs, k.ready_jobs ? 'waiting to be collected'
+      : 'nothing waiting — every job has gone out', '', '#/jobs?status=Ready', 'Click to see what is ready') +
+    stat('Overdue', k.overdue_jobs, k.overdue_jobs ? 'past their due date' : 'none past their due date',
+      k.overdue_jobs ? 'warn' : '', '#/jobs?overdue=1', 'Click to chase late work') +
+    stat('Clients on file', k.clients, 'registered, with their jobs and balances', '', '#/clients', 'Click for the client book') +
+    '</div>' +
+    '<p class="band-title">Priced and spent</p>' +
+    '<div class="grid kpis">' +
+    stat('Quotes waiting', k.open_quotes, k.open_quotes ? money(k.quoted_value) + ' priced, not booked' : 'nothing priced and waiting',
+      '', '#/jobs?kind=Quote', 'Click to see open quotes') +
+    stat('Enquiries to chase', k.open_leads, k.open_leads
+      ? (k.leads_due ? k.leads_due + ' due today' : money(k.pipeline_value) + ' of work out there')
+      : 'nothing to chase', k.leads_due ? 'warn' : '', '#/leads', 'Click to work the pipeline') +
+    stat('Spent this month', money(k.spent_month), 'paper, ink, rent and the rest', 'amt', '#/expenses', 'Click to see money out') +
+    stat('Profit this month', money(k.profit_month), 'of ' + money(k.billed_month) + ' billed',
+      'amt ' + (k.profit_month < 0 ? 'warn' : 'good'), '#/reports', 'Click for the full picture') +
+    '</div>' +
+    '<div class="grid split">' +
+    '<div class="card"><h3>Money in — last 15 days</h3>' +
+    '<div class="card-b"><div class="bars">' + bars + '</div>' +
+    '<div class="legend"><span><i style="background:var(--brand)"></i>cash, MoMo and transfers received</span></div>' +
+    '<div class="duo"><span>Received</span><b class="pos">' + money(in15) + '</b>' +
+    '<span>Paid out</span><b class="neg">' + money(out15) + '</b>' +
+    '<span>Net</span><b class="' + (in15 - out15 < 0 ? 'neg' : '') + '">' + money(in15 - out15) + '</b></div>' +
+    '</div></div>' +
+    '<div class="card"><h3>What we print most — last 3 months</h3><div class="card-b mix">' +
+    (d.mix.length ? d.mix.map((m) => '<div class="row"><span>' + esc(m.category) + '</span><b>' + compact(m.billed) +
+      ' · ' + m.jobs + '</b><div class="track"><i style="width:' + Math.round((m.billed / maxMix) * 100) + '%"></i></div></div>').join('')
+      : '<p class="hint">No jobs booked in this window.</p>') +
+    '</div></div>' +
+    '</div>' +
+    '<div class="grid split">' +
+    firstSplit +
+    cardTable('Enquiries to chase', '<a href="#/leads" class="btn sm ghost">All enquiries</a>',
+      d.follow_ups.length ? d.follow_ups.map((l) => '<tr data-open-lead="' + l.id + '"><td class="strong">' + esc(l.name) +
+        '<div class="ref">' + esc(l.phone || 'no phone') + ' · ' + esc(l.source) + '</div>' +
+        qe('leads/' + l.id + '/stage', l.stage, '<span class="pill stage">' + esc(l.stage) + '</span>') + '</td>' +
+        '<td>' + qe('leads/' + l.id + '/interest', l.interest,
+          l.interest ? esc(l.interest) : '<span class="due">nothing written</span>') + '</td>' +
+        '<td class="num">' + qe('leads/' + l.id + '/value', l.value,
+          l.value ? money(l.value) : '<span class="due">not priced</span>') + '</td>' +
+        '<td class="when">' + qe('leads/' + l.id + '/follow_up', day10(l.follow_up), followLabel(l)) + '</td></tr>').join('')
+        : '<tr><td colspan="4" class="hint">Nothing is waiting to be chased up.</td></tr>',
+      ['Who asked', 'What they want', 'Worth', 'Chase']) +
+    '</div>' +
+    '<div class="grid split">' +
+    cardTable('Late work', '<a href="#/jobs?overdue=1" class="btn sm ghost">All overdue</a>',
+      d.overdue.length ? jobRows(d.overdue) : '<tr><td colspan="5" class="hint">Nothing is past its due date.</td></tr>',
+      ['Job', 'Total', 'Balance', 'Status', 'Due']) +
+    cardTable('Top debtors', '<a href="#/accounts" class="btn sm ghost">Accounts</a>',
+      d.debtors.length ? d.debtors.map((c) => '<tr data-open="clients/' + c.id + '"><td class="strong">' + esc(c.name) +
+        '<div class="ref">' + esc(c.phone || 'no phone') + '</div></td><td class="num">' + c.jobs + '</td>' +
+        '<td class="num neg balance">' + money(c.owed) + '</td><td><button class="btn sm" data-pay-client="' + c.id +
+        '" data-pay-name="' + esc(c.name) + '">Receive</button></td></tr>').join('')
+        : '<tr><td colspan="4" class="hint">Every client has paid up. Well done.</td></tr>',
+      ['Client', 'Jobs', 'Owes', '']) +
+    '</div>' +
+    '<div class="grid split">' +
+    '<div class="card"><h3>Where the money went — this month<span class="spacer"></span>' +
+    '<a href="#/expenses" class="btn sm ghost">Expenses</a></h3><div class="card-b mix">' +
+    (d.spend.length ? d.spend.map((c) => '<div class="row"><span>' + esc(c.category) + '</span><b>' + compact(c.amount) +
+      ' · ' + c.n + '</b><div class="track"><i class="out" style="width:' + Math.round((c.amount / maxSpend) * 100) + '%"></i></div></div>').join('')
+      : '<p class="hint">No costs recorded this month — that makes the profit figure look too good.</p>') +
+    '</div></div>' +
+    cardTable('Recently booked', '<a href="#/jobs" class="btn sm ghost">All jobs</a>',
+      jobRows(d.recent), ['Job', 'Total', 'Balance', 'Status', 'Due']) +
+    '</div>' +
+    '<p class="hint editable-hint">Anything underlined you can click: move a due date, change a status, ' +
+    'reprice an enquiry — it saves as soon as you press Enter.</p>';
+}
+function monthName(iso) {
+  return MON[Number((iso || '').slice(5, 7)) - 1] + ' ' + (iso || '').slice(0, 4);
+}
+function statusLine(by) {
+  return ['Pending', 'Printing', 'Ready'].map((s) => (by[s] || 0) + ' ' + s.toLowerCase()).join(' · ');
+}
+function stat(k, v, n, cls, to, hint) {
+  const body = '<span class="k">' + esc(k) + '</span><b class="v">' + v + '</b>' +
+    (n ? '<span class="n">' + n + '</span>' : '');
+  if (!to) return '<div class="stat ' + (cls || '') + '">' + body + '</div>';
+  return '<a class="stat go ' + (cls || '') + '" href="' + esc(to) + '" title="' + esc(hint || 'Click to open') +
+    '">' + body + '<i class="arrow" aria-hidden="true"></i></a>';
+}
+function cardTable(title, action, body, heads) {
+  return '<div class="card"><h3>' + esc(title) + (action ? '<span class="spacer"></span>' + action : '') + '</h3>' +
+    '<div class="tablewrap"><table><thead><tr>' +
+    heads.map((h) => '<th' + (['Jobs', 'Qty', 'Total', 'Paid', 'Balance', 'Outstanding', 'Owes'].indexOf(h) >= 0 ? ' class=num' : '') +
+      '>' + esc(h) + '</th>').join('') + '</tr></thead><tbody>' + body + '</tbody></table></div></div>';
+}
+/* The two dashboard job cards share one row shape: five columns, with the client folded in
+   under the job title, so the row stays inside a half-width card. */
+function jobRows(rows) {
+  if (!rows.length) return '<tr><td colspan="5" class="hint">Nothing here yet.</td></tr>';
+  return rows.map((j) => '<tr data-open="jobs/' + j.id + '">' +
+    '<td>' + qe('jobs/' + j.id + '/title', j.title, '<span class="strong">' + esc(j.title) + '</span>') + kindTag(j) + pendingTag(j) +
+    ' ' + qe('jobs/' + j.id + '/priority', j.priority || 'Normal',
+      j.priority === 'Urgent' ? prio('Urgent') : '<span class="pill quiet">normal</span>') +
+    '<div class="ref">' + esc(j.category) + ' · ' + esc(j.client) +
+    (linesLabel(j) ? ' · ' + esc(linesLabel(j)) : '') +
+    (j.to_send ? ' · <span class="tosend">' + pluralise(j.to_send, 'message') + ' to send</span>' : '') + '</div></td>' +
+    '<td class="num">' + money(j.total) + '</td>' +
+    '<td class="num' + (j.balance > 0 ? ' balance neg' : ' pos') + '">' + money(j.balance) + '</td>' +
+    '<td class="chips">' + qe('jobs/' + j.id + '/status', j.status, pill(j.status)) + '</td>' +
+    '<td class="when">' + qe('jobs/' + j.id + '/' + (j.kind === 'Quote' ? 'valid_until' : 'due_date'),
+      day10(j.kind === 'Quote' ? j.valid_until : j.due_date), dateLabel(j)) + '</td>' +
+    '</tr>').join('');
+}
+
+let notifyTick = null;
+let notifyPollBusy = false;
+
+/* --------------------------------------------------------------------- jobs */
+async function viewJobs(r) {
+  const p = r.params;
+  const kind = p.get('kind') || 'Job';
+  const quoted = kind === 'Quote';
+  const counts = S.boot.counts || {};
+  const openCount = quoted ? (S.boot.open_quotes || 0)
+    : (counts.Pending || 0) + (counts.Printing || 0) + (counts.Ready || 0);
+  const jobsTotal = Object.values(counts).reduce((a, b) => a + b, 0);
+  /* A shop that has finished everything has an empty open tray. Landing there over a full book
+     reads as "there are no jobs at all", so the first look falls back to every job — while an
+     explicit Open tab still means open. */
+  const status = p.get('status') || (openCount ? 'open' : 'all');
+  const narrowed = ['q', 'category', 'from', 'to', 'overdue', 'debtors', 'client', 'paid']
+    .some((k) => p.get(k));
+  const rows = await api('/api/jobs?' + qs({
+    status: status, kind: kind, category: p.get('category'), q: p.get('q'),
+    sort: p.get('sort'), from: p.get('from'), to: p.get('to'), overdue: p.get('overdue'),
+    debtors: p.get('debtors'), client: p.get('client'), paid: p.get('paid'),
+  }));
+  const total = rows.reduce((a, j) => a + j.total, 0);
+  const due = rows.reduce((a, j) => a + Math.max(j.balance, 0), 0);
+  const profit = rows.reduce((a, j) => a + (j.profit || 0), 0);
+  topbar(quoted ? 'Quotes' : 'Print jobs',
+    rows.length + ' shown · ' + (quoted ? 'quoted ' : 'billed ') + money(total) +
+    (quoted ? '' : ' · outstanding ' + money(due) + ' · profit on these ' + money(profit)),
+    '', [
+      { label: quoted ? '+ New quote' : '+ New job', action: quoted ? 'new-quote' : 'new-job', primary: true },
+      { label: '+ Enquiry', action: 'new-lead' },
+    ]);
+  $('#topbar').insertAdjacentHTML('beforeend', filtersBar('jobs', [
+    { type: 'tabs', key: 'kind', def: 'Job', options: [
+      { v: 'Job', label: 'Jobs', count: jobsTotal },
+      { v: 'Quote', label: 'Quotes', count: S.boot.open_quotes || 0 }]},
+    { type: 'tabs', key: 'status', def: status, options: [
+      { v: 'open', label: 'Open', count: openCount },
+      { v: 'all', label: 'All', count: quoted ? undefined : jobsTotal }].concat(quoted ? [] : [
+      { v: 'Pending', label: 'Pending', count: counts.Pending || 0 },
+      { v: 'Printing', label: 'Printing', count: counts.Printing || 0 },
+      { v: 'Ready', label: 'Ready', count: counts.Ready || 0 },
+      { v: 'Delivered', label: 'Delivered', count: counts.Delivered || 0 },
+      { v: 'Cancelled', label: 'Cancelled', count: counts.Cancelled || 0 }])},
+    /* Quotes are an ask, not a bill, so "paid in full" means nothing on that tab. */
+    ...(quoted ? [] : [{ type: 'select', key: 'paid', options: [
+      ['', 'Money: any'], ['due', 'Still owing'], ['full', 'Paid in full']] }]),
+    { type: 'search', key: 'q', placeholder: 'Search job, item, client or phone' },
+    { type: 'select', key: 'category', options: [['', 'Any service']].concat(S.boot.categories.map((c) => [c, c])) },
+    { type: 'select', key: 'sort', options: [['created', 'Newest first'], ['due', quoted ? 'Expiring soonest' : 'Due soonest'], ['balance', 'Biggest balance'], ['value', 'Highest value'], ['profit', 'Best profit'], ['client', 'Client A–Z']] },
+    { type: 'date', key: 'from', label: 'booked' }, { type: 'date', key: 'to', label: 'to' },
+  ]));
+  $('#view').innerHTML = '<div class="card">' +
+    '<div class="tablewrap"><table><thead><tr><th>' + (quoted ? 'What was quoted' : 'Job') + '</th><th>Client</th>' +
+    '<th class=num>' + (quoted ? 'Quoted' : 'Total') + '</th>' +
+    (quoted ? '' : '<th class=num>Paid</th><th class=num>Balance</th><th class=num>Profit</th>') +
+    '<th>Status</th><th>' + (quoted ? 'Validity' : 'Due') + '</th></tr></thead>' +
+    '<tbody>' + (rows.length ? rows.map((j) => '<tr data-open="jobs/' + j.id + '">' +
+      '<td><span class="strong">' + esc(j.title) + '</span>' + prio(j.priority) + pendingTag(j) +
+      (j.item_count > 1 ? ' <span class="pill i-lines">' + j.item_count + ' lines</span>' : '') +
+      '<div class="ref">' + esc(j.ref) + ' · ' + esc(j.category) + ' · booked ' + fdate(j.created_at) + '</div>' +
+      (j.size ? '<div class="ref">' + esc(j.size) + '</div>' : '') +
+      (linesLabel(j) ? '<div class="ref">' + esc(linesLabel(j)) + '</div>' : '') + '</td>' +
+      '<td>' + esc(j.client) + (j.client_phone ? '<div class="ref">' + esc(j.client_phone) + '</div>' : '') + '</td>' +
+      '<td class=num>' + money(j.total) + '</td>' +
+      (quoted ? '' :
+        '<td class=num>' + money(j.paid) + '</td>' +
+        '<td class=num' + (j.balance > 0.005 ? ' balance neg' : ' pos') + '">' + money(j.balance) + '</td>' +
+        '<td class="num' + (j.profit < 0 ? ' neg' : j.cost > 0 ? '' : ' muted') + '" title="' +
+          (j.cost > 0 ? '' : 'Nothing has been costed on this job yet') + '">' + money(j.profit) + '</td>') +
+      '<td>' + pill(j.status) + (isSettled(j) ? ' <span class="pill k-paid">Paid in full</span>' : '') + '</td>' +
+      '<td>' + dateLabel(j) + '</td></tr>').join('')
+      : '<tr><td colspan="8">' + emptyState(
+        quoted ? 'No quotes out there'
+          : narrowed ? 'No jobs match these filters'
+          : status === 'all' ? 'No jobs booked yet'
+          : 'Nothing ' + status.toLowerCase() + ' right now',
+        quoted ? 'Send a price before the client commits — a quote can be booked as a job in one click.'
+          : narrowed ? pluralise(jobsTotal, 'job') + ' on file — clear the filters, or open the All tab.'
+          : status === 'all' ? 'Book the first job and it lands here, with its client, money and stage.'
+          : jobsTotal ? pluralise(jobsTotal, 'job') + ' on file — the All tab lists every one.'
+          : 'Try another status tab, or book the first job for today.',
+        '<button class="btn primary" data-action="' + (quoted ? 'new-quote' : 'new-job') + '">+ ' +
+        (quoted ? 'New quote' : 'New job') + '</button>') + '</td></tr>') +
+    '</tbody></table></div></div>' +
+    '<p class="hint">' + (quoted
+      ? 'Click a quote to see it, print it as an estimate, or book it as a job.'
+      : 'Click any row to open the job: item lines, costs, payments, notes and a printable job sheet.') + '</p>';
+  restoreFocus();
+}
+
+/* ------------------------------------------------------------------ clients */
+async function loadClients() {
+  S.clients = await api('/api/clients');
+  return S.clients;
+}
+async function viewClients(r) {
+  const rows = await api('/api/clients?' + qs({ q: r.params.get('q'), kind: r.params.get('kind'), archived: r.params.get('archived') }));
+  const owed = rows.reduce((a, c) => a + Math.max(c.balance_due, 0), 0);
+  topbar('Clients', rows.length + ' on file · ' + money(owed) + ' owed across them');
+  $('#topbar').insertAdjacentHTML('beforeend', filtersBar('clients', [
+    { type: 'search', key: 'q', placeholder: 'Search name, phone, email or area' },
+    { type: 'select', key: 'kind', options: [['', 'All types']].concat(S.boot.kinds.map((k) => [k, k])) },
+    { type: 'tabs', key: 'archived', def: '', options: [{ v: '', label: 'Active' }, { v: '1', label: 'Archived' }] },
+  ]));
+  $('#view').innerHTML = '<div class="card"><div class="tablewrap"><table><thead><tr><th>Client</th><th>Contact</th>' +
+    '<th class=num>Jobs</th><th class=num>Billed</th><th class=num>Received</th><th class=num>Balance due</th><th>Last job</th></tr></thead><tbody>' +
+    (rows.length ? rows.map((c) => '<tr data-open="clients/' + c.id + '">' +
+      '<td><span class="strong">' + esc(c.name) + '</span>' + pendingTag(c) + '<div class="ref">' + esc(c.kind) +
+      (c.archived ? ' · archived' : '') + '</div></td>' +
+      '<td>' + (c.phone ? esc(c.phone) : '<span class="hint">no phone</span>') +
+      (c.email ? '<div class="ref">' + esc(c.email) + '</div>' : '') + '</td>' +
+      '<td class=num>' + c.jobs + (c.active_jobs ? '<div class="ref">' + c.active_jobs + ' open</div>' : '') + '</td>' +
+      '<td class=num>' + money(c.billed) + '</td>' +
+      '<td class=num>' + money(c.received) + '</td>' +
+      '<td class=num' + (c.balance_due > 0.005 ? ' balance neg' : c.balance_due < -0.005 ? ' pos' : '') + '">' + money(c.balance_due) +
+      (c.balance_due < -0.005 ? '<div class="ref">credit</div>' : '') + '</td>' +
+      '<td>' + (c.last_job ? fdate(c.last_job) : '<span class="hint">never</span>') + '</td></tr>').join('')
+      : '<tr><td colspan="7">' + emptyState('No clients yet', 'Add the person or business you printed for; everything else hangs off their record.',
+        '<button class="btn primary" data-action="new-client">+ Add first client</button>') + '</td></tr>') +
+    '</tbody></table></div></div>';
+  restoreFocus();
+}
+
+/* ------------------------------------------------------------------ enquiries */
+const stagePill = (s) => '<span class="pill g-' + esc(s) + '">' + esc(s) + '</span>';
+async function viewLeads(r) {
+  const p = r.params;
+  const d = await api('/api/leads?' + qs({
+    stage: p.get('stage') || 'open', source: p.get('source'), q: p.get('q'), followup: p.get('followup'),
+  }));
+  const t = d.totals;
+  topbar('Enquiries', t.open + ' being chased · ' + money(t.open_value) + ' of work out there · ' +
+    t.won + ' won, ' + t.lost + ' lost',
+    '', [{ label: '+ New enquiry', action: 'new-lead', primary: true }]);
+  const stageTabs = [{ v: 'open', label: 'Being chased', count: t.open }]
+    .concat(S.boot.lead_stages.map((s) => {
+      const hit = d.pipeline.filter((x) => x.stage === s)[0];
+      return { v: s, label: s, count: s === 'Won' || s === 'Lost' ? t[s.toLowerCase()] : (hit ? hit.n : 0) };
+    }), [{ v: 'all', label: 'Everything', count: t.total }]);
+  $('#topbar').insertAdjacentHTML('beforeend', filtersBar('leads', [
+    { type: 'tabs', key: 'stage', def: 'open', options: stageTabs },
+    { type: 'search', key: 'q', placeholder: 'Search name, phone or what they want' },
+    { type: 'select', key: 'source', options: [['', 'Any source']].concat(S.boot.lead_sources.map((s) => [s, s])) },
+    { type: 'tabs', key: 'followup', def: '', options: [{ v: '', label: 'Any time' }, { v: '1', label: 'Chase now', count: t.due_today }] },
+  ]));
+  const strip = d.pipeline.length ? '<div class="grid kpis">' + S.boot.lead_stages
+    .filter((s) => s !== 'Won' && s !== 'Lost')
+    .map((s) => {
+      const hit = d.pipeline.filter((x) => x.stage === s)[0];
+      return stat(s, hit ? hit.n : 0, hit ? money(hit.value) + ' estimated' : 'nothing here', '');
+    }).join('') + '</div>' : '';
+  $('#view').innerHTML = strip +
+    '<div class="card"><div class="tablewrap"><table><thead><tr><th>Who asked</th><th>Contact</th>' +
+    '<th>What they want</th><th>Source</th><th class=num>Est. value</th><th>Stage</th><th>Follow up</th><th></th></tr></thead><tbody>' +
+    (d.rows.length ? d.rows.map((l) => '<tr data-open-lead="' + l.id + '">' +
+      '<td><span class="strong">' + esc(l.name) + '</span>' + pendingTag(l) +
+      (l.client ? '<div class="ref"><a href="#/clients/' + l.client_id + '">' + esc(l.client) + '</a></div>' : '<div class="ref">not on file yet</div>') + '</td>' +
+      '<td>' + (l.phone ? '<a href="tel:' + esc(l.phone) + '">' + esc(l.phone) + '</a>' : '<span class="hint">no phone</span>') +
+      (l.whatsapp && l.whatsapp !== l.phone ? '<div class="ref">WA ' + esc(l.whatsapp) + '</div>' : '') + '</td>' +
+      '<td>' + esc(l.interest || '—') + (l.job_title ? '<div class="ref"><a href="#/jobs/' + l.job_id + '">' + esc(l.ref) + ' · ' + esc(l.job_title) + '</a></div>' : '') + '</td>' +
+      '<td>' + esc(l.source) + '</td>' +
+      '<td class=num>' + (l.value ? money(l.value) : '—') + '</td>' +
+      '<td>' + stagePill(l.stage) + '</td>' +
+      '<td>' + followLabel(l) + '</td>' +
+      '<td class=num><button class="btn sm ghost" data-edit-lead="' + l.id + '">Edit</button></td></tr>').join('')
+      : '<tr><td colspan="8">' + emptyState('Nothing in the pipeline',
+        'Someone walked in and asked about printing? Write it down before they leave.',
+        '<button class="btn primary" data-action="new-lead">+ New enquiry</button>') + '</td></tr>') +
+    '</tbody></table></div></div>' +
+    '<p class="hint">Click a row to open the enquiry: move it through the stages, or turn a yes into a client and a booked job in one click.</p>';
+  restoreFocus();
+}
+function followLabel(l) {
+  const inDays = l.days_to_follow === null || l.days_to_follow === undefined ? l.days : l.days_to_follow;
+  if (l.stage === 'Won' || l.stage === 'Lost') return '<span class="due">closed ' + fdate(l.closed_at || l.updated_at) + '</span>';
+  if (!l.follow_up) return '<span class="due">no date set</span>';
+  if (inDays < 0) return '<span class="due late">' + esc(fdate(l.follow_up)) + ' · ' + (-inDays) + 'd overdue</span>';
+  if (inDays === 0) return '<span class="due late">chase today</span>';
+  return '<span class="due">' + esc(fdate(l.follow_up)) + ' · in ' + inDays + 'd</span>';
+}
+
+/* ------------------------------------------------------------------ expenses */
+async function viewExpenses(r) {
+  const p = r.params;
+  const d = await api('/api/expenses?' + qs({
+    category: p.get('category'), q: p.get('q'), from: p.get('from'), to: p.get('to'),
+    overhead: p.get('overhead'), job: p.get('job'),
+  }));
+  const t = d.totals;
+  topbar('Expenses', money(t.this_month) + ' out this month · ' + money(t.all_time) + ' all time',
+    '', [{ label: '+ Record expense', action: 'new-expense', primary: true },
+         { label: '+ New job', action: 'new-job' }]);
+  $('#topbar').insertAdjacentHTML('beforeend', filtersBar('expenses', [
+    { type: 'tabs', key: 'overhead', def: '', options: [{ v: '', label: 'Everything' },
+      { v: '0', label: 'On jobs', count: d.rows.filter((e) => e.job_id).length },
+      { v: '1', label: 'Shop overhead', count: d.rows.filter((e) => !e.job_id).length }]},
+    { type: 'search', key: 'q', placeholder: 'Search payee, note or reference' },
+    { type: 'select', key: 'category', options: [['', 'Any category']].concat(S.boot.expense_categories.map((c) => [c, c])) },
+    { type: 'date', key: 'from', label: 'from' }, { type: 'date', key: 'to', label: 'to' },
+  ]));
+  const maxCat = Math.max.apply(null, d.by_category.map((c) => c.amount).concat([1]));
+  $('#view').innerHTML = '<div class="grid kpis">' +
+    stat('This month', money(t.this_month), 'money that left the shop', 'amt warn') +
+    stat('Last 7 days', money(t.this_week), pluralise(d.rows.filter((e) => e.spent_on >= weekStart()).length, 'entry'), 'amt') +
+    stat('Charged to jobs', money(t.on_jobs), 'counted in each job’s cost', 'amt') +
+    stat('Shop overhead', money(t.overhead), 'rent, power and the like', 'amt') +
+    '</div>' +
+    '<div class="grid split">' +
+    '<div class="card"><h3>Where the money went — this month<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-export="expenses">Expenses CSV</button></h3><div class="card-b mix">' +
+    (d.by_category.length ? d.by_category.map((c) => '<div class="row"><span>' + esc(c.category) + '</span><b>' +
+      compact(c.amount) + ' · ' + c.n + '</b><div class="track"><i style="width:' +
+      Math.round((c.amount / maxCat) * 100) + '%"></i></div></div>').join('')
+      : '<p class="hint">Nothing recorded this month.</p>') + '</div></div>' +
+    cardTable('Month by month', '',
+      d.months.length ? d.months.map((m) => '<tr><td class="ref">' + monthName(m.month + '-01') + '</td>' +
+        '<td class="num pos">' + money(m.income) + '</td><td class="num neg">' + money(m.spent) + '</td>' +
+        '<td class="num' + (m.net < 0 ? ' neg' : ' pos') + '">' + money(m.net) + '</td></tr>').join('')
+        : '<tr><td colspan="4" class="hint">No money has moved yet.</td></tr>',
+      ['Month', 'In', 'Out', 'Net']) +
+    '</div>' +
+    '<div class="card"><div class="tablewrap"><table><thead><tr><th>When</th><th>What it was</th><th>Paid to</th>' +
+    '<th>Against</th><th>Method</th><th class=num>Amount</th><th></th></tr></thead><tbody>' +
+    (d.rows.length ? d.rows.map((e) => '<tr>' +
+      '<td class="ref">' + fdate(e.spent_on) + '</td>' +
+      '<td><span class="strong">' + esc(e.category) + '</span>' + pendingTag(e) + (e.note ? '<div class="ref">' + esc(e.note) + '</div>' : '') + '</td>' +
+      '<td>' + esc(e.payee || '—') + (e.reference ? '<div class="ref">' + esc(e.reference) + '</div>' : '') + '</td>' +
+      '<td>' + (e.ref ? '<a href="#/jobs/' + e.job_id + '">' + esc(e.ref) + '</a><div class="ref">' + esc(e.job_title || '') + '</div>'
+                       : '<span class="hint">shop overhead</span>') + '</td>' +
+      '<td>' + esc(e.method) + '</td>' +
+      '<td class="num neg">' + money(e.amount) + '</td>' +
+      '<td class=num>' + (e.is_spoilage
+        ? '<a class="btn sm ghost" href="#/spoiled">Spoiled work</a>'
+        : '<button class="btn sm ghost" data-edit-expense="' + e.id + '">Edit</button> ' +
+          '<button class="btn sm ghost" data-del-expense="' + e.id + '" data-del-amount="' + e.amount + '">Remove</button>') +
+      '</td></tr>').join('')
+      : '<tr><td colspan="7">' + emptyState('No expenses recorded',
+        'Paper, ink, transport, rent — writing these down is what turns takings into profit.',
+        '<button class="btn primary" data-action="new-expense">+ Record the first one</button>') + '</td></tr>') +
+    '</tbody></table></div></div>' +
+    '<p class="hint">Money charged to a job comes off that job’s profit. Everything else is shop '
+    + 'overhead and only shows in the month-by-month table. Spoiled work is the exception: it names '
+    + 'the job it happened on, but the cost stays with the shop.</p>';
+  restoreFocus();
+}
+function weekStart() {
+  const d = new Date(Date.now() - 6 * 86400000);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+/* ------------------------------------------------------------- shop & devices
+   The counter's own screen: where the book lives on the Wi-Fi, how a phone gets it,
+   who is signed in, and whether the book has been copied lately. Everything here is
+   about the shop, not about a job. */
+async function viewShop() {
+  const shop = await api('/api/shop');
+  let devices = [];
+  try { devices = (await api('/api/devices')).devices || []; } catch (e) { /* hosted or signed out */ }
+  let guard = null;
+  try { guard = await api('/api/security'); } catch (e) { /* a device that is not signed in */ }
+  let mail = null;
+  try { mail = await api('/api/email-accounts'); } catch (e) { /* a device not asked to show them */ }
+  const login = shop.login, copy = shop.backup;
+  const address = shop.address;
+  const bare = (a) => a.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  // The book answers to two shapes of one door. Which one a device should keep is not a coin toss:
+  // the name outlives the router handing this Mac a new number, and Android cannot open a name.
+  const otherAddress = shop.address_other || '';
+  const named = shop.address_kind === 'name' ? address : otherAddress;
+  const numbered = shop.address_kind === 'name' ? otherAddress : address;
+  const shopMac = !!(S.session || {}).this_is_the_shop_computer;
+  topbar('Shop & devices',
+    (shop.secure ? 'HTTPS' : 'plain HTTP') + ' · ' + devices.length + ' signed in · ' +
+    (copy.at ? 'book copied ' + fdate(copy.at.slice(0, 10)) : 'the book has never been copied'),
+    '', [{ label: login.chosen_on_this_mac ? 'Change the password' : 'Choose a password',
+          action: 'shop-password', primary: true },
+         { label: 'Install page', action: 'setup-page' },
+         { label: '+ New job', action: 'new-job' }]);
+  $('#view').innerHTML =
+    '<div class="grid kpis">' +
+      stat('Shop address', '<span class="addr">' + esc(bare(address)) + '</span>',
+           shop.reachable_from_wifi ? 'devices on this Wi-Fi reach the book here'
+                                    : 'only this Mac can reach it right now') +
+      stat('Sign-in', login.required ? (login.from_environment ? 'Set by the service' : 'One shop password') : 'Not required',
+           login.required ? 'every other device has to know it'
+                          : 'anyone on this network could read the book',
+           login.required ? '' : 'warn') +
+      stat('Signed-in devices', devices.length, devices.length
+           ? 'phones and laptops holding the book open' : 'nothing but this Mac') +
+      stat('Copies of the book', copy.copies || 0,
+           copy.auto ? 'by itself every ' + cadenceWords(copy.every_hours)
+                     : 'only when the shop asks for one',
+           (copy.stale || !copy.auto) ? 'warn' : '') +
+    '</div>' +
+    (login.required ? '' : '<div class="card warn-card"><div class="card-b">' +
+      '<b>The book is open to anything on this Wi-Fi.</b>' +
+      '<p class="hint">Choose one shop password and a phone left on the counter stops being the ' +
+      'whole ledger. It is kept as a scrambled hash inside the book file, never as the word itself, ' +
+      'and every device is signed out whenever it changes.</p>' +
+      '<button class="btn primary" data-action="shop-password">Choose the shop password</button>' +
+      '</div></div>') +
+    '<div class="grid split">' +
+    '<div class="card"><h3>Put the book on a device</h3><div class="card-b">' +
+      '<p class="hint">A phone or laptop opens one page, trusts the shop certificate once, then ' +
+      'keeps the app on its home screen. The records stay on this Mac — the device only ever ' +
+      'holds a window onto them.</p>' +
+      '<p><a class="btn primary" data-action="setup-page" href="/setup">Open the install page</a></p>' +
+      (otherAddress
+        ? '<p class="hint">Two shapes open this same book. Hand a device the name — <b>' +
+          esc(bare(named)) + '</b> — because it still opens the night the router hands this Mac a ' +
+          'new number. <b>' + esc(bare(numbered)) + '</b> is that number, and it does move. An ' +
+          'Android phone is the one device that has to keep the number: it cannot look a name up.</p>'
+        : '') +
+      (shop.secure
+        ? '<p class="hint">This address is HTTPS, so a browser will allow it to be installed.' +
+          (shop.certificate ? ' The shop certificate is on that page, with its fingerprint.' : ' No certificate file has been made yet; run <code>tools/shop-server.sh certs</code> on this Mac.')
+        + '</p>'
+        : '<p class="err">Plain HTTP will open the book but will not let a device install it or keep ' +
+          'it offline. Run <code>tools/shop-server.sh install</code> on this Mac for the HTTPS address.</p>') +
+      '<p class="hint">' + (shop.reachable_from_wifi
+        ? 'Devices on this Wi-Fi can reach the book now.'
+        : 'Only this Mac can reach the book. Start the shop server with <code>tools/shop-server.sh install</code> to let the counter’s phone in.') + '</p>' +
+    '</div></div>' +
+    '<div class="card"><h3>Kept awake for the shop<span class="spacer"></span></h3><div class="card-b">' +
+      '<p class="hint">' + (shop.awake
+        ? 'This Mac is being held awake while the book is served, so a phone on the counter can always reach it.'
+        : 'If this Mac sleeps, every installed device goes quiet with it. The always-on server asks ' +
+          'for it to stay awake; this window was opened without that request.') + '</p>' +
+    '</div></div>' +
+    '</div>' +
+    '<div class="card"><h3>Signed in on these devices<span class="spacer"></span>' +
+      '<button class="btn sm ghost" data-action="shop-devices">Refresh</button>' +
+      (devices.length ? '<button class="btn sm ghost" data-action="sign-out-all-devices">Throw out every other one</button>' : '') +
+      '</h3>' +
+      '<div class="tablewrap"><table><thead><tr><th>Device</th><th>Since</th><th>Last used</th><th></th></tr></thead><tbody>' +
+      (devices.length ? devices.map((d) => '<tr><td><span class="strong">' + esc(d.device || 'a device') + '</span>' +
+        (d.shop_computer ? ' <span class="tag">named</span>' : '') + '</td>' +
+        '<td class="ref">' + fdate((d.created_at || '').slice(0, 10)) + '</td>' +
+        '<td class="ref">' + fdate((d.last_seen || '').slice(0, 10)) + '</td>' +
+        '<td class="num"><button class="btn sm ghost" data-device-revoke="' + d.id + '">Sign out</button></td></tr>').join('')
+        : '<tr><td colspan="4" class="hint">No other device is signed in. Once a phone installs the ' +
+          'app and knows the password, it appears here — and can be thrown out from here.</td></tr>') +
+      '</tbody></table></div>' +
+      '<p class="hint">A device stays signed in for ' + plural(guard ? guard.session_days : 30, 'day') +
+      ' of ordinary use, then asks again' + (devices.some((d) => d.stays_forever)
+        ? '. A machine marked <i>named</i> is not on that countdown: it keeps its sign-in for as'
+          + ' long as it keeps its name, and the Sign out button here is what ends it.' : '') +
+      '. Signing one out here takes effect the next time it asks ' +
+      'for something.</p></div>' +
+    '<div class="card"><h3>The shop password<span class="spacer"></span></h3><div class="card-b">' +
+      '<p class="hint">' + (login.from_environment
+        ? 'This server takes its password from the environment (<code>CHRISPHICS_AUTH_PASSWORD</code>), ' +
+          'so it cannot be changed from here. Remove it from the service settings to choose one in the app.'
+        : login.required
+          ? 'Chosen on this Mac and kept in the book as a hash. Anyone who knows it can read the ' +
+            'records, so treat it like the till key: hand it to staff, not to a screen.'
+          : 'Nothing is set. Until it is, the book is readable by any device that finds the address.') + '</p>' +
+      '<p>' + (login.from_environment ? ''
+        : '<button class="btn" data-action="shop-password">' +
+          (login.required ? 'Change the shop password' : 'Choose the shop password') + '</button> ' +
+          (login.required && !shop.reachable_from_wifi
+            ? '<button class="btn ghost" data-action="shop-password-off">Switch sign-in off</button>' : '')) + '</p>' +
+    '</div></div>' +
+    firstMachineCard(shop, shopMac) +
+    copiesCard(copy, shopMac) +
+    emailAccountsCard(mail, shopMac) +
+    securityCard(guard, shopMac);
+  wireShopForms();
+  restoreFocus();
+}
+
+/* Two cards the shop reads once a day and changes rarely: whether the book is being copied by
+   itself, and who is allowed to open it. Both are settled on the shop's own Mac — a phone on the
+   counter can read the answer but cannot quietly change the rules. */
+function plural(n, word) {
+  const count = Number(n || 0);
+  return count + ' ' + word + (count === 1 ? '' : 's');
+}
+
+function cadenceWords(hours) {
+  const every = Number(hours || 24);
+  return every % 24 === 0 ? plural(every / 24, 'day') : plural(every, 'hour');
+}
+
+function copyKindWords(kind) {
+  return kind === 'manual' ? 'asked for'
+    : kind === 'pre-restore' ? 'before a put-back' : 'by itself';
+}
+
+/* One copy of the book, opened and read out. The figures of the copy and of the book that is live sit
+   side by side on purpose: a person deciding whether to put an older state back needs to see what it
+   would take away, not only what it would bring. Nothing here has written anything yet — and the put-
+   back button only appears once this look has been taken, which is the first half of naming the copy
+   twice. */
+function copyLookout(look) {
+  const box = $('#copyLook');
+  if (!box) return;
+  const shopMac = !!((S.session || {}).this_is_the_shop_computer);
+  const cell = (v) => (v === null || v === undefined ? '<span class="muted">not in it</span>' : v);
+  const rows = (look.tables || []).map((t) =>
+    '<tr><td class="ref">' + esc(t.table) + '</td><td class="num">' + cell(t.copy) +
+    '</td><td class="num">' + cell(t.live) + '</td></tr>').join('');
+  const same = (look.tables || []).filter((t) => t.copy !== null && t.live !== null &&
+    t.copy !== t.live).length;
+  box.innerHTML = '<p class="hint"><b>' + esc(look.name) + '</b> — ' + esc(look.at) + ', ' +
+    Math.round((look.bytes || 0) / 1024) + ' kB in <code>' + esc(look.folder) + '</code>.</p>' +
+    (look.integrity === 'ok'
+      ? '<p class="hint">It opens, and it passes its own check.</p>'
+      : '<p class="err">It does not pass its own check: ' + esc(look.integrity) +
+        '. Nothing is counted out of a file that says it is broken, and it cannot be put back.</p>') +
+    (look.integrity === 'ok'
+      ? '<p class="hint">It says the shop was <b>' + esc(look.figures.shop_name || 'nameless') +
+        '</b>, with ' + plural(look.figures.jobs, 'job') + ', ' + plural(look.figures.clients, 'client') +
+        ' and ' + money(look.figures.payments_total) + ' written into its payments' +
+        (look.figures.newest_job ? ', newest job ' + esc(look.figures.newest_job) : '') + '.</p>' +
+        '<p class="hint">The book open now has ' + plural(look.live_figures.jobs, 'job') + ', ' +
+        plural(look.live_figures.clients, 'client') + ' and ' + money(look.live_figures.payments_total) +
+        ' — so putting this back ' + (same ? 'changes ' + plural(same, 'table') + '.'
+          : 'leaves every count where it is.') + '</p>' +
+        (look.extra.length
+          ? '<p class="hint">It holds tables this book has never heard of: ' + esc(look.extra.join(', ')) +
+            '. They come along with it.</p>'
+          : '')
+      : '') +
+    (rows ? '<div class="tablewrap"><table><thead><tr><th>Table</th>' +
+      '<th class="num">In this copy</th><th class="num">In the book now</th></tr></thead><tbody>' +
+      rows + '</tbody></table></div>' : '') +
+    (look.restorable && shopMac
+      ? '<button class="btn sm danger" data-action="put-back" data-name="' + esc(look.name) +
+        '">Put this copy back over the book</button>' +
+        '<p class="hint">Every record, who is signed in and what the devices have queued go back to' +
+        ' ' + esc(look.at) + '. The book as it stands first gets its own copy, named' +
+        ' “before a put-back”, so this can be put back the same way.</p>'
+      : '') +
+    (look.restorable && !shopMac
+      ? '<p class="hint">This copy would go back cleanly, but the book is only ever put back on the' +
+        ' shop’s own computer.</p>'
+      : '') +
+    (!look.restorable && look.reasons.length
+      ? '<p class="err">It will not go back: ' + esc(look.reasons.join('; ')) + '.</p>' : '') +
+    '<button class="btn sm ghost" data-action="close-copy">Close the look</button>';
+  box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+}
+
+/* One machine is where the shop's records are kept up to date as the day happens, and the book says
+   which one that is. Naming it settles the one case a stamp cannot settle by itself — two copies of
+   the same job, both written in the same second — and it puts beside the name the last time anything
+   really arrived from that machine, which is the only thing somebody at the front desk can read that
+   says her entries are getting through. The trail holds one line per machine per hour, so the times
+   below are hourly marks, not the minute of the last save. */
+function firstMachineCard(shop, shopMac) {
+  const origin = shop.origin || {named: false, address: '', name: ''};
+  const machines = (shop.machines || []).filter((m) => m && m.address);
+  const first = machines.find((m) => m.first) || null;
+  const rows = machines.map((m) =>
+    '<tr><td><span class="strong">' + esc(m.name || 'a machine') + '</span>' +
+    (m.first ? ' <span class="tag">first</span>' : '') +
+    (m.this_mac ? ' <span class="muted"> · this Mac</span>' : '') + '</td>' +
+    '<td class="ref">' + esc(m.address) + '</td>' +
+    '<td class="ref">' + (m.last_write ? esc(fdatetime(m.last_write))
+                                       : '<span class="muted">nothing in the trail</span>') +
+    '</td></tr>').join('');
+  return '<div class="card"><h3>The shop’s first machine<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-action="shop-devices">Refresh</button></h3><div class="card-b">' +
+    (origin.named
+      ? '<p class="hint"><b>' + esc(origin.name || 'a machine') + '</b> — <span class="addr">' +
+        esc(origin.address) + '</span>' +
+        (first && first.last_write ? ', last heard of at ' + esc(fdatetime(first.last_write)) : '') +
+        '.</p>'
+      : '<p class="hint">No machine is named first. Every counter is then read the same way: a record' +
+        ' in another book replaces the shop’s copy only when it is stamped later than it.</p>') +
+    '<p class="hint">A counter that has joined the shop does not keep a second ledger: what is typed' +
+    ' there is written into this book and the other screens take it within about ten seconds. The' +
+    ' name matters on the day a book that was kept apart is brought in — a job stamped to the very' +
+    ' same second as the shop’s copy then goes with this machine instead of being left as a tie,' +
+    ' and a copy stamped earlier is still left alone.</p>' +
+    (rows
+      ? '<div class="tablewrap"><table><thead><tr><th>Machine</th><th>Wi-Fi number</th>' +
+        '<th>Last wrote</th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+      : '<p class="hint">Nothing has changed the book from another machine for as far back as this' +
+        ' trail reaches.</p>') +
+    (shopMac
+      ? '<form id="originForm" class="stack">' +
+        '<div class="grid split">' +
+        '<label class="field"><span>What the shop calls it</span><input name="name" type="text"' +
+        ' maxlength="60" placeholder="CHRISPRINT’s iMac (2)" value="' + esc(origin.name || '') +
+        '"></label>' +
+        '<label class="field"><span>Its Wi-Fi number</span><input name="address" type="text"' +
+        ' maxlength="43" placeholder="192.168.100.19" value="' + esc(origin.address || '') +
+        '"></label></div>' +
+        '<p><button class="btn primary" type="submit">' +
+        (origin.named ? 'Save the first machine' : 'Name this machine first') + '</button> ' +
+        (origin.named ? '<button class="btn ghost" data-action="origin-clear" type="button">' +
+          'Nobody in particular</button>' : '') + '</p>' +
+        '<p class="hint">The number is how this engine sees the machine, so it is the number the' +
+        ' router gave that Mac; if the router hands out a new one, it is changed here.</p>' +
+        '<p class="err" id="originErr"></p></form>'
+      : '<p class="hint">Which machine the day is taken from is settled on the shop’s own computer.' +
+        ' This device can read the list but not change it.</p>') +
+    '</div></div>';
+}
+
+function copiesCard(copy, shopMac) {
+  const every = copy.every_hours || 24;
+  const cadence = cadenceWords(every);
+  const recent = (copy.recent || []).map((r) =>
+    '<tr><td class="ref">' + esc(r.at) + '</td>' +
+    '<td>' + copyKindWords(r.kind) + '</td>' +
+    '<td class="num">' + Math.round((r.bytes || 0) / 1024) + ' kB</td>' +
+    '<td class="ref">' + esc(r.name) + '</td>' +
+    '<td class="num"><button class="btn sm ghost" data-action="open-copy" data-name="' +
+    esc(r.name) + '">Look inside</button> ' +
+    '<button class="btn sm ghost" data-action="take-copy" data-name="' + esc(r.name) +
+    '">Take this one out</button></td></tr>').join('');
+  return '<div class="card"><h3>Copies of the book<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-action="book-copy">Copy it now</button>' +
+    '<button class="btn sm ghost" data-action="backup">Take a copy out</button></h3><div class="card-b">' +
+    (copy.at
+      ? '<p class="hint">Last copy: ' + (copy.file ? '<b>' + esc(copy.file) + '</b> ' : '') +
+        esc(copy.at) + (copy.note ? ' — ' + esc(copy.note) : '') + '.</p>'
+      : '<p class="hint">The book has not been copied yet. One file holds every job, client and ' +
+        'payment, so a failed disk takes the whole account book with it.</p>') +
+    (copy.error
+      ? '<p class="err">The last automatic copy did not finish (' + esc(copy.error_at || '') + '): ' +
+        esc(copy.error) + '</p>' : '') +
+    (copy.auto
+      ? (copy.due
+        ? '<p class="err">A copy is overdue — the server is running, so it should have made one by'
+          + ' now. It will try again within five minutes.</p>'
+        : '<p class="hint">Copied by itself every ' + cadence + '; the next one is due in ' +
+          (copy.next_in_hours === null ? '—' : plural(Math.max(0, Math.round(copy.next_in_hours * 10) / 10), 'hour')) + '.</p>')
+      : '<p class="err">Automatic copying is switched off. The book exists in one place only until'
+        + ' it is switched back on or a copy is asked for by hand.</p>') +
+    '<p class="hint">Folder: <code>' + esc(copy.folder) + '</code>' +
+    (copy.free_gb !== null && copy.free_gb !== undefined ? ' · ' + copy.free_gb + ' GB free there' : '') + '.</p>' +
+    (copy.mirror_set
+      ? '<p class="hint">Second destination: <code>' + esc(copy.mirror) + '</code>' +
+        (copy.mirror_dir ? ' — each new copy is written there too.'
+                         : ' — that folder is not there right now, so nothing is being mirrored.') + '</p>'
+      : '<p class="hint">No second destination is set, so both the book and its copies live on this'
+        + ' one Mac. An external disk plugged in now and then is the cheapest insurance there is.</p>') +
+    (copy.mail_set
+      ? '<p class="hint">Posted to <b>' + esc(copy.mail) + '</b> — ' +
+        (copy.mail_ready
+          ? 'each new copy goes out attached to that letter.'
+          : 'but nothing is going out yet: ' + esc(copy.mail_problem || 'that mailbox cannot send')
+            + '.') + '</p>'
+        + (copy.mail_note ? '<p class="hint">Last letter: ' + esc(copy.mail_note) + '.</p>' : '')
+      : '') +
+    (copy.offsite_set
+      ? '<p class="hint">Kept in <b>' + esc(copy.offsite) + '</b> — a private repository, so a'
+        + ' server that starts onto a blank disk takes its records back from there.</p>'
+        + (copy.offsite_note ? '<p class="hint">Last copy: ' + esc(copy.offsite_note) + '.</p>' : '')
+        + (copy.offsite_restore
+          ? '<p class="hint">Brought back from it: ' + esc(copy.offsite_restore) + '.</p>' : '')
+      : '') +
+    (shopMac
+      ? '<form id="copiesForm" class="stack">' +
+        '<label class="consent wide"><input type="checkbox" name="auto"' + (copy.auto ? ' checked' : '') + '>' +
+        '<span>Copy the book by itself while the server is running</span></label>' +
+        '<div class="grid split">' +
+        '<label class="field"><span>Every (hours)</span><input name="every_hours" type="number" min="1" max="168"' +
+        ' step="1" value="' + every + '"></label>' +
+        '<label class="field"><span>Keep night copies for (days)</span><input name="keep_days" type="number"' +
+        ' min="3" max="120" step="1" value="' + (copy.keep_days || 14) + '"></label>' +
+        '</div>' +
+        '<label class="field wide"><span>A second folder (optional)</span>' +
+        '<input name="mirror" type="text" maxlength="300" placeholder="/Volumes/Backup/Chrisphics"' +
+        ' value="' + esc(copy.mirror || '') + '"></label>' +
+        '<label class="field wide"><span>Post each copy to this address (optional)</span>' +
+        '<input name="mail" type="email" maxlength="160"' +
+        ' placeholder="shop-backups@your-mailbox.com" value="' + esc(copy.mail || '') + '"></label>' +
+        '<p class="hint">One copy for each month is kept for a year beyond those days, and the last' +
+        ' twelve copies asked for by hand. Each one is opened and counted against the book before any' +
+        ' older copy is cleared.</p>' +
+        '<p class="hint">A posted copy rides as one file, so wherever that letter is kept is where' +
+        ' every client, phone number and payment is kept too. A folder and an address can both be' +
+        ' settled — neither one replaces the other.</p>' +
+        '<div class="err" id="copiesErr"></div>' +
+        '<button class="btn primary">Save the copying</button></form>'
+      : '<p class="hint">How often the book is copied, and where the copies go, is settled on the' +
+        ' shop’s own computer.</p>') +
+    (copy.restored_at
+      ? '<p class="hint">Last time the book was put back: <b>' + esc(copy.restored_at) + '</b>' +
+        (copy.restored_note ? ' — ' + esc(copy.restored_note) : '') + '.</p>'
+      : '') +
+    (recent ? '<div class="tablewrap"><table><thead><tr><th>When</th><th>Why</th><th class="num">Size</th>' +
+      '<th>File</th><th></th></tr></thead><tbody>' + recent + '</tbody></table></div>' +
+      '<p class="hint">“Look inside” opens one copy and reads it out table by table beside the book' +
+      ' that is open now, without changing anything. “Take this one out” saves that same file onto the' +
+      ' computer you are using. Putting a copy back over the book is only offered on the shop’s own' +
+      ' computer, and only from inside the look — because it replaces every record at once, and the' +
+      ' book it replaces is copied first so it can always be undone.</p>' : '') +
+    '<div id="copyLook"></div>' +
+    '</div></div>';
+}
+
+/* The shop's own hours, in the shop's own words. Monday is 0 because that is how the book counts
+   them, and the line under the boxes is read back from the server after every save — so what the
+   counter sees is what the book now enforces, not what they meant to type. */
+const SHOP_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function hoursFields(h) {
+  const hours = h || {};
+  const days = hours.days || [0, 1, 2, 3, 4, 5, 6];
+  const boxes = SHOP_DAYS.map((name, i) =>
+    '<label class="day"><input type="checkbox" data-day value="' + i + '"' +
+    (days.indexOf(i) >= 0 ? ' checked' : '') + '><span>' + name + '</span></label>').join('');
+  const own = hours.own_devices || 0;
+  const now = hours.written
+    ? (hours.open ? 'Open now' : 'Closed') + ' — ' + esc(hours.when_text) +
+      (hours.limit ? ', and ' + plural(hours.devices || 0, 'device') + ' signed in of '
+        + plural(hours.limit, 'place') + ' allowed' : '') +
+      (own ? ', plus ' + plural(own, 'machine') + ' named here as the shop’s own' : '')
+    : 'Nothing written down yet: new devices get in at any hour, and as many as want to';
+  return '<fieldset class="hours-fields"><legend>When devices may sign in</legend>' +
+    '<label class="field wide"><span>Days a new device is let in</span>' +
+    '<div class="days">' + boxes + '</div></label>' +
+    '<label class="field"><span>Opens (24-hour, like 08:00)</span><input name="open_from"' +
+    ' type="time" value="' + esc(hours.from || '') + '"></label>' +
+    '<label class="field"><span>Closes</span><input name="open_to" type="time"' +
+    ' value="' + esc(hours.to || '') + '"></label>' +
+    '<label class="field"><span>Devices signed in at one time</span><input name="device_limit"' +
+    ' type="number" min="0" max="20" step="1" value="' + (hours.limit || 0) + '"></label>' +
+    '<p class="hint">Both times together or neither — leave them out and the open days run all' +
+    ' day. 0 devices caps nobody. Outside the window a new sign-in is turned away, while a device' +
+    ' already inside keeps working.</p>' +
+    '<p class="hint hours-now">' + now + '</p></fieldset>';
+}
+
+/* The machines the counter has written down as the shop's own. A name plate is handed out once,
+   on this screen only, and the book keeps nothing but its digest afterwards — so the number shown
+   here is the only copy that will ever exist, and it goes to the machine by hand. */
+function computerState(row) {
+  if (!row.named) return row.waiting ? 'name plate waiting' : 'never used';
+  if (row.signed_in && row.stays_forever) {
+    return '<span class="tag">stays signed in</span> ' + esc(row.seen);
+  }
+  return (row.signed_in ? 'inside the book now' : 'signed in when last here') + ', ' + esc(row.seen);
+}
+function shopComputers(list, shopMac) {
+  const rows = (list || []).map((row) =>
+    '<tr><td><b>' + esc(row.name) + '</b></td><td class="ref">' + computerState(row) + '</td>' +
+    (shopMac ? '<td class="ref"><button class="btn sm ghost" data-action="unname-computer"' +
+      ' data-id="' + row.id + '">Take the name off</button></td>' : '') +
+    '</tr>').join('');
+  return '<h4>The shop’s own machines</h4>' +
+    (rows ? '<div class="tablewrap"><table><tbody>' + rows + '</tbody></table></div>'
+          : '<p class="hint">None written down. Anything that signs in over the Wi-Fi is a visiting'
+            + ' device for now, and waits for the window the shop wrote.</p>') +
+    (shopMac ? '<p class="hint">The iMac at the press is the shop’s machine, not a visitor: write it'
+      + ' down here and it can open the book at any hour and takes none of the places kept for'
+      + ' phones. It types the shop password once, together with its name plate; after that the'
+      + ' book keeps its sign-in open and does not ask it again — only taking the name off does,'
+      + ' and that signs the machine out at the same moment.</p>' +
+      '<form id="nameComputerForm">' +
+      '<label class="field wide"><span>What this machine is called</span>' +
+      '<input name="name" maxlength="60" placeholder="CHRISPRINT’s iMac" required></label>' +
+      '<div class="err" id="nameComputerErr"></div>' +
+      '<button class="btn">Write it down</button></form><div id="plateOut"></div>' : '');
+}
+
+function securityCard(guard, shopMac) {
+  if (!guard) {
+    return '<div class="card"><h3>Security of this book</h3><div class="card-b">' +
+      '<p class="hint">The security of the book is read from the shop’s own computer, or after' +
+      ' signing in. Nothing here is missing — this device simply has not been asked to show it.</p>' +
+      '</div></div>';
+  }
+  const trail = (guard.trail || []).slice(0, 12).map((row) =>
+    '<tr><td class="ref">' + esc(row.at) + '</td><td><span class="strong">' + esc(row.kind) + '</span></td>' +
+    '<td class="ref">' + esc(row.address || '') + '</td><td class="ref">' + esc(row.detail || '') + '</td></tr>').join('');
+  return '<div class="card"><h3>Security of this book<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-action="shop-security">Refresh</button></h3><div class="card-b">' +
+    '<p class="hint">Sign-in: <b>' + (guard.required ? (guard.from_environment
+      ? 'set by the hosting service' : 'one shop password') : 'not required') + '</b>' +
+    (guard.required ? ' — the word is kept only as a salted hash, run through ' +
+      (guard.rounds / 1000) + ' thousand rounds.' : ' — choose a shop password above.') + '</p>' +
+    '<p class="hint">' + (guard.https
+      ? 'This address is HTTPS, so a password crossing the Wi-Fi is encrypted on the way.'
+      : '<span class="err">Plain HTTP: a password typed here crosses the Wi-Fi in the clear.'
+        + '</span> Run <code>tools/shop-server.sh install</code> on this Mac.') + '</p>' +
+    '<p class="hint">' + plural(guard.allowed_fails, 'wrong password') + ' in a row and that device' +
+    ' is made to wait, doubling each time up to a quarter of an hour. More than ' +
+    plural(guard.calls_per_minute, 'call') + ' in one minute from one address is answered with a' +
+    ' wait, so a script cannot bury the counter’s own screen.</p>' +
+    '<p class="hint">' + (guard.loopback_open
+      ? 'This Mac is the shop’s own computer and is not asked for the password — the counter’s'
+        + ' keyboard is treated as a key in the till.'
+      : 'Even this Mac is asked for the password, because the shop switched that on below.') + '</p>' +
+    (shopMac
+      ? '<form id="securityForm" class="stack">' +
+        '<label class="field"><span>Days a device stays signed in</span><input name="session_days"' +
+        ' type="number" min="1" max="90" step="1" value="' + guard.session_days + '"></label>' +
+        hoursFields(guard.hours) +
+        '<label class="consent wide"><input type="checkbox" name="shop_mac_signin"' +
+        (guard.shop_mac_signin ? ' checked' : '') + '><span>Ask this Mac for the password too' +
+        ' (its own Settings windows then save only after the page has signed in)</span></label>' +
+        '<div class="err" id="securityErr"></div>' +
+        '<button class="btn primary">Save the security</button></form>'
+      : '<p class="hint">How long a device stays signed in, and whether this Mac is asked as well,' +
+        ' are settled on the shop’s own computer.</p>') +
+    shopComputers(guard.shop_computers, shopMac) +
+    '<h4>What the book remembers of being opened</h4>' +
+    (trail ? '<div class="tablewrap"><table><thead><tr><th>When</th><th>What</th><th>From</th>' +
+      '<th>Note</th></tr></thead><tbody>' + trail + '</tbody></table></div>'
+      : '<p class="hint">Nothing has been written yet. Every sign-in, every wrong password, every'
+        + ' copy taken out and every device thrown out goes here from now on.</p>') +
+    '<p class="hint">The last few hundred events only, and never a password, a half-typed one, or a' +
+    ' device’s cookie — only what happened, when, and from which address.</p>' +
+    '</div></div>';
+}
+
+/* Mailboxes the shop sends client notices from. The book holds every detail of a mailbox except its
+   password: the book is copied every night and mirrored to another folder, and a mail password
+   travelling with the ledger is a mail password leaked. The word stays in one small file beside the
+   book at mode 600 instead, so this screen can say that a password is saved and never show it back. */
+let emailEditing = null;
+
+/* The shop's letters go out over Gmail, so a fresh form arrives already aimed at Google's servers:
+   host, port and connection are the same for every Gmail mailbox, and the counter is left to type
+   the address and the app password. No mailbox is written into this program — the shelf it lives on
+   is public, and an address named there is one a stranger can aim a phishing letter at. */
+const GMAIL_MAILBOX = { label: 'Gmail', from_address: '',
+  smtp_host: 'smtp.gmail.com', smtp_port: 587, smtp_security: 'starttls' };
+
+function emailForm(account, shopName) {
+  const a = account || GMAIL_MAILBOX;
+  const editing = !!a.id;
+  const sec = a.smtp_security === 'ssl' ? 'ssl' : 'starttls';
+  return '<form id="emailAccountForm" class="stack">' +
+    '<div class="grid split">' +
+      '<label class="field"><span>What the counter calls it</span>' +
+      '<input name="label" maxlength="40" placeholder="Shop office" value="' + esc(a.label || '') +
+      '" required></label>' +
+      '<label class="field"><span>Address the client replies to</span>' +
+      '<input name="from_address" type="email" maxlength="160" placeholder="shop@crispprint.com"' +
+      ' value="' + esc(a.from_address || '') + '" required></label>' +
+    '</div>' +
+    '<label class="field wide"><span>Name printed on the letter</span>' +
+    '<input name="from_name" maxlength="60" placeholder="' + esc(shopName || 'the shop’s name') +
+    '" value="' + esc(a.from_name || '') + '"></label>' +
+    '<div class="grid split">' +
+      '<label class="field"><span>Mail server</span>' +
+      '<input name="smtp_host" maxlength="160" placeholder="smtp.zoho.com" value="' +
+      esc(a.smtp_host || '') + '" required></label>' +
+      '<label class="field"><span>Port</span>' +
+      '<input name="smtp_port" type="number" min="1" max="65535" step="1" value="' +
+      (a.smtp_port || 587) + '"></label>' +
+    '</div>' +
+    '<div class="grid split">' +
+      '<label class="field"><span>Connection</span><select name="smtp_security">' +
+      ['starttls', 'ssl'].map((s) => '<option' + (s === sec ? ' selected' : '') + '>' + s + '</option>').join('') +
+      '</select></label>' +
+      '<label class="field"><span>Sign-in name (only if it differs)</span>' +
+      '<input name="username" maxlength="160" placeholder="the address above" value="' +
+      esc(a.username || '') + '"></label>' +
+    '</div>' +
+    '<label class="field wide"><span>App password from the mail provider</span>' +
+    '<input name="password" type="password" maxlength="200" autocomplete="new-password"' +
+    (editing ? '' : ' required') + '></label>' +
+    '<p class="hint">' + (editing && a.has_password
+      ? 'A word is already saved for this mailbox. Leave this box empty and it stays exactly as it' +
+        ' is — nothing on this screen ever shows the old one back, so there is nothing to copy out.'
+      : 'It is written beside the book, not in it, so it does not ride along with the nightly copies' +
+        ' or reach GitHub. An app password from the mail provider is safer than the real one.') + '</p>' +
+    '<div class="err" id="emailErr"></div>' +
+    '<p><button class="btn primary">' + (editing ? 'Save the mailbox' : 'Add the mailbox') +
+    '</button> <button class="btn ghost" type="button" data-action="email-cancel">Cancel</button></p>' +
+    '</form>';
+}
+
+function emailAccountsCard(mail, shopMac) {
+  if (!mail) {
+    return '<div class="card"><h3>Email accounts</h3><div class="card-b">' +
+      '<p class="hint">The shop’s mailboxes are read from the shop’s own computer, or after signing' +
+      ' in. Nothing is missing — this device has not been asked to show them.</p></div></div>';
+  }
+  const list = mail.accounts || [];
+  const sending = mail.sending || '';
+  const shopName = ((S.boot || {}).shop || {}).name || '';
+  const rows = list.map((a) => {
+    const actions = [];
+    if (!a.is_default && shopMac) {
+      actions.push('<button class="btn sm ghost" data-action="email-default" data-id="' + a.id +
+        '">Make this the sender</button>');
+    }
+    if (shopMac) {
+      actions.push('<button class="btn sm ghost" data-action="email-test" data-id="' + a.id +
+        '">Test this account</button>');
+      actions.push('<button class="btn sm ghost" data-action="email-edit" data-id="' + a.id +
+        '">Change</button>');
+      actions.push('<button class="btn sm ghost" data-action="email-forget" data-id="' + a.id +
+        '">Forget</button>');
+    }
+    return '<tr><td><span class="strong">' + esc(a.label) + '</span>' +
+      (a.is_default ? ' <span class="tag">sends notices</span>' : '') + '<br>' +
+      '<span class="ref">' + esc(a.from_address) + '</span>' +
+      (a.from_name ? ' <span class="ref">· ' + esc(a.from_name) + '</span>' : '') +
+      (a.last_error ? '<br><span class="err">' + esc(a.last_error) + '</span>' : '') + '</td>' +
+      '<td class="ref">' + esc(a.smtp_host) + ':' + esc(a.smtp_port) + '<br>' + esc(a.smtp_security) +
+      (a.username ? '<br>' + esc(a.username) : '') + '</td>' +
+      '<td class="ref">' + (a.has_password ? 'word saved'
+        : '<span class="err">no word saved</span>') + '</td>' +
+      '<td class="ref">' + (a.last_sent_at ? fdatetime(a.last_sent_at) : 'never sent') + '</td>' +
+      '<td class="num">' + actions.join(' ') + '</td></tr>';
+  }).join('');
+  const held = list.filter((a) => a.id === Number(emailEditing))[0];
+  const form = emailEditing === 'new' ? emailForm(null, shopName)
+    : (emailEditing && held ? emailForm(held, shopName) : '');
+  return '<div class="card"><h3>Email accounts<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-action="email-refresh">Refresh</button>' +
+    (shopMac && !form ? '<button class="btn sm ghost" data-action="email-new">Add a mailbox</button>' : '') +
+    '</h3><div class="card-b">' +
+    '<p class="hint">A client’s notice can go out by itself as a job moves stage — by WhatsApp and by' +
+    ' email. The mailbox marked <b>sends notices</b> is the one letters leave from; the others wait' +
+    ' until the shop chooses one.</p>' +
+    (sending ? '<p class="err">' + esc(sending) + '</p>'
+             : '<p class="hint">Nothing is blocking email, so notices will go out as they are queued.</p>') +
+    (list.length
+      ? '<div class="tablewrap"><table><thead><tr><th>Mailbox</th><th>Server</th><th>Password</th>' +
+        '<th>Last sent</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>'
+      : '<p class="hint">No mailbox is written down yet. Until one is, letters can only be sent if' +
+        ' the server itself was started with <code>CHRISPHICS_EMAIL_*</code> settings.</p>') +
+    form +
+    (shopMac
+      ? '<p class="hint">“Test this account” hands one real letter to the mail server, addressed to' +
+        ' the mailbox’s own address, and writes what the provider answered back here. A job notice' +
+        ' only starts trusting a mailbox after it has been through that.</p>'
+      : '<p class="hint">A mailbox and its password are added on the shop’s own computer, where' +
+        ' somebody can see it happen. This device can read the list but not change it.</p>') +
+    '</div></div>';
+}
+
+function wireShopForms() {
+  const origin = document.getElementById('originForm');
+  if (origin) {
+    origin.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('originErr').textContent = '';
+      try {
+        await api('/api/shop-origin', { method: 'PUT', body: JSON.stringify({
+          name: f.name.value.trim(), address: f.address.value.trim(),
+        }) });
+        toast(f.address.value.trim()
+                ? 'That machine is the shop’s first — a same-second copy of a job goes with it'
+                : 'No machine is named first, so every counter is read the same way', 'good');
+        await render();
+      } catch (err) { document.getElementById('originErr').textContent = err.message; }
+    });
+  }
+  const copies = document.getElementById('copiesForm');
+  if (copies) {
+    copies.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('copiesErr').textContent = '';
+      try {
+        await api('/api/backups', { method: 'PUT', body: JSON.stringify({
+          auto: !!f.auto.checked,
+          every_hours: f.every_hours.value,
+          keep_days: f.keep_days.value,
+          mirror: f.mirror.value.trim(),
+          mail: f.mail.value.trim(),
+        }) });
+        toast('The book will be copied that way from now on', 'good');
+        await render();
+      } catch (err) { document.getElementById('copiesErr').textContent = err.message; }
+    });
+  }
+  const named = document.getElementById('nameComputerForm');  if (named) {
+    named.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('nameComputerErr').textContent = '';
+      try {
+        const answer = await api('/api/shop-computers', { method: 'POST',
+          body: JSON.stringify({ name: f.name.value }) });
+        f.reset();
+        await render();
+        // The plate exists in this sentence and in no other place: the book keeps only its
+        // digest, so the counter writes it down or walks over with it. Rendered after the
+        // refresh, or the refresh would erase it.
+        const out = document.getElementById('plateOut');
+        if (out) {
+          out.innerHTML =
+            '<p class="hint">Write this down and take it to <b>' + esc(answer.name) + '</b>. On' +
+            ' that machine, tick “This is one of the shop’s own machines” on the sign-in screen' +
+            ' and type these eight letters beside the shop password.</p>' +
+            '<p class="plate">' + esc(answer.plate_words) + '</p>' +
+            '<p class="hint">Good for ' + plural(answer.plate_days, 'day') + ' and for one' +
+            ' machine only. Once that machine has used it this number is worth nothing, and if it' +
+            ' is lost before then, write the machine down again.</p>';
+        }
+      } catch (err) { document.getElementById('nameComputerErr').textContent = err.message; }
+    });
+  }
+  const security = document.getElementById('securityForm');
+  if (security) {
+    security.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('securityErr').textContent = '';
+      try {
+        const days = Array.prototype.slice.call(f.querySelectorAll('[data-day]:checked'))
+          .map((box) => box.value).join(',');
+        await api('/api/security', { method: 'PUT', body: JSON.stringify({
+          session_days: f.session_days.value,
+          open_days: days,
+          open_from: f.open_from.value,
+          open_to: f.open_to.value,
+          device_limit: f.device_limit.value,
+          shop_mac_signin: !!f.shop_mac_signin.checked,
+        }) });
+        toast('Sign-in rules saved', 'good');
+        await render();
+      } catch (err) { document.getElementById('securityErr').textContent = err.message; }
+    });
+  }
+  const mailbox = document.getElementById('emailAccountForm');
+  if (mailbox) {
+    mailbox.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('emailErr').textContent = '';
+      const changing = emailEditing && emailEditing !== 'new' ? emailEditing : null;
+      try {
+        await api('/api/email-accounts' + (changing ? '/' + changing : ''), {
+          method: changing ? 'PUT' : 'POST',
+          body: JSON.stringify({
+            label: f.label.value, from_address: f.from_address.value, from_name: f.from_name.value,
+            smtp_host: f.smtp_host.value, smtp_port: f.smtp_port.value,
+            smtp_security: f.smtp_security.value, username: f.username.value,
+            password: f.password.value,
+          }),
+        });
+        emailEditing = null;
+        toast(changing ? 'That mailbox is saved' : 'The mailbox is registered — test it before a' +
+              ' client’s notice depends on it', 'good');
+        await render();
+      } catch (err) { document.getElementById('emailErr').textContent = err.message; }
+    });
+  }
+}
+
+function passwordForm(login) {
+  const changing = login.required && !login.from_environment;
+  openModal(modalHeader(changing ? 'Change the shop password' : 'Choose the shop password',
+    changing ? 'Every device is signed out, and each one has to be told the new password.'
+             : 'Long beats clever: four ordinary words are easier to remember than a trick') +
+    '<form id="shopPasswordForm">' +
+    (changing ? '<label class="field wide"><span>What it is now</span>' +
+      '<input name="current" type="password" autocomplete="current-password" required></label>' : '') +
+    '<label class="field wide"><span>New shop password</span>' +
+    '<input name="password" type="password" minlength="8" maxlength="200" autocomplete="new-password" required></label>' +
+    '<label class="field wide"><span>Once more</span>' +
+    '<input name="again" type="password" autocomplete="new-password" required></label>' +
+    '<p class="hint">Kept in the book as a salted hash, never as the word. Staff sign in on each ' +
+    'device with it; a wrong password five times makes that device wait.</p>' +
+    '<div class="err" id="shopPasswordErr"></div>' +
+    '<button class="btn primary">Save</button></form>');
+  $('#shopPasswordForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    if (f.password.value !== f.again.value) {
+      $('#shopPasswordErr').textContent = 'The two do not match yet';
+      return;
+    }
+    $('#shopPasswordErr').textContent = '';
+    try {
+      await api('/api/shop-password', { method: 'POST', body: JSON.stringify({
+        password: f.password.value, current: f.current ? f.current.value : '',
+      }) });
+      closeModal();
+      toast('The shop password is set. Every other device has to be told.', 'good');
+      await render();
+    } catch (err) { $('#shopPasswordErr').textContent = err.message; }
+  });
+}
+
+function passwordOffForm(login) {
+  openModal(modalHeader('Switch sign-in off', 'Only do this if every device is inside the shop'),
+    '<form id="shopPasswordOffForm">' +
+    '<label class="field wide"><span>The shop password</span>' +
+    '<input name="current" type="password" autocomplete="current-password" required></label>' +
+    '<p class="hint">Any device that can reach this address will then read the whole book without ' +
+    'asking — including a stranger’s phone on the same Wi-Fi.</p>' +
+    '<div class="err" id="shopOffErr"></div><button class="btn">Switch it off</button></form>');
+  $('#shopPasswordOffForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    $('#shopOffErr').textContent = '';
+    try {
+      await api('/api/shop-password', { method: 'DELETE',
+        body: JSON.stringify({ current: e.target.current.value }) });
+      closeModal();
+      toast('Sign-in is off. The book is open on this network.', 'warn');
+      await render();
+    } catch (err) { $('#shopOffErr').textContent = err.message; }
+  });
+}
+
+async function viewSpoiled() {
+  const rows = await api('/api/spoiled');
+  const total = rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const quantity = rows.reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+  topbar('Spoiled work',
+    rows.length + ' record' + (rows.length === 1 ? '' : 's') + ' · ' +
+      quantity + ' item' + (quantity === 1 ? '' : 's') + ' · cost ' + money(total),
+    '', [{ label: '+ Log spoiled work', action: 'new-spoilage', primary: true }]);
+  $('#view').innerHTML = '<div class="card"><div class="tablewrap"><table><thead><tr>' +
+    '<th>Date</th><th>Job</th><th>Client</th><th class=num>Qty</th><th>Reason</th>' +
+    '<th class=num>Cost</th><th></th></tr></thead><tbody>' +
+    (rows.length ? rows.map((row) => '<tr>' +
+      '<td class="ref">' + fdate(row.spoiled_on) + '</td>' +
+      '<td><a href="#/jobs/' + row.job_id + '">' + esc(row.ref) + '</a><div class="ref">' + esc(row.job_title) + '</div></td>' +
+      '<td>' + esc(row.client) + '</td>' +
+      '<td class=num>' + Number(row.quantity).toLocaleString('en-US') + '</td>' +
+      '<td>' + esc(row.reason) + '</td>' +
+      '<td class="num neg">' + money(row.amount) + '</td>' +
+      '<td class=num><button class="btn sm ghost" data-edit-spoilage="' + row.id + '">Edit</button> ' +
+        '<button class="btn sm ghost" data-del-spoilage="' + row.id + '" data-del-quantity="' + row.quantity +
+        '" data-del-job="' + esc(row.ref) + '">Remove</button></td></tr>').join('')
+      : '<tr><td colspan="7">' + emptyState('No spoiled work recorded',
+        'Log spoiled items against a job. The record stays with the job; the cost is the shop’s ' +
+        'and does not reduce that job’s profit.',
+        '<button class="btn primary" data-action="new-spoilage">+ Log spoiled work</button>') + '</td></tr>') +
+    '</tbody></table></div></div>' +
+    '<p class="hint">Spoilage is recorded against the job that wasted it, but the cost is the shop’s:'
+    + ' it counts as money out in the month-by-month table and never reduces that job’s profit.</p>';
+  restoreFocus();
+}
+function spoilageForm(record, jobs, jobId) {
+  const row = record || {};
+  const chosen = record ? record.job_id : jobId;
+  openModal(modalHeader(record ? 'Edit spoiled work' : 'Log spoiled work',
+    'Record the affected job, quantity, reason and extra cost.') +
+    '<form id="spoilageForm" data-spoilage-id="' + (record ? record.id : '') + '"><div class="f-grid">' +
+    '<label class="field wide"><span>Job *</span><select name="job_id" required>' +
+    '<option value="">Choose a job</option>' +
+    jobs.map((j) => '<option value="' + j.id + '"' + (String(chosen) === String(j.id) ? ' selected' : '') + '>' +
+      esc(j.ref) + ' · ' + esc(j.client) + ' · ' + esc(j.title) + '</option>').join('') +
+    '</select></label>' +
+    '<label class="field"><span>Quantity spoiled *</span>' + qtyBox('quantity', row.quantity, 'e.g. 25', '', ' required') + '</label>' +
+    '<label class="field"><span>Extra cost</span>' + moneyBox('amount', row.amount === undefined ? 0 : row.amount) + '</label>' +
+    '<label class="field"><span>Date spoiled</span><input name="spoiled_on" type="date" value="' +
+      esc(day10(row.spoiled_on || todayISO())) + '"></label>' +
+    '<label class="field wide"><span>Reason *</span><textarea name="reason" maxlength="500" rows="3" required placeholder="Describe what went wrong">' +
+      esc(row.reason || '') + '</textarea></label>' +
+    '</div><p class="hint">The cost is recorded against the selected job so the shop knows what '
+    + 'went wrong on it, but it stays out of that job’s cost and profit. Enter 0 if no extra cost '
+    + 'was incurred.</p>' +
+    '<div class="err" id="spoilageErr"></div><div class="modal-foot"><span class="spacer"></span>' +
+    '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
+    '<button class="btn primary">' + (record ? 'Save changes' : 'Record spoilage') + '</button></div></form>');
+}
+/* ------------------------------------------------------------------ collect
+   The counter's hand-over screen: one box for the job number off the sheet, one card that
+   answers whether the box may leave. Nothing is written until Hand over is pressed. */
+async function viewCollect() {
+  const q = (S.route.params.get('q') || '').trim();
+  const data = await api('/api/handover' + (q ? '?q=' + encodeURIComponent(q) : ''));
+  const waiting = data.waiting || [];
+  topbar('Collect', waiting.length
+    ? pluralise(waiting.length, 'job') + ' ready and paid, waiting to go out'
+    : 'Nothing is both ready and paid right now', '', []);
+  $('#topbar').insertAdjacentHTML('beforeend',
+    '<div class="collect-ask"><label class="field"><span>Job number</span>' +
+    '<input class="collect-q" data-filter="q" value="' + esc(q) + '" placeholder="CH-2026-0001" ' +
+    'autocomplete="off" autocapitalize="characters" spellcheck="false"></label>' +
+    '<button class="btn ghost" data-action="clear-filters">Clear</button></div>');
+  $('#view').innerHTML = '<div class="stack">' + collectBody(data, waiting) + '</div>';
+  restoreFocus();
+}
+
+function collectBody(data, waiting) {
+  if (!data.query) return collectShelf(waiting);
+  if (!data.found) {
+    return '<div class="card">' + emptyState('No job called ' + data.query,
+      'Nothing in the book carries that number. It is on the job sheet and in the messages sent ' +
+      'to the client — try the year and the number, with or without the CH-.',
+      '<a class="btn" href="#/jobs">See every job</a>') + '</div>';
+  }
+  if ((data.ambiguous || []).length) {
+    return '<div class="card card-b"><p class="strong">' + pluralise(data.ambiguous.length, 'job') +
+      ' answer to ' + esc(data.query) + '</p><p class="hint">Type the whole number, or open the one ' +
+      'you mean.</p>' + data.ambiguous.map((row) => '<p class="collect-amb"><a href="#/jobs/' + row.id +
+        '">' + esc(row.ref) + '</a> <span>' + esc(row.client) + ' · ' + esc(row.title) +
+        ' · ' + esc(row.status) + '</span></p>').join('') + '</div>';
+  }
+  return collectCard(data.card);
+}
+
+function collectCard(card) {
+  const j = card.job || {};
+  return '<div class="card card-b collect-verdict' + (card.can_handover ? ' yes' : ' no') + '">' +
+    '<div class="collect-h"><b class="collect-ref">' + esc(j.ref) + '</b>' +
+    '<span class="pill s-' + esc(j.status) + '">' + esc(j.status) + '</span>' +
+    (j.priority === 'Urgent' ? '<span class="pill p-Urgent">Urgent</span>' : '') +
+    '<span class="spacer"></span>' +
+    (card.settled ? '<span class="pill k-paid">Paid in full</span>'
+      : '<span class="pill out">Owes ' + money(j.balance) + '</span>') + '</div>' +
+    '<h2 class="collect-what">' + esc(j.title) + '</h2>' +
+    '<p class="collect-who">' + esc(j.client) +
+    (j.client_phone ? ' · <a href="tel:' + esc(j.client_phone) + '">' + esc(j.client_phone) + '</a>' : '') +
+    (j.category ? ' · ' + esc(j.category) : '') + '</p>' +
+    '<div class="amounts">' +
+    '<div><span>Billed</span><b>' + money(j.total) + '</b></div>' +
+    '<div><span>Paid</span><b>' + money(j.paid) + '</b></div>' +
+    '<div><span>Balance</span><b class="' + (Number(j.balance) > 0.005 ? 'neg' : 'pos') + '">' +
+      money(j.balance) + '</b></div></div>' +
+    (card.can_handover
+      ? '<p class="collect-yes">' + esc(card.money_line) + '</p><div class="row-actions">' +
+        '<button class="btn primary" data-action="collect-handover" data-status-job="' + j.id +
+        '" data-status-name="' + esc(j.ref) + '">Hand it over</button>' +
+        '<a class="btn ghost" href="#/jobs/' + j.id + '">Open the job</a>' +
+        '<a class="btn ghost" href="/print/' + j.id + '" target="_blank" rel="noopener">Job sheet</a></div>'
+      : '<p class="collect-stop">' + esc(card.reason) + '</p>' +
+        ((card.doors || []).length ? '<div class="row-actions">' + card.doors.map((d) =>
+          d.action === 'payment'
+            ? '<button class="btn" data-action="collect-pay" data-pay-job="' + j.id +
+              '" data-pay-name="' + esc(j.client) + '" data-pay-amount="' + esc(n2(card.balance)) + '">' +
+              esc(d.label) + '</button>'
+            : '<button class="btn" data-action="collect-ready" data-status-job="' + j.id +
+              '" data-status="' + esc(d.status) + '">' + esc(d.label) + '</button>').join('') +
+          '</div>' : '') +
+        '<div class="row-actions"><a class="btn ghost" href="#/jobs/' + j.id + '">Open the job</a></div>') +
+    '</div>';
+}
+
+function collectShelf(waiting) {
+  if (!waiting.length) {
+    return '<div class="card">' + emptyState('Nothing to hand over yet',
+      'A job appears here once it has reached Ready and its balance is settled. Type a number ' +
+      'above to check the one a client is standing at the counter for.', '') + '</div>';
+  }
+  return '<p class="section-h">Ready and paid</p><div class="card"><div class="tablewrap">' +
+    '<table class="collect-shelf">' +
+    '<thead><tr><th>Job</th><th>Client</th><th class=num>Billed</th><th></th></tr></thead><tbody>' +
+    waiting.map((j) => '<tr><td><span class="strong">' + esc(j.title) + '</span>' +
+      '<div class="ref"><a href="#/collect?q=' + encodeURIComponent(j.ref) + '">' + esc(j.ref) +
+      '</a></div>' +
+      (j.due_date ? '<div class="due">due ' + fdate(j.due_date) + '</div>' : '') + '</td>' +
+      '<td>' + esc(j.client) + '</td>' +
+      '<td class=num>' + money(j.total) + '</td>' +
+      '<td class=num><a class="btn ghost sm" href="#/collect?q=' + encodeURIComponent(j.ref) +
+      '">Collect</a></td></tr>').join('') +
+    '</tbody></table></div></div>';
+}
+async function viewSyncQueue() {
+  const rows = (await offlineAll('outbox')).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const pending = rows.filter((row) => row.state === 'pending');
+  const conflicts = rows.filter((row) => row.state === 'conflict');
+  topbar('Pending sync',
+    pending.length + ' waiting · ' + conflicts.length + ' need review · ' +
+      rows.filter((row) => row.state === 'synced').length + ' synced on this device',
+    '', [{ label: 'Sync now', action: 'sync-now', primary: true },
+         { label: 'Copy the book onto this device', action: 'carry-now' }]);
+  /* Read the device's own memory, not this page's memory: the copy a phone carries at noon is still
+     what it will answer from at midnight, long after the walk that took it has been forgotten. */
+  const held = await offlineAll('responses').catch(() => []);
+  const lastTaken = held.reduce((max, row) => Math.max(max, row.savedAt || 0), 0);
+  const since = (S.offlineCarried || {}).at || lastTaken;
+  $('#view').innerHTML = '<p class="hint">Changes saved while disconnected stay on this device until it can reach the shop book. ' +
+    'Reconnect to the shop Wi-Fi to sync. The screens show the last saved copy until queued changes have synced.</p>' +
+    (held.length
+      ? '<p class="hint">This device holds its own copy of ' + plural(held.length, 'screen') +
+        ' of the shop’s' + (since ? ', last taken at ' + wxReadAt(since) : '') +
+        ', which is what lets the counter be answered with the shop’s Mac switched off.</p>'
+      : '<p class="hint">This device holds no copy of the shop’s screens yet. Press “Copy the book' +
+        ' onto this device” while the Mac is answering; after that, the counter keeps answering from' +
+        ' this machine with the Mac switched off.</p>') +
+    '<p class="hint">Two copies are asked for by hand on <a href="#/shop">Shop &amp; devices</a>:' +
+    ' “Copy it now” writes one into the shop’s own folder and wherever else the book is sent, and' +
+    ' “Take a copy out” saves every record as one file on the machine you are sitting at. The file on' +
+    ' this machine is the copy that survives the Mac dying.</p>' +
+    (rows.length ? rows.map((row) => {
+      const conflict = row.state === 'conflict';
+      const synced = row.state === 'synced';
+      return '<div class="card sync-entry"><h3>' + esc(row.method + ' ' + row.path) +
+        '<span class="spacer"></span>' + (conflict ? '<span class="pill s-Cancelled">Needs review</span>' :
+          synced ? '<span class="pill s-Delivered">Synced</span>' : '<span class="pill s-Pending">Waiting</span>') +
+        '</h3><div class="card-b"><p class="ref">' + esc(fdatetime(row.createdAt)) + '</p>' +
+        '<details><summary>Your saved change</summary><pre>' + esc(JSON.stringify(row.body, null, 2)) + '</pre></details>' +
+        (conflict ? '<p class="hint">' + esc(row.error) + '</p>' +
+          (row.current ? '<details open><summary>Current shared record</summary><pre>' +
+            esc(JSON.stringify(row.current, null, 2)) + '</pre></details>' : '') +
+          '<div class="row-actions">' +
+            (row.currentEtag ? '<button class="btn sm primary" data-sync-keep="' + esc(row.operationId) + '">Apply my saved change</button>' : '') +
+            '<button class="btn sm" data-sync-discard="' + esc(row.operationId) + '">Keep shared version / discard mine</button>' +
+          '</div>' : '') +
+        '</div></div>';
+    }).join('') : emptyState('Nothing waiting to sync',
+      'This device has no offline changes. Anything typed while the shop was out of reach is kept' +
+      ' here until the Mac answers again.'));
+  restoreFocus();
+}
+function expenseForm(expense, presetJob, jobs) {
+  const e = expense || {};
+  const list = jobs || [];
+  openModal(modalHeader(expense ? 'Edit this expense' : 'Money out',
+    'Costs that belong to a job make its profit honest.') +
+    '<form id="expenseForm" data-expense-id="' + (expense ? expense.id : '') + '"><div class="f-grid">' +
+    '<label class="field"><span>Amount *</span>' + moneyBox('amount', e.amount, '0.00', '', ' required data-autofocus') + '</label>' +
+    '<label class="field"><span>What it was</span><select name="category">' + S.boot.expense_categories.map((c) =>
+      '<option' + ((e.category || 'Other') === c ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>Paid to</span><input name="payee" maxlength="160" placeholder="supplier, landlord, driver…" value="' + esc(e.payee || '') + '"></label>' +
+    '<label class="field"><span>Method</span><select name="method">' + S.boot.methods.map((m) =>
+      '<option' + ((e.method || 'Cash') === m ? ' selected' : '') + '>' + esc(m) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>Date</span><input name="spent_on" type="date" value="' + esc(day10(e.spent_on || todayISO())) + '"></label>' +
+    '<label class="field"><span>Transaction ref</span><input name="reference" maxlength="80" placeholder="MoMo / bank id" value="' + esc(e.reference || '') + '"></label>' +
+    '<label class="field wide"><span>Which job was this for?</span><select name="job_id">' +
+    '<option value="">Shop overhead — not a specific job</option>' +
+    list.map((j) => '<option value="' + j.id + '"' + (String(e.job_id) === String(j.id) || (presetJob && String(presetJob) === String(j.id)) ? ' selected' : '') + '>' +
+      esc(j.ref) + ' · ' + esc(j.client) + ' · ' + esc(j.title) + '</option>').join('') + '</select></label>' +
+    '<label class="field wide"><span>Note</span><input name="note" maxlength="500" placeholder="what it bought" value="' + esc(e.note || '') + '"></label>' +
+    '</div><div class="err" id="expenseErr"></div><div class="modal-foot"><span class="spacer"></span>' +
+    '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
+    '<button class="btn primary">' + (expense ? 'Save changes' : 'Record it') + '</button></div></form>');
+}
+async function openLeadDrawer(id) {
+  let l;
+  try { l = await api('/api/leads/' + id); } catch (e) { return fail(e); }
+  $('#drawerBody').innerHTML =
+    '<div class="drawer-h"><div><div class="ref">enquiry · asked ' + fdatetime(l.created_at) + '</div>' +
+    '<h2>' + esc(l.name) + '</h2>' +
+    '<div style="margin-top:6px">' + stagePill(l.stage) + ' <span class="tag">' + esc(l.source) + '</span></div></div>' +
+    '<span class="spacer"></span><button class="iconbtn" data-action="close-drawer" aria-label="Close">✕</button></div>' +
+    '<div class="row-actions">' +
+    '<button class="btn primary" data-edit-lead="' + l.id + '">Edit enquiry</button>' +
+    (l.stage === 'Won' ? '' : '<button class="btn" data-convert-lead="' + l.id + '">Book it as a job</button>') +
+    (l.phone ? '<a class="btn" href="tel:' + esc(l.phone) + '">Call</a>' : '') +
+    (l.whatsapp ? '<a class="btn" href="https://wa.me/' + esc(String(l.whatsapp).replace(/[^0-9]/g, '')) + '" target="_blank" rel="noopener">WhatsApp</a>' : '') +
+    '<button class="btn ghost danger" data-del-lead="' + l.id + '" data-del-name="' + esc(l.name) + '">Delete</button></div>' +
+    '<div class="amounts">' +
+    '<div><span>Estimated value</span><b>' + money(l.value) + '</b></div>' +
+    '<div><span>Stage</span><b>' + esc(l.stage) + '</b></div>' +
+    '<div><span>Follow up</span><b>' + (l.follow_up ? fdate(l.follow_up) : 'not set') + '</b></div>' +
+    '</div>' +
+    '<div><div class="section-h">Move this enquiry to</div><div class="steps" style="margin-top:9px">' +
+    S.boot.lead_stages.map((s) => '<button class="step' + (s === l.stage ? ' on' : '') + '" data-lead-stage="' + esc(s) +
+      '" data-stage-lead="' + l.id + '">' + esc(s) + '</button>').join('') + '</div></div>' +
+    '<div class="kv-grid">' +
+    '<div><span>Phone</span><b>' + (l.phone ? '<a href="tel:' + esc(l.phone) + '">' + esc(l.phone) + '</a>' : '—') + '</b></div>' +
+    '<div><span>WhatsApp</span><b>' + esc(l.whatsapp || '—') + '</b></div>' +
+    '<div><span>Email</span><b>' + (l.email ? '<a href="mailto:' + esc(l.email) + '">' + esc(l.email) + '</a>' : '—') + '</b></div>' +
+    '<div><span>Interested in</span><b>' + esc(l.interest || '—') + '</b></div>' +
+    (l.client ? '<div><span>On the book as</span><b><a href="#/clients/' + l.client_id + '">' + esc(l.client) + '</a></b></div>' : '') +
+    (l.ref ? '<div><span> Became</span><b><a href="#/jobs/' + l.job_id + '">' + esc(l.ref) + ' · ' + esc(l.job_title) + '</a></b></div>' : '') +
+    '</div>' +
+    (l.note ? '<div><div class="section-h">Note</div><p style="margin:8px 0 0">' + esc(l.note) + '</p></div>' : '');
+  $('#drawer').hidden = false;
+  $('#drawerBody').scrollTop = 0;
+}
+function leadForm(lead) {
+  const l = lead || {};
+  const inDays = (n) => {
+    const d = new Date(Date.now() + n * 86400000);
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  };
+  openModal(modalHeader(lead ? 'Edit the enquiry' : 'Someone asked about printing',
+    'Write it down now, chase it later, turn a yes into a job.') +
+    '<form id="leadForm" data-lead-id="' + (lead ? lead.id : '') + '"><div class="f-grid">' +
+    '<label class="field wide"><span>Who asked *</span><input name="name" required maxlength="160" placeholder="Name or business" value="' + esc(l.name || '') + '"></label>' +
+    '<label class="field"><span>Phone</span><input name="phone" maxlength="40" placeholder="024…" value="' + esc(l.phone || '') + '"></label>' +
+    '<label class="field"><span>WhatsApp</span><input name="whatsapp" maxlength="40" value="' + esc(l.whatsapp || '') + '"></label>' +
+    '<label class="field"><span>Email</span><input name="email" type="email" maxlength="160" value="' + esc(l.email || '') + '"></label>' +
+    '<label class="field"><span>How they reached us</span><select name="source">' + S.boot.lead_sources.map((s) =>
+      '<option' + ((l.source || 'Walk-in') === s ? ' selected' : '') + '>' + esc(s) + '</option>').join('') + '</select></label>' +
+    '<label class="field wide"><span>What they want printed</span><input name="interest" maxlength="200" placeholder="e.g. 400 conference flyers and a roll-up" value="' + esc(l.interest || '') + '"></label>' +
+    '<label class="field"><span>Rough value of the work</span>' + moneyBox('value', l.value) + '</label>' +
+    '<label class="field"><span>Stage</span><select name="stage">' + S.boot.lead_stages.map((s) =>
+      '<option' + ((l.stage || 'Prospect') === s ? ' selected' : '') + '>' + esc(s) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>Chase again on</span><input name="follow_up" type="date" value="' + esc(day10(l.follow_up || (lead ? '' : inDays(3)))) + '"></label>' +
+    '<label class="field wide"><span>Note</span><textarea name="note" rows="2" placeholder="Budget, deadline, who referred them…">' + esc(l.note || '') + '</textarea></label>' +
+    '</div><div class="err" id="leadErr"></div><div class="modal-foot"><span class="spacer"></span>' +
+    '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
+    '<button class="btn primary">' + (lead ? 'Save changes' : 'Save enquiry') + '</button></div></form>');
+}
+/* WKWebView has no prompt(), so the details of the booked work are collected in a form. */
+function convertLeadForm(l) {
+  openModal(modalHeader('Turn this enquiry into work',
+    (l.client ? esc(l.name) + ' is already on the book as ' + esc(l.client) + '.'
+              : 'Adds ' + esc(l.name) + ' as a client, then books the job.')) +
+    '<form id="convertLeadForm" data-lead-id="' + l.id + '"><div class="f-grid">' +
+    '<label class="field wide"><span>What is being printed *</span><input name="title" required maxlength="200" value="' +
+      esc(l.interest || '') + '" placeholder="e.g. 400 conference flyers, A5 double sided"></label>' +
+    '<label class="field"><span>Service</span><select name="category">' + S.boot.categories.map((c) => '<option>' + esc(c) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>Quantity</span>' + qtyBox('quantity', 1) + '</label>' +
+    '<label class="field"><span>Unit</span><select name="unit">' + S.boot.units.map((u) => '<option>' + esc(u) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>Price each</span>' + moneyBox('unit_price', l.value) + '</label>' +
+    '<label class="field"><span>Ready by</span><input name="due_date" type="date" value=""></label>' +
+    '<label class="field"><span>Priority</span><select name="priority"><option>Normal</option><option>Urgent</option></select></label>' +
+    '</div>' +
+    '<div class="calc"><div class="line total"><span>Job total</span><b id="cvTotal">—</b></div></div>' +
+    '<div class="err" id="convertErr"></div><div class="modal-foot"><span class="spacer"></span>' +
+    '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
+    '<button class="btn primary">Book the job</button></div></form>');
+}
+
+/* ----------------------------------------------------------------- accounts */
+async function viewAccounts(r) {
+  const d = await api('/api/accounts?' + qs({ from: r.params.get('from'), to: r.params.get('to'), q: r.params.get('q'), method: r.params.get('method') }));
+  const t = d.totals;
+  topbar('Accounts & payments',
+    money(t.receivable) + ' to collect' + (t.overdue_value > 0 ? ' · ' + money(t.overdue_value) + ' on late jobs' : ''),
+    '', [{ label: '+ Receive payment', action: 'receive-payment', primary: true },
+         { label: '+ Record expense', action: 'new-expense' }]);
+  $('#topbar').insertAdjacentHTML('beforeend', filtersBar('accounts', [
+    { type: 'search', key: 'q', placeholder: 'Search payer, job ref or transaction id' },
+    { type: 'date', key: 'from', label: 'paid' }, { type: 'date', key: 'to', label: 'to' },
+    { type: 'select', key: 'method', options: [['', 'Any method']].concat(S.boot.methods.map((m) => [m, m])) },
+  ]));
+  /* A page can be newer than the shop's running server — copying public/ in needs no restart — and
+     an old server simply has no netting to report. So the two figures this screen sets against each
+     other are only claimed when the rows actually carry them; otherwise the headline is the pile of
+     job balances it always was, and no job may be called covered by money nobody applied to it. */
+  const netted = d.debtors.some((j) => typeof j.still_owed === 'number');
+  const owedOf = (j) => (typeof j.still_owed === 'number' ? j.still_owed : j.balance);
+  $('#view').innerHTML = '<div class="grid kpis">' +
+    stat('Owed on jobs', money(t.receivable),
+         netted ? 'job balances, less money kept on accounts' : 'job balances',
+         t.receivable > 0 ? 'amt warn' : 'amt') +
+    stat('Received (this filter)', money(d.ledger.total), pluralise(d.ledger.count, 'entry'), 'amt good') +
+    stat('Paid out this month', money(d.spent_total.this_month), money(d.spent_total.all_time) + ' all time', 'amt') +
+    stat('Credit on account', money((d.credit || []).reduce((a, c) => a + c.credit, 0)), 'money held, not applied to a job', 'amt') +
+    '</div>' +
+    cardTable('Outstanding — who owes what', '<button class="btn sm" data-action="receive-payment">Receive payment</button>',
+      d.debtors.length ? d.debtors.map((j) => '<tr data-open="jobs/' + j.id + '">' +
+        '<td><span class="strong">' + esc(j.title) + '</span>' + pendingTag(j) +
+        '<div class="ref">' + esc(j.ref) + ' · ' + esc(j.category) + '</div></td>' +
+        '<td>' + esc(j.client) + (j.phone ? '<div class="ref">' + esc(j.phone) + '</div>' : '') + '</td>' +
+        '<td>' + pill(j.status) + '</td><td>' + dueLabel(j) + '</td>' +
+        '<td class=num>' + money(j.total) + '</td><td class=num>' + money(j.paid) + '</td>' +
+        '<td class="num balance neg">' + money(j.balance) +
+        (j.covered_by_credit > 0 ? '<div class="ref">' + money(j.covered_by_credit) +
+          ' kept on the account</div>' : '') + '</td>' +
+        '<td class=num>' + (owedOf(j) > 0.005
+          ? '<button class="btn sm primary" data-pay-job="' + j.id + '" data-pay-name="' + esc(j.client) +
+            '" data-pay-amount="' + owedOf(j) + '">Get ' + compact(owedOf(j)) + '</button>'
+          : '<span class="pill quiet">Covered by account credit</span>') + '</td></tr>').join('')
+        : '<tr><td colspan="8" class="hint">No outstanding balances. Everything booked has been paid.</td></tr>',
+      ['Job', 'Client', 'Status', 'Due', 'Total', 'Paid', 'Balance', '']) +
+    cardTable('Paid in full — settled jobs', '',
+      d.settled.length ? d.settled.map((j) => '<tr data-open="jobs/' + j.id + '">' +
+        '<td><span class="strong">' + esc(j.title) + '</span><div class="ref">' + esc(j.ref) + ' · ' + esc(j.category) + '</div></td>' +
+        '<td>' + esc(j.client) + (j.phone ? '<div class="ref">' + esc(j.phone) + '</div>' : '') + '</td>' +
+        '<td>' + pill(j.status) + ' <span class="pill k-paid">Paid in full</span></td>' +
+        '<td class=num>' + money(j.total) + '</td><td class="num pos">' + money(j.paid) + '</td>' +
+        '<td class="ref">' + (j.settled_on ? fdate(j.settled_on) : '—') + '</td></tr>').join('')
+        : '<tr><td colspan="6" class="hint">Nothing has been cleared in full yet. Take the whole balance on a job and it lands here.</td></tr>',
+      ['Job', 'Client', 'Money', 'Billed', 'Collected', 'Cleared on']) +
+    cardTable('Payment ledger', '<button class="btn sm ghost" data-export="payments">Export CSV</button>',
+      d.ledger.rows.length ? d.ledger.rows.map((p) => '<tr>' +
+        '<td class="ref">' + fdate(p.paid_at) + '<div>' + day10(p.paid_at).slice(8) + '/' + day10(p.paid_at).slice(5, 7) + '</div></td>' +
+        '<td class="strong">' + esc(p.client) + pendingTag(p) + (p.ref ? '<div class="ref"><a href="#/jobs/' + p.job_id + '">' + esc(p.ref) + ' · ' + esc(p.title) + '</a></div>' : '<div class="ref">on account</div>') + '</td>' +
+        '<td>' + esc(p.kind) + '</td>' +
+        '<td class="num' + (p.kind === 'Refund' ? ' neg' : ' pos') + '">' + money(p.kind === 'Refund' ? -p.amount : p.amount) + '</td>' +
+        '<td>' + esc(p.method) + (p.reference ? '<div class="ref">' + esc(p.reference) + '</div>' : '') + '</td>' +
+        '<td class="num"><button class="btn sm ghost" data-del-payment="' + p.id + '" data-del-amount="' + p.amount + '">Remove</button></td></tr>').join('')
+        : '<tr><td colspan="6" class="hint">No payments in this window.</td></tr>',
+      ['Date', 'Client / job', 'Type', 'Amount', 'Method', '']);
+  $('#view').insertAdjacentHTML('beforeend', '<div class="grid cols-3">' +
+    cardTable('In and out, month by month', '<a href="#/expenses" class="btn sm ghost">Expenses</a>',
+      d.spent.length ? d.spent.map((m) => '<tr><td class="ref">' + monthName(m.month + '-01') + '</td>' +
+        '<td class="num pos">' + money(m.income) + '</td><td class="num neg">' + money(m.spent) + '</td>' +
+        '<td class="num' + (m.net < 0 ? ' neg' : ' pos') + '">' + money(m.net) + '</td></tr>').join('')
+        : '<tr><td colspan="4" class="hint">No money has moved yet.</td></tr>',
+      ['Month', 'In', 'Out', 'Net']) +
+    (d.credit.length ? cardTable('Clients with credit on account', '',
+      d.credit.map((c) => '<tr data-open="clients/' + c.id + '"><td class="strong">' + esc(c.name) + pendingTag(c) + '</td>' +
+        '<td class="num pos">' + money(c.credit) + '</td></tr>').join(''), ['Client', 'Credit']) : '') +
+    '</div>');
+  restoreFocus();
+}
+
+/* ------------------------------------------------------------------ reports */
+async function viewReports(r) {
+  const p = r.params;
+  const from = p.get('from') || todayISO().slice(0, 8) + '01';
+  const to = p.get('to') || todayISO();
+  const period = p.get('period') || 'day';
+  const d = await api('/api/report?from=' + from + '&to=' + to + '&period=' + period);
+  const t = d.totals;
+  topbar('Reports', esc(from) + ' to ' + esc(to));
+  $('#topbar').insertAdjacentHTML('beforeend', filtersBar('reports', [
+    { type: 'date', key: 'from', label: 'from', def: from }, { type: 'date', key: 'to', label: 'to', def: to },
+    { type: 'tabs', key: 'period', def: 'day', options: [{ v: 'day', label: 'Daily' }, { v: 'week', label: 'Weekly' }, { v: 'month', label: 'Monthly' }] },
+  ]));
+  const maxB = Math.max.apply(null, d.buckets.map((b) => b.billed).concat([1]));
+  const maxSpend = Math.max.apply(null, d.spend_by_category.map((c) => c.amount).concat([1]));
+  const dueTotal = d.buckets.reduce((a, b) => a + b.still_due, 0);
+  $('#view').innerHTML = '<div class="grid kpis">' +
+    stat('Billed', money(t.billed), pluralise(t.jobs, 'job') + ' booked' + (t.quotes ? ' · ' + t.quotes + ' quoted' : ''), 'amt') +
+    stat('What it cost us', money(t.cost), 'item costs plus costs booked on jobs', 'amt') +
+    /* The counter asked for the figure off this card (2026-10-13): costs are typed in by hand on the
+       shop's own jobs, so the number the card used to shout was one he does not accept. The card stays
+       and so does every Profit column below it — this one just stops stating a total. */
+    stat('Profit on jobs', '—', 'not shown here — see the Profit columns below') +
+    stat('Paid out', money(t.spent), 'everything that left the shop', 'amt') +
+    '</div>' +
+    '<div class="grid kpis">' +
+    stat('Collected', money(t.collected), 'cash received in the range', 'amt good') +
+    stat('Still owed', money(dueTotal), 'from these jobs', 'amt warn') +
+    stat('Delivered', t.delivered, 'jobs closed out') +
+    stat('Margin', t.billed > 0 ? Math.round((t.profit / t.billed) * 100) + '%' : '—', 'profit divided by billing') +
+    '</div>' +
+    '<div class="card"><h3>Billed per ' + esc(period) + '<span class="spacer"></span>' +
+    '<button class="btn sm ghost" data-export="jobs">Jobs CSV</button>' +
+    '<button class="btn sm ghost" data-export="items">Item lines CSV</button>' +
+    '<button class="btn sm ghost" data-export="expenses">Expenses CSV</button>' +
+    '<button class="btn sm ghost" data-export="accounts">Debtors CSV</button>' +
+    '<button class="btn sm ghost" data-export="payments">Payments CSV</button></h3>' +
+    '<div class="card-b">' + (d.buckets.length ? '<div class="bars">' + d.buckets.map((b) =>
+      '<div class="bar' + (b.billed > 0 ? '' : ' zero') + '" title="' + esc(b.bucket) + ' — billed ' + esc(money(b.billed)) +
+      ', profit ' + esc(money(b.profit)) + ', collected ' + esc(money(b.collected)) + '"><u>' + (b.billed > 0 ? compact(b.billed) : '') + '</u>' +
+      '<i style="height:' + Math.max(Math.round((b.billed / maxB) * 100), 2) + '%"></i><s>' + esc(bucketLabel(b.bucket, period)) +
+      '</s></div>').join('') + '</div>' +
+      '<div class="legend"><span><i style="background:var(--brand)"></i>billed</span>' +
+      '<span>' + d.buckets.length + ' ' + esc(period) + (d.buckets.length === 1 ? ' bucket' : ' buckets') + '</span></div>'
+      : '<p class="hint">No jobs were booked in this range.</p>') + '</div></div>' +
+    cardTable('Billed, costed and collected per ' + period, '',
+      d.buckets.length ? d.buckets.map((b) => '<tr><td class="ref">' + esc(bucketLabel(b.bucket, period)) + '</td>' +
+        '<td class="num">' + b.jobs + '</td><td class="num">' + money(b.billed) + '</td>' +
+        '<td class="num">' + money(b.cost) + '</td>' +
+        '<td class="num' + (b.profit < 0 ? ' neg' : ' pos') + '">' + money(b.profit) + '</td>' +
+        '<td class="num">' + money(b.collected) + '</td>' +
+        '<td class="num' + (b.still_due > 0.005 ? ' neg' : '') + '">' + money(b.still_due) + '</td></tr>').join('')
+        : '<tr><td colspan="7" class="hint">Nothing booked in this range.</td></tr>',
+      ['Period', 'Jobs', 'Billed', 'Cost', 'Profit', 'Collected', 'Owed']) +
+    '<div class="grid cols-3">' +
+    cardTable('By service', '', d.by_category.length ? d.by_category.map((c) => '<tr><td>' + esc(c.category) + '</td>' +
+      '<td class="num">' + c.jobs + '</td><td class="num">' + money(c.billed) + '</td><td class="num' +
+      (c.profit < 0 ? ' neg' : ' pos') + '">' + money(c.profit) + '</td><td class="num' + (c.due > 0 ? ' neg' : '') + '">' +
+      money(c.due) + '</td></tr>').join('') : '<tr><td colspan="5" class="hint">Nothing booked.</td></tr>',
+      ['Service', 'Jobs', 'Billed', 'Profit', 'Owed']) +
+    cardTable('How people pay', '', d.methods.length ? d.methods.map((m) => '<tr><td>' + esc(m.method) + '</td>' +
+      '<td class="num">' + m.n + '</td><td class="num">' + money(m.amount) + '</td></tr>').join('')
+      : '<tr><td colspan="3" class="hint">No payments in this range.</td></tr>', ['Method', 'Entries', 'Amount']) +
+    '<div class="card"><h3>Where the money went</h3><div class="card-b mix">' +
+    (d.spend_by_category.length ? d.spend_by_category.map((c) => '<div class="row"><span>' + esc(c.category) + '</span><b>' +
+      compact(c.amount) + ' · ' + c.lines + '</b><div class="track"><i class="out" style="width:' +
+      Math.round((c.amount / maxSpend) * 100) + '%"></i></div></div>').join('')
+      : '<p class="hint">No expenses in this range, so nothing has been subtracted from profit but the item costs.</p>') +
+    '</div></div>' +
+    '</div>' +
+    cardTable('Best paying work', '<button class="btn sm ghost" data-export="clients">Clients CSV</button>',
+      d.top_jobs.length ? d.top_jobs.map((j) => '<tr data-open="jobs/' + j.id + '"><td class="strong">' + esc(j.title) +
+        '<div class="ref">' + esc(j.ref) + ' · ' + esc(j.client) + '</div></td>' +
+        '<td>' + esc(j.category) + '</td><td class="num">' + money(j.total) + '</td><td class="num">' + money(j.cost) +
+        '</td><td class="num' + (j.profit < 0 ? ' neg' : ' pos') + '">' + money(j.profit) + '</td>' +
+        '<td>' + pill(j.status) + '</td></tr>').join('')
+        : '<tr><td colspan="6" class="hint">No jobs in this range.</td></tr>',
+      ['Job', 'Service', 'Billed', 'Cost', 'Profit', 'Status']) +
+    cardTable('Top clients by billing', '',
+      d.top_clients.length ? d.top_clients.map((c) => '<tr data-open="clients/' + c.id + '"><td class="strong">' + esc(c.name) +
+        '</td><td class="num">' + c.jobs + '</td><td class="num">' + money(c.billed) + '</td><td class="num">' + money(c.paid) +
+        '</td><td class="num' + (c.profit < 0 ? ' neg' : ' pos') + '">' + money(c.profit) +
+        '</td><td class="num' + (c.due > 0.005 ? ' balance neg' : '') + '">' + money(c.due) + '</td></tr>').join('')
+        : '<tr><td colspan="6" class="hint">No jobs in this range.</td></tr>',
+        ['Client', 'Jobs', 'Billed', 'Paid', 'Profit', 'Owed']);
+  restoreFocus();
+}
+function bucketLabel(bucket, period) {
+  if (period === 'month') { const ym = bucket.split('-'); return MON[Number(ym[1]) - 1] + ' ' + ym[0].slice(2); }
+  if (period === 'week') return 'wk' + bucket.split('-')[1];
+  return bucket.slice(8) + '/' + bucket.slice(5, 7);
+}
+
+/* ------------------------------------------------------------------ drawers */
+function closeDrawer() {
+  if (notifyTick) { clearInterval(notifyTick); notifyTick = null; }
+  $('#drawer').hidden = true;
+  $('#drawerBody').innerHTML = '';
+  if (S.route && S.route.id) {
+    history.replaceState(null, '', '#/' + S.route.view + (S.route.params.toString() ? '?' + S.route.params.toString() : ''));
+  }
+}
+/* ------------------------------------------------------------------ client messages */
+function openExternal(url) {
+  const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.external;
+  if (handler) {
+    try { handler.postMessage(url); return true; } catch (e) { /* falls through to the tab path */ }
+  }
+  if (/^mailto:/i.test(url)) { window.location.href = url; return true; }
+  return !!window.open(url, '_blank', 'noopener');
+}
+
+function notifyCard(job, n) {
+  S.notify.byId = {};
+  S.notify.client = n.client;
+  n.messages.forEach((m) => { S.notify.byId[m.id] = m; });
+  /* An automatic message with no provider set up would sit queued and give the shop no way to
+     actually tell the client, so on those channels the handoff buttons stay available. */
+  const blocked = {};
+  (n.blocked || []).forEach((b) => { blocked[b.channel] = b.reason; });
+  const newest = n.messages.reduce((a, b) => (b.state === 'Queued' && b.id > a ? b.id : a), 0);
+  const rows = n.messages.map((m) => {
+    const waiting = m.state === 'Queued';
+    const automatic = !!m.auto_send;
+    const label = automatic
+      ? (m.delivery_state === 'Sent' ? (m.provider_id ? 'Sent automatically' : 'Sent by the shop')
+        : m.delivery_state === 'Sending' ? 'Sending automatically'
+          : m.delivery_state === 'Failed' ? 'Delivery failed'
+            : m.delivery_state === 'Cancelled' ? 'Cancelled'
+              : 'Automatic · queued')
+      : m.state;
+    const details = automatic
+      ? (m.delivery_error ? '<p class="bad delivery-error">' + esc(m.delivery_error) + '</p>'
+        : m.delivery_state === 'Pending' && m.delivery_attempts
+          ? '<p class="hint delivery-error">Retry scheduled after attempt ' + m.delivery_attempts + '.</p>'
+          : m.delivery_state === 'Cancelled'
+            ? '<p class="hint delivery-error">The client withdrew permission; this message was not sent.</p>'
+            : m.delivery_state === 'Sent' && !m.provider_id
+              ? '<p class="hint">Carried by the shop and closed here by hand.</p>'
+              : '<p class="hint">Sent by the shop server when the provider is available.</p>')
+      : '';
+    const verb = m.channel === 'WhatsApp' ? 'Open in WhatsApp' : 'Open in Mail';
+    /* A client who withdrew permission is not to be written to, buttons or otherwise. */
+    const aside = m.delivery_state !== 'Cancelled';
+    const handoff = aside && (!automatic || !!blocked[m.channel]);
+    return '<details class="msg' + (waiting ? ' waiting' : '') + '"' + (m.id === newest ? ' open' : '') + '>' +
+      '<summary><span class="pill n-' + esc(automatic ? m.delivery_state : m.state) + '">' + esc(label) + '</span>' +
+      '<b>' + esc(m.event) + '</b><span class="m-chan">' + esc(m.channel) + ' &middot; ' + esc(m.to_address) + '</span>' +
+      '<span class="spacer"></span><time>' + fdatetime(m.updated_at) + '</time></summary>' +
+      '<p class="m-body">' + esc(m.body) + '</p>' +
+      details +
+      '<div class="m-act">' +
+      (automatic && m.delivery_state === 'Failed'
+        ? '<button class="btn sm primary" data-notify-retry="' + m.id + '">Retry now</button>' : '') +
+      (handoff
+        ? '<button class="btn sm' + (m.channel === 'WhatsApp' && handoff ? ' primary' : '') +
+          '" data-notify-open="' + m.id + '">' + verb + '</button>' +
+          '<button class="btn sm ghost" data-notify-copy="' + m.id + '">Copy</button>' +
+          (m.state === 'Sent'
+            ? '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Queued">Back to queued</button>'
+            : '<button class="btn sm ghost" data-notify-state="' + m.id + '" data-notify-to="Sent">Mark as sent</button>')
+        : '') +
+      '<span class="spacer"></span>' +
+      '<button class="btn sm ghost danger" data-notify-del="' + m.id + '">Remove</button>' +
+      '</div></details>';
+  }).join('');
+  const again = '<div class="chips">' + n.events.map((e) =>
+    '<button class="btn sm ghost" data-notify-queue="' + job.id + '" data-notify-event="' + esc(e) + '">' +
+    esc(e) + '</button>').join('') + '</div>';
+  const canSend = n.whatsapp_to || n.email_to;
+  return '<div class="section-h">Tell the client' +
+    (n.to_send ? ' <span class="pill n-Queued">' + pluralise(n.to_send, 'message') + ' to send</span>' : '') +
+    '</div><p class="hint" style="margin:8px 0 0">Pending, Printing, Ready and Delivered updates go out ' +
+    'automatically on the channels the client agreed to. Other messages can still be opened as drafts ' +
+    'for staff to send.</p>' +
+    (rows ? '<div class="msgs">' + rows + '</div>' : '<p class="hint" style="margin-top:8px">Nothing has been written for this job yet.</p>') +
+    (canSend
+      ? '<div class="section-h sub">Write it again, or send a stage you skipped</div>' + again
+      : '<p class="bad" style="margin:10px 0 0">There is no WhatsApp number or email on file for ' +
+        esc(n.client) + ', so there is nothing to send. ' +
+        '<a href="#/clients/' + job.client_id + '">Add their contact details</a> and this fills itself in.</p>') +
+    (n.not_consented && n.not_consented.length
+      ? '<p class="hint" style="margin-top:8px">Automatic updates were skipped on ' +
+        n.not_consented.map(esc).join(' and ') +
+        ' because permission is not recorded. Edit the client record to record consent.</p>'
+      : '') +
+    (n.blocked && n.blocked.length
+      ? '<p class="sig-note" style="margin-top:8px">' + n.blocked.map((b) =>
+          esc(b.channel) + ' is queued and waiting, but cannot leave this Mac on its own: ' +
+          esc(b.reason)).join(' ') +
+        ' Until that is set up, press ' + (n.blocked[0].channel === 'WhatsApp' ? 'WhatsApp' : 'Email') +
+        ' above — the message opens ready to send, and Mark as sent closes it here.</p>'
+      : '') +
+    (n.missing.length && canSend
+      ? '<p class="hint" style="margin-top:8px">' + n.missing.map((c) =>
+          'No ' + c.toLowerCase() + ' on file for ' + esc(n.client) + '.').join(' ') + '</p>'
+      : '');
+}
+
+function paintNotify(id) {
+  const box = document.getElementById('notifyCard');
+  if (!box) return Promise.resolve();
+  return api('/api/jobs/' + id + '/notifications')
+    .then((n) => {
+      box.innerHTML = notifyCard(S.notify.job || { id: id, client_id: 0 }, n);
+      S.notify.signature = notificationSignature(n);
+      return refreshChrome();
+    })
+    .catch((e) => { fail(e); });
+}
+
+function notificationSignature(n) {
+  return (n.messages || []).map((m) =>
+    [m.id, m.state, m.delivery_state, m.delivery_attempts, m.delivery_error, m.updated_at].join(':')
+  ).join('|');
+}
+function watchNotificationDelivery() {
+  if (notifyTick) clearInterval(notifyTick);
+  notifyTick = setInterval(async () => {
+    if ($('#drawer').hidden || !S.notify.job) {
+      clearInterval(notifyTick); notifyTick = null; return;
+    }
+    if (notifyPollBusy) return;
+    notifyPollBusy = true;
+    try {
+      const job = S.notify.job;
+      const n = await api('/api/jobs/' + job.id + '/notifications');
+      const signature = notificationSignature(n);
+      if (signature !== S.notify.signature) {
+        const box = document.getElementById('notifyCard');
+        if (box) box.innerHTML = notifyCard(job, n);
+        S.notify.signature = signature;
+        await refreshChrome();
+      }
+    } catch (error) {
+      clearInterval(notifyTick); notifyTick = null; fail(error);
+    } finally {
+      notifyPollBusy = false;
+    }
+  }, 10000);
+}
+
+async function openJobDrawer(id) {
+  let job, notes;
+  try {
+    const both = await Promise.all([api('/api/jobs/' + id), api('/api/jobs/' + id + '/notifications')]);
+    job = both[0];
+    notes = both[1];
+  } catch (e) { return fail(e); }
+  S.notify.job = { id: job.id, client_id: job.client_id };
+  S.notify.signature = notificationSignature(notes);
+  const isQuote = job.kind === 'Quote';
+  const paid = job.balance <= 0.005;
+  const settled = isSettled(job);
+  const items = job.items || [];
+  // Spoilage rides on the job's expense rows for the record, but it is not a cost of the job,
+  // so it never appears in this list and never touches `spent`.
+  const expenses = (job.expenses || []).filter((e) => !e.is_spoilage);
+  const spent = expenses.reduce((a, e) => a + e.amount, 0);
+  const spoiled = job.spoilage || [];
+  const spoilCost = spoiled.reduce((a, s) => a + Number(s.amount || 0), 0);
+  $('#drawerBody').innerHTML =
+    '<div class="drawer-h"><div><div class="ref">' + esc(job.ref) + ' · ' + (isQuote ? 'quoted' : 'booked') + ' ' + fdatetime(job.created_at) + '</div>' +
+    '<h2>' + esc(job.title) + '</h2>' + pendingTag(job) +
+    '<div style="margin-top:6px">' + pill(job.status) + prio(job.priority) +
+    (settled ? ' <span class="pill k-paid">Paid in full</span>' : '') +
+    (isQuote ? ' <span class="pill k-Quote">Quote</span>' : '') +
+    ' <span class="tag">' + esc(job.category) + '</span>' +
+    (items.length ? ' <span class="tag">' + items.length + ' item lines</span>' : '') + '</div></div>' +
+    '<span class="spacer"></span><button class="iconbtn" data-action="close-drawer" aria-label="Close">✕</button></div>' +
+    '<div class="row-actions">' +
+    '<button class="btn primary" data-edit-job="' + job.id + '">Edit ' + (isQuote ? 'quote' : 'job') + '</button>' +
+    (isQuote ? '<button class="btn" data-convert-job="' + job.id + '">Book it as a job</button>'
+             : '<button class="btn" data-pay-job="' + job.id + '" data-pay-name="' + esc(job.client) + '"' +
+               (paid ? '' : ' data-pay-amount="' + job.balance + '"') + '>' +
+               (paid ? 'Take money on this job' : 'Receive payment') + '</button>') +
+    /* This shop runs on re-orders — the same cards, the same client, every few weeks — and the only way
+       to start one used to be typing the whole order again. One press carries the client, the lines and
+       the prices across and leaves the date, the money and the status for him to set. */
+    (isQuote ? '' : '<button class="btn" data-reorder-job="' + job.id + '">Same order again</button>') +
+    '<a class="btn" href="/print/' + job.id + '" target="_blank" rel="noopener">' + (isQuote ? 'Print estimate' : 'Job sheet') + '</a>' +
+    (isQuote ? '' : '<button class="btn" data-job-expense="' + job.id + '">Record a cost</button>') +
+    '<button class="btn ghost danger" data-del-job="' + job.id + '" data-del-name="' + esc(job.ref) + '">Delete</button></div>' +
+    '<div class="amounts">' +
+    (isQuote
+      ? '<div><span>Quoted total</span><b>' + money(job.total) + '</b></div>' +
+        '<div><span>What it costs us</span><b>' + money(job.cost) + '</b></div>' +
+        '<div><span>Margin if accepted</span><b class="' + (job.profit < 0 ? 'neg' : 'pos') + '">' + money(job.profit) + '</b></div>'
+      : '<div><span>Total</span><b>' + money(job.total) + '</b></div>' +
+        '<div><span>Paid</span><b class="pos">' + money(job.paid) + '</b></div>' +
+        '<div><span>' + (job.balance < -0.005 ? 'Credit' : 'Balance due') + '</span><b class="' + (job.balance > 0.005 ? 'neg' : 'pos') + '">' + money(job.balance) + '</b></div>') +
+    '</div>' +
+    (isQuote ? '' :
+      '<div class="amounts second"><div><span>Cost of this job</span><b>' + money(job.cost) + '</b></div>' +
+      '<div><span>Profit on this job</span><b class="' + (job.profit < 0 ? 'neg' : 'pos') + '">' + money(job.profit) + '</b></div>' +
+      '<div><span>Margin</span><b' + (job.cost > 0 ? '' : ' class="muted" title="Nothing has been costed on this job yet"') + '>' +
+        (job.cost <= 0 ? 'not costed' : job.total > 0 ? Math.round((job.profit / job.total) * 100) + '%' : '—') + '</b></div></div>') +
+    (settled ? '<p class="hint">Nothing is owed on this job' +
+      (job.last_paid ? ' — cleared by the payment of ' + fdate(job.last_paid) + '. Any money taken from here on sits as credit on their account.' : '.') +
+      '</p>' : '') +
+    '<div><div class="section-h">Move this ' + (isQuote ? 'quote' : 'job') + ' to</div><div class="steps" style="margin-top:9px">' +
+    S.boot.statuses.map((s) => '<button class="step' + (s === job.status ? ' on' : '') + '" data-status="' + esc(s) +
+      '" data-status-job="' + job.id + '">' + esc(s) + '</button>').join('') + '</div></div>' +
+    '<div class="notify" id="notifyCard">' + notifyCard(job, notes) + '</div>' +
+    '<div class="kv-grid">' +
+    '<div><span>Client</span><b><a href="#/clients/' + job.client_id + '">' + esc(job.client) + '</a></b></div>' +
+    '<div><span>Phone</span><b>' + (job.client_phone ? '<a href="tel:' + esc(job.client_phone) + '">' + esc(job.client_phone) + '</a>' : '—') + '</b></div>' +
+    '<div><span>WhatsApp</span><b>' + esc(job.client_whatsapp || '—') + '</b></div>' +
+    (isQuote ? '<div><span>Price holds until</span><b>' + (job.valid_until ? esc(fdate(job.valid_until)) : 'not set') + '</b></div>'
+             : '<div><span>Due</span><b>' + (job.due_date ? esc(fdate(job.due_date)) : 'not set') + '</b></div>') +
+    (isQuote && job.converted_at ? '<div><span>Booked as a job</span><b>' + fdatetime(job.converted_at) + '</b></div>' : '') +
+    (items.length ? '' : '<div><span>Quantity</span><b>' + job.quantity + ' ' + esc(job.unit) + ' @ ' + money(job.unit_price) + '</b></div>') +
+    '<div><span>Specification</span><b>' + esc(job.size || '—') + '</b></div>' +
+    (job.extras ? '<div><span>Materials / finishing</span><b>' + money(job.extras) + '</b></div>' : '') +
+    (job.discount ? '<div><span>Discount</span><b>' + money(job.discount) + '</b></div>' : '') +
+    '</div>' +
+    (job.description ? '<div><div class="section-h">Brief</div><p style="margin:8px 0 0">' + esc(job.description) + '</p></div>' : '') +
+    '<div><div class="section-h">' + (items.length ? 'What is on this order' : 'Priced as one line') + '</div>' +
+    (items.length ? '<div class="tablewrap"><table><thead><tr><th>Item</th><th class=num>Qty</th><th class=num>Unit</th>' +
+      (isQuote ? '' : '<th class=num>Cost</th>') + '<th class=num>Amount</th></tr></thead><tbody>' +
+      items.map((it) => '<tr><td><span class="strong">' + esc(it.title) + '</span>' +
+        (it.size ? '<div class="ref">' + esc(it.size) + '</div>' : '') + '</td>' +
+        '<td class=num>' + it.quantity + ' ' + esc(it.unit) + '</td>' +
+        '<td class=num>' + money(it.unit_price) + '</td>' +
+        (isQuote ? '' : '<td class="num' + (it.unit_cost > 0 ? '' : ' hint') + '">' + (it.unit_cost > 0 ? money(it.line_cost) : '—') + '</td>') +
+        '<td class=num>' + money(it.line_total) + '</td></tr>').join('') +
+      '</tbody></table></div>'
+      : '<p class="hint" style="margin-top:8px">One line for the whole order — ' + job.quantity + ' ' + esc(job.unit) +
+        ' at ' + money(job.unit_price) + '. Edit the job to split it into separate products.</p>') + '</div>' +
+    (isQuote ? '' :
+      '<div><div class="section-h">Costs booked against this job</div>' +
+      (expenses.length ? '<div class="tablewrap"><table><thead><tr><th>Date</th><th>Category</th><th>Paid to</th><th class=num>Amount</th><th></th></tr></thead><tbody>' +
+        expenses.map((e) => '<tr><td class="ref">' + fdate(e.spent_on) + '</td><td>' + esc(e.category) + '</td>' +
+          '<td>' + esc(e.payee || '—') + (e.reference ? '<div class="ref">' + esc(e.reference) + '</div>' : '') + '</td>' +
+          '<td class="num neg">' + money(e.amount) + '</td>' +
+          '<td class=num><button class="btn sm ghost" data-del-expense="' + e.id + '" data-del-amount="' + e.amount + '">Remove</button></td></tr>').join('') +
+        '</tbody></table></div>'
+        : '<p class="hint" style="margin-top:8px">No costs recorded against this job, so profit is only reduced by what the item lines cost.</p>') +
+      '<p class="hint" style="margin-top:6px">' + money(spent) + ' paid out on ' + expenses.length + ' entr' + (expenses.length === 1 ? 'y' : 'ies') + '.</p></div>') +
+    (isQuote ? '' :
+      '<div><div class="section-h">Spoiled on this job</div>' +
+      '<div style="margin:9px 0 8px"><button class="btn sm" data-new-spoilage="' + job.id + '">+ Log spoiled work</button></div>' +
+      (spoiled.length ? '<div class="tablewrap"><table><thead><tr><th>Date</th><th class=num>Qty</th><th>Reason</th><th class=num>Cost</th><th></th></tr></thead><tbody>' +
+        spoiled.map((s) => '<tr><td class="ref">' + fdate(s.spoiled_on) + '</td>' +
+          '<td class=num>' + Number(s.quantity).toLocaleString('en-US') + '</td>' +
+          '<td>' + esc(s.reason) + '</td><td class="num neg">' + money(s.amount) + '</td>' +
+          '<td class=num><button class="btn sm ghost" data-edit-spoilage="' + s.id + '">Edit</button></td></tr>').join('') +
+        '</tbody></table></div>' +
+        '<p class="hint" style="margin-top:6px">' + money(spoilCost) + ' of waste on ' + pluralise(spoiled.length, 'record') +
+        ', kept out of this job’s cost — the shop carries it.</p>'
+        : '<p class="hint" style="margin-top:8px">Nothing spoiled on this job yet. Log it here when a batch goes wrong — the record stays with the job, the cost stays with the shop.</p>') + '</div>') +
+    '<div><div class="section-h">Payments on this job</div>' +
+    (job.payments.length ? '<div class="tablewrap"><table><thead><tr><th>Date</th><th>Type</th><th>Method</th><th class=num>Amount</th><th></th></tr></thead><tbody>' +
+      job.payments.map((p) => '<tr><td class="ref">' + fdate(p.paid_at) + '</td><td>' + esc(p.kind) + '</td><td>' + esc(p.method) +
+        (p.reference ? '<div class="ref">' + esc(p.reference) + '</div>' : '') + '</td>' +
+        '<td class="num' + (p.kind === 'Refund' ? ' neg' : ' pos') + '">' + money(p.kind === 'Refund' ? -p.amount : p.amount) + '</td>' +
+        '<td class=num><button class="btn sm ghost" data-del-payment="' + p.id + '" data-del-amount="' + p.amount + '">Remove</button></td></tr>').join('') +
+      '</tbody></table></div>' : '<p class="hint" style="margin-top:8px">' + (isQuote ? 'Quotes do not take money — book it as a job first.' : 'Nothing received yet.') + '</p>') + '</div>' +
+    '<div><div class="section-h">Record of this ' + (isQuote ? 'quote' : 'job') + '</div>' +
+    '<div style="margin-top:10px"><ul class="timeline">' +
+    job.events.map((e) => '<li class="' + (e.type === 'payment' ? 'pay' : e.type === 'note' ? 'note' : '') + '"><i></i><div>' +
+      '<p>' + esc(e.detail) + '</p><time>' + fdatetime(e.created_at) + '</time></div></li>').join('') + '</ul></div>' +
+    '<form data-note-form="' + job.id + '" style="grid-template-columns:1fr auto;align-items:end">' +
+    '<label class="field"><span>Add a note to the record</span><input name="note" placeholder="e.g. client approved the proof on WhatsApp" required></label>' +
+    '<button class="btn">Save note</button></form></div>';
+  $('#drawer').hidden = false;
+  $('#drawerBody').scrollTop = 0;
+  watchNotificationDelivery();
+}
+async function openClientDrawer(id) {
+  if (notifyTick) { clearInterval(notifyTick); notifyTick = null; }
+  let c;
+  try { c = await api('/api/clients/' + id); } catch (e) { return fail(e); }
+  const openJobs = c.jobs.filter((j) => j.kind !== 'Quote' &&
+    ['Pending', 'Printing', 'Ready'].indexOf(j.status) >= 0).length;
+  $('#drawerBody').innerHTML =
+    '<div class="drawer-h"><div><div class="ref">' + esc(c.kind) + (c.archived ? ' · archived' : '') + ' · client since ' + fdate(c.created_at) + '</div>' +
+    '<h2>' + esc(c.name) + '</h2></div><span class="spacer"></span>' +
+    '<button class="iconbtn" data-action="close-drawer" aria-label="Close">✕</button></div>' +
+    '<div class="row-actions">' +
+    '<button class="btn primary" data-new-job-for="' + c.id + '">New job for ' + esc(c.name.split(' ')[0]) + '</button>' +
+    '<button class="btn" data-pay-client="' + c.id + '" data-pay-name="' + esc(c.name) + '">Receive payment</button>' +
+    '<button class="btn" data-edit-client="' + c.id + '">Edit details</button>' +
+    '<button class="btn ghost danger" data-archive-client="' + c.id + '" data-archived="' + c.archived + '">' +
+    (c.archived ? 'Restore' : 'Archive') + '</button></div>' +
+    '<div class="amounts">' +
+    '<div><span>Total billed</span><b>' + money(c.billed) + '</b></div>' +
+    '<div><span>Total received</span><b class="pos">' + money(c.received) + '</b></div>' +
+    '<div><span>' + (c.balance_due < -0.005 ? 'Credit held' : 'Balance due') + '</span><b class="' + (c.balance_due > 0.005 ? 'neg' : 'pos') + '">' + money(c.balance_due) + '</b></div>' +
+    '</div>' +
+    '<div class="kv-grid">' +
+    '<div><span>Phone</span><b>' + (c.phone ? '<a href="tel:' + esc(c.phone) + '">' + esc(c.phone) + '</a>' : '—') + '</b></div>' +
+    '<div><span>WhatsApp</span><b>' + esc(c.whatsapp || '—') + '</b></div>' +
+    '<div><span>Email</span><b>' + (c.email ? '<a href="mailto:' + esc(c.email) + '">' + esc(c.email) + '</a>' : '—') + '</b></div>' +
+    '<div><span>WhatsApp updates</span><b>' + (c.whatsapp_updates ? 'Agreed' : 'Not opted in') + '</b></div>' +
+    '<div><span>Email updates</span><b>' + (c.email_updates ? 'Agreed' : 'Not opted in') + '</b></div>' +
+    '<div><span>Address</span><b>' + esc(c.address || '—') + '</b></div>' +
+    '<div><span>Open jobs</span><b>' + openJobs + ' of ' + c.jobs.filter((j) => j.kind !== 'Quote').length + '</b></div>' +
+    (c.open_quotes ? '<div><span>Quotes waiting</span><b>' + c.open_quotes + '</b></div>' : '') +
+    '</div>' +
+    (c.notes ? '<div><div class="section-h">Notes</div><p style="margin:8px 0 0">' + esc(c.notes) + '</p></div>' : '') +
+    '<div><div class="section-h">Everything we have printed for them</div>' +
+    (c.jobs.length ? '<div class="tablewrap"><table><thead><tr><th>Ref</th><th>Job</th><th class=num>Total</th><th class=num>Owes</th><th>Status</th><th>' + (c.open_quotes ? 'Due / validity' : 'Due') + '</th></tr></thead><tbody>' +
+      c.jobs.map((j) => {
+        const quote = j.kind === 'Quote';
+        return '<tr data-open="jobs/' + j.id + '"><td class="ref">' + esc(j.ref) + '</td><td><span class="strong">' + esc(j.title) + '</span>' +
+        prio(j.priority) + (quote ? ' <span class="pill k-Quote">Quote</span>' : '') +
+        '<div class="ref">' + esc(j.category) + ' · ' + fdate(j.created_at) +
+        (j.item_count ? ' · ' + j.item_count + ' lines' : '') + '</div></td>' +
+        '<td class=num>' + money(j.total) + '</td>' +
+        (quote ? '<td class="num hint">not billed</td>'
+               : '<td class="num' + (j.balance > 0.005 ? ' balance neg' : ' pos') + '">' + money(j.balance) + '</td>') +
+        '<td>' + pill(j.status) + '</td><td>' + dateLabel(j) + '</td></tr>';
+      }).join('') + '</tbody></table></div>'
+        : '<p class="hint" style="margin-top:8px">No jobs booked yet.</p>') + '</div>' +
+    '<div><div class="section-h">Payment history</div>' +
+    (c.payments.length ? '<div class="tablewrap"><table><thead><tr><th>Date</th><th>For</th><th>Type</th><th class=num>Amount</th><th>Method</th></tr></thead><tbody>' +
+      c.payments.map((p) => '<tr><td class="ref">' + fdate(p.paid_at) + '</td><td>' + (p.ref ? '<a href="#/jobs/' + p.job_id + '">' + esc(p.ref) + '</a>' : 'on account') +
+        '</td><td>' + esc(p.kind) + '</td><td class="num' + (p.kind === 'Refund' ? ' neg' : ' pos') + '">' + money(p.kind === 'Refund' ? -p.amount : p.amount) +
+        '</td><td>' + esc(p.method) + (p.reference ? '<div class="ref">' + esc(p.reference) + '</div>' : '') + '</td></tr>').join('') +
+      '</tbody></table></div>' : '<p class="hint" style="margin-top:8px">No payments recorded.</p>') + '</div>';
+  $('#drawer').hidden = false;
+  $('#drawerBody').scrollTop = 0;
+}
+
+/* ------------------------------------------------------------------- modals */
+function openModal(html) {
+  $('#modalCard').innerHTML = html;
+  $('#modal').hidden = false;
+  /* The form used to hand focus to its first control, and the first control in the job and payment
+     forms is a hidden field — so the caret landed nowhere and the counter clicked a box before every
+     entry. A form can now name the field it wants, and the fallback skips anything invisible. */
+  const named = $('#modalCard').querySelector('[data-autofocus]');
+  const first = named || $$('#modalCard input, #modalCard select, #modalCard textarea')
+    .filter((el) => el.type !== 'hidden' && !el.disabled && !el.closest('[hidden]'))[0];
+  if (first) setTimeout(() => first.focus(), 30);
+  bindModal();
+}
+function closeModal() { $('#modal').hidden = true; $('#modalCard').innerHTML = ''; }
+function modalHeader(title, sub) {
+  return '<header><div><h2>' + title + '</h2>' + (sub ? '<div class="hint">' + sub + '</div>' : '') +
+    '</div><span class="spacer"></span><button class="iconbtn" data-action="close-modal" aria-label="Close">✕</button></header>';
+}
+function installInstructions() {
+  const ua = navigator.userAgent || '';
+  const ios = /iPhone|iPad|iPod/.test(ua) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  let steps;
+  if (!window.isSecureContext) {
+    steps = '<p>This address uses plain HTTP. Browsers require HTTPS before they allow this app ' +
+      'to be installed or its offline app shell to be cached on another device.</p>' +
+      '<p>The shop’s install page carries the address, the certificate to trust and the steps for ' +
+      'this kind of device: <a href="/setup" target="_blank">open /setup</a> — or just the ' +
+      '<a href="/shop-root-ca.cer" download="CRISPprint-Shop-Root-CA.cer">shop certificate</a> ' +
+      'if this device already has the HTTPS address.</p>' +
+      '<p class="hint">Install a certificate only for a shop you trust. The page prints its ' +
+      'fingerprint so you can check the file is the one the shop made.</p>';
+  } else if (ios) {
+    steps = '<p>In Safari, tap <b>Share</b>, then choose <b>Add to Home Screen</b> and confirm.</p>';
+  } else if (/Android/.test(ua)) {
+    steps = '<p>Android opens a certificate only when its file name ends in ' +
+      '<code>.cacert.cer</code>, <code>.pem</code>, <code>.crt</code> or <code>.0</code>, so take ' +
+      'the shop’s as <a href="/CRISPprint-Shop-Root-CA.cacert.cer">CRISPprint-Shop-Root-CA.cacert.cer</a>' +
+      ' and check its fingerprint against the one the setup page prints.</p>' +
+      '<p>Then Settings ▸ Security (or Security &amp; privacy ▸ More security settings ▸ Cryptography' +
+      ' &amp; certifications) ▸ Install a certificate ▸ <b>CA certificate</b> ▸ choose the file.</p>' +
+      '<p>Finally open the address in Chrome, and use the browser menu ▸ <b>Install app</b> or ' +
+      '<b>Add to Home screen</b>.</p>';
+  } else if (/Macintosh/.test(ua)) {
+    steps = '<p>Open the shop’s <a href="/shop-root-ca.cer">CRISPprint-Shop-Root-CA.cer</a> so it' +
+      ' lands in <b>Keychain Access</b>, then double-click it ▸ <b>Trust</b> ▸' +
+      ' <b>When using this certificate: Always Trust</b>.</p>' +
+      '<p>Then open the address in <b>Safari</b>. On the shop’s own Mac the desktop app already' +
+      ' holds the same book, so there is nothing here to install.</p>';
+  } else {
+    steps = '<p>Double-click the shop’s <a href="/shop-root-ca.cer">CRISPprint-Shop-Root-CA.cer</a>' +
+      ' ▸ Install Certificate ▸ <b>Current User</b> (no administrator password needed) ▸ Trusted Root' +
+      ' Certification Authorities, then quit the browser fully and reopen it.</p>' +
+      '<p>In Microsoft Edge or Chrome, use the install icon in the address bar or open ' +
+      'the browser menu and choose <b>Install this site as an app</b>.</p>';
+  }
+  openModal(modalHeader('Install CRISPprint', 'Add an app shortcut to this device') +
+    '<div class="install-note">' + steps +
+    '<p class="hint">Installing adds this app to the device; shop records remain on the shop computer.</p></div>');
+}
+async function installApp() {
+  if (window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true) {
+    toast('CRISPprint is already installed on this device.', 'good');
+    return;
+  }
+  if (deferredInstallPrompt) {
+    const prompt = deferredInstallPrompt;
+    deferredInstallPrompt = null;
+    await prompt.prompt();
+    const choice = await prompt.userChoice;
+    if (choice && choice.outcome === 'accepted') toast('CRISPprint was installed.', 'good');
+    return;
+  }
+  installInstructions();
+}
+window.addEventListener('beforeinstallprompt', (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+});
+window.addEventListener('appinstalled', () => {
+  deferredInstallPrompt = null;
+  toast('CRISPprint was installed.', 'good');
+});
+async function jobForm(job, presetClient, asQuote, again) {
+  if (!S.clients.length) await loadClients();
+  /* `again` is a finished order used as the starting point of a new one: the fields come across, the
+     identity of the old job does not, so this still books a fresh row rather than editing that one. */
+  const editing = !!job;
+  const j = editing ? job : (again || {});
+  const clientId = j.client_id || presetClient || '';
+  const isQuote = editing ? j.kind === 'Quote' : !!asQuote;
+  const lines = jobLines(j);
+  openModal(modalHeader(editing ? 'Edit ' + esc(j.ref) : (again ? 'Same order again — off ' + esc(again.ref)
+    : (isQuote ? 'Write a quote' : 'Book a print job')),
+    editing ? 'Changes are written into the job record.'
+        : 'One line for the work, one line for the money — or a line for each product.') +
+    '<form id="jobForm" data-job-id="' + (editing ? job.id : '') + '">' +
+    '<input type="hidden" name="kind" value="' + (isQuote ? 'Quote' : 'Job') + '">' +
+    '<div class="f-grid">' +
+    clientPicker(clientId) +
+    '<label class="field wide"><span>' + (isQuote ? 'What is being quoted' : 'What is being printed') + '</span>' +
+    /* Not "required": a browser that refuses to submit an empty box never lets the line below
+       name the job for him, and the counter writes the product on the item line first. */
+    '<input name="title" maxlength="200" placeholder="e.g. 500 business cards, double sided" value="' + esc(j.title || '') + '"></label>' +
+    '<label class="field"><span>Service</span><select name="category">' +
+    S.boot.categories.map((c) => '<option' + (j.category === c ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>Specification / stock</span><input name="size" maxlength="120" placeholder="A4, 300gsm gloss, 2m x 1m…" value="' + esc(j.size || '') + '"></label>' +
+    '<label class="field"><span>Status</span><select name="status">' + S.boot.statuses.map((s) =>
+      '<option' + ((j.status || 'Pending') === s ? ' selected' : '') + '>' + esc(s) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>Priority</span><select name="priority">' + ['Normal', 'Urgent'].map((s) =>
+      '<option' + ((j.priority || 'Normal') === s ? ' selected' : '') + '>' + esc(s) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>' + (isQuote ? 'Ready by' : 'Ready by') + '</span><input name="due_date" type="date" value="' + esc(day10(j.due_date || '')) + '"></label>' +
+    (isQuote ? '<label class="field"><span>Price holds until</span><input name="valid_until" type="date" value="' +
+      esc(day10(j.valid_until || plusDays(14))) + '"></label>' : '') +
+    '</div>' +
+    itemsEditor(j, lines.length ? lines : [{}]) +
+    '<div class="f-grid" id="singleBlock"' + (lines.length ? ' hidden' : '') + '>' +
+    '<label class="field"><span>Quantity</span>' + qtyBox('quantity', j.quantity === undefined ? 1 : j.quantity) + '</label>' +
+    '<label class="field"><span>Unit</span><select name="unit">' + S.boot.units.map((u) =>
+      '<option' + ((j.unit || 'job') === u ? ' selected' : '') + '>' + esc(u) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>Price per unit</span>' + moneyBox('unit_price', j.unit_price) + '</label>' +
+    '<label class="field"><span>Cost per unit</span>' + moneyBox('unit_cost') + '</label>' +
+    '</div>' +
+    '<div class="f-grid">' +
+    '<label class="field"><span>Materials / finishing</span>' + moneyBox('extras', j.extras) + '</label>' +
+    '<label class="field"><span>Discount</span>' + moneyBox('discount', j.discount) + '</label>' +
+    '<label class="field wide"><span>Brief / instructions</span><textarea name="description" rows="3" placeholder="Colours, finishing, delivery instructions, who approved the proof…">' + esc(j.description || '') + '</textarea></label>' +
+    '</div>' +
+    calcBox(j) +
+    (editing ? '' : (isQuote ? '' : depositBox())) +
+    '<div class="err" id="jobErr"></div>' +
+    '<div class="modal-foot"><span class="spacer"></span>' +
+    '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
+    '<button class="btn primary">' + (editing ? 'Save changes' : (isQuote ? 'Write the quote' : 'Book the job')) + '</button></div>' +
+    '</form>');
+}
+function plusDays(n) {
+  const d = new Date(Date.now() + n * 86400000);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+/* One order, many products. A job with no lines is priced by the single block above, and a new
+   order starts with one blank line already on the table — that is what the counter writes almost
+   every time, and an untouched blank line is read as no line at all. */
+function jobLines(j) {
+  if ((j.items || []).length) return j.items;
+  // A job booked before item lines existed is shown as one line, so editing it never
+  // changes the money — it just moves the same numbers into the lines editor.
+  if (j.id && !j.item_count) {
+    return [{ title: j.title, size: j.size, quantity: j.quantity, unit: j.unit,
+              unit_price: j.unit_price, unit_cost: 0,
+              line_total: (j.quantity || 0) * (j.unit_price || 0) }];
+  }
+  return j.items || [];
+}
+function itemRowHtml(it) {
+  const v = it || {};
+  return '<tr class="item-row">' +
+    '<td data-l="What"><input class="it-title" maxlength="200" placeholder="e.g. 500 flyers A5" value="' + esc(v.title || '') + '"></td>' +
+    '<td data-l="Specification"><input class="it-size" maxlength="120" placeholder="stock / size" value="' + esc(v.size || '') + '"></td>' +
+    '<td data-l="Qty">' + qtyBox(null, v.quantity, '0', 'it-qty') + '</td>' +
+    '<td data-l="Unit"><select class="it-unit">' + S.boot.units.map((u) => '<option' + ((v.unit || 'job') === u ? ' selected' : '') + '>' + esc(u) + '</option>').join('') + '</select></td>' +
+    '<td data-l="Selling price">' + moneyBox(null, v.unit_price, '0.00', 'it-price') + '</td>' +
+    '<td data-l="Our cost each">' + moneyBox(null, v.unit_cost, '0.00', 'it-cost') + '</td>' +
+    '<td class="num it-line" data-l="Line total">' + money(v.line_total || (v.quantity || 0) * (v.unit_price || 0)) + '</td>' +
+    '<td class="num"><button type="button" class="iconbtn" data-remove-item aria-label="Remove line">✕</button></td>' +
+    '</tr>';
+}
+function itemsEditor(j, items) {
+  return '<div class="items">' +
+    '<div class="section-h">Item lines on this order' +
+    '<span class="spacer"></span>' +
+    '<button type="button" class="btn sm" data-add-item>+ Add a product</button></div>' +
+    '<div class="tablewrap"><table class="items-t"><thead><tr>' +
+    '<th>What</th><th>Specification</th><th class=num>Qty</th><th>Unit</th>' +
+    '<th class=num>Selling price</th><th class=num>Our cost each</th><th class=num>Line total</th><th></th>' +
+    '</tr></thead><tbody id="itemRows">' + items.map(itemRowHtml).join('') + '</tbody></table></div>' +
+    '<p class="hint">Use one line for each product on the same order — cards and a banner on one ticket. ' +
+    'With no lines here, the single quantity and price below set the total.</p></div>';
+}
+function calcBox(j) {
+  return '<div class="calc" id="calc" data-paid="' + (j.paid === undefined ? '' : n2(j.paid)) + '" data-ref="' + esc(j.ref || '') + '"><div class="line"><span>Item lines</span><b id="cGross">—</b></div>' +
+    '<div class="line"><span>Materials / finishing</span><b id="cExtras">—</b></div>' +
+    '<div class="line"><span>Discount</span><b id="cDisc">—</b></div>' +
+    '<div class="line total"><span id="cTotalLabel">Job total</span><b id="cTotal">—</b></div>' +
+    '<div class="line"><span>What it costs the shop</span><b id="cCost">—</b></div>' +
+    '<div class="line"><span>We keep on this job</span><b id="cProfit">—</b></div>' +
+    '<div class="line"><span id="cPaidLabel">Deposit taken now</span><b id="cBalance">—</b></div>' +
+    '<div class="line"><span id="cPaidTag">Paid to date</span><b id="cDue">—</b></div></div>';
+}
+function depositBox() {
+  /* Every job in this book was paid in cash on the minute it was booked, so the money belongs on the
+     order screen rather than in a second form. The chip fills the box to the total; when the figure
+     covers the order it is recorded as a Payment, because that is what it is. */
+  return '<div class="f-grid" style="margin-top:2px">' +
+    '<label class="field"><span>Money taken with the order</span>' + moneyBox('deposit') + '</label>' +
+    '<label class="field"><span>Paid by</span><select name="method">' + S.boot.methods.map((m) => '<option' + (m === 'Cash' ? ' selected' : '') + '>' + esc(m) + '</option>').join('') + '</select></label>' +
+    '<div class="field wide row-actions"><button type="button" class="btn sm" data-pay-all>Cover the whole total</button>' +
+    '<span class="hint" id="depositHint">Leave it empty when the client pays on collection.</span></div>' +
+    '</div>';
+}
+function clientPicker(selectedId) {
+  return '<div class="picker-field wide"><span>Client</span>' +
+    '<div class="picker"><input id="clientFind" data-autofocus placeholder="Type the name or phone — Enter to use, or Enter a new name to put them on file" autocomplete="off">' +
+    '<select name="client_id" id="clientSelect" size="4">' + clientOptions(selectedId) + '</select>' +
+    '<div class="row-actions"><button type="button" class="btn sm" data-action="toggle-newclient">+ Register a new client</button>' +
+    '<span class="hint" id="clientHint">' + S.clients.length + ' on file</span></div>' +
+    '<div id="newClientBox" hidden class="f-grid">' +
+    '<label class="field wide"><span>New client name *</span><input name="new_name" maxlength="160" placeholder="Person or business name"></label>' +
+    '<label class="field"><span>Phone</span><input name="new_phone" maxlength="40" placeholder="024…"></label>' +
+    '<label class="field"><span>WhatsApp</span><input name="new_whatsapp" maxlength="40" placeholder="024…"></label>' +
+    '<label class="field"><span>Email</span><input name="new_email" type="email" maxlength="160" placeholder="name@example.com"></label>' +
+    '<label class="field"><span>Type</span><select name="new_kind">' + S.boot.kinds.map((k) => '<option>' + esc(k) + '</option>').join('') + '</select></label>' +
+    '<label class="field wide"><span>Area / address</span><input name="new_address" maxlength="400" placeholder="Neighbourhood, city"></label>' +
+    '<label class="consent wide"><input type="checkbox" name="new_whatsapp_updates" checked><span>Client agreed to receive job updates on WhatsApp</span></label>' +
+    '<label class="consent wide"><input type="checkbox" name="new_email_updates" checked><span>Client agreed to receive job updates by email</span></label>' +
+    '</div></div></div>';
+}
+function clientOptions(selectedId, filter) {
+  const f = (filter || '').toLowerCase();
+  return S.clients.filter((c) => !f || c.name.toLowerCase().indexOf(f) >= 0 || (c.phone || '').toLowerCase().indexOf(f) >= 0)
+    .map((c) => '<option value="' + c.id + '"' + (String(c.id) === String(selectedId) ? ' selected' : '') + '>' +
+      esc(c.name) + (c.phone ? ' · ' + esc(c.phone) : '') + (c.balance_due > 0 ? '  (owes ' + money(c.balance_due) + ')' : '') + '</option>').join('') ||
+    '<option value="">no client matches</option>';
+}
+function clientForm(client) {
+  const c = client || {};
+  openModal(modalHeader(client ? 'Edit client' : 'New client', 'Save contact details and record the client’s permission for job updates.') +
+    '<form id="clientForm" data-client-id="' + (client ? client.id : '') + '"><div class="f-grid">' +
+    '<label class="field wide"><span>Name *</span><input name="name" required maxlength="160" value="' + esc(c.name || '') + '" placeholder="e.g. Kwame Mensah / Bethel Chapel"></label>' +
+    '<label class="field"><span>Phone</span><input name="phone" maxlength="40" value="' + esc(c.phone || '') + '" placeholder="0244 000 000"></label>' +
+    '<label class="field"><span>WhatsApp</span><input name="whatsapp" maxlength="40" value="' + esc(c.whatsapp || '') + '"></label>' +
+    '<label class="field"><span>Email</span><input name="email" type="email" maxlength="160" value="' + esc(c.email || '') + '"></label>' +
+    '<label class="consent wide"><input type="checkbox" name="whatsapp_updates"' + (c.whatsapp_updates ? ' checked' : '') + '><span>Client agreed to receive job updates on WhatsApp</span></label>' +
+    '<label class="consent wide"><input type="checkbox" name="email_updates"' + (c.email_updates ? ' checked' : '') + '><span>Client agreed to receive job updates by email</span></label>' +
+    '<label class="field"><span>Type</span><select name="kind">' + S.boot.kinds.map((k) =>
+      '<option' + ((c.kind || 'Individual') === k ? ' selected' : '') + '>' + esc(k) + '</option>').join('') + '</select></label>' +
+    '<label class="field wide"><span>Address</span><input name="address" maxlength="400" value="' + esc(c.address || '') + '" placeholder="Area, street"></label>' +
+    '<label class="field wide"><span>Notes</span><textarea name="notes" rows="2" placeholder="Prefers MoMo, collects on weekends, always wants a proof first…">' + esc(c.notes || '') + '</textarea></label>' +
+    '</div><div class="err" id="clientErr"></div><div class="modal-foot"><span class="spacer"></span>' +
+    '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
+    '<button class="btn primary">' + (client ? 'Save changes' : 'Add client') + '</button></div></form>');
+}
+function payJobOptions(jobs, clientId, selectedId) {
+  /* Owing first, newest above oldest: the job the counter is standing at is nearly always at the top
+     of what this list can show him. */
+  return jobs
+    .filter((j) => !clientId || String(j.client_id) === String(clientId))
+    .sort((a, b) => (Math.max(b.balance, 0) - Math.max(a.balance, 0)) ||
+                    (day10(b.created_at) > day10(a.created_at) ? 1 : -1))
+    .map((j) => '<option value="' + j.id + '"' + (String(selectedId) === String(j.id) ? ' selected' : '') + '>' +
+      esc(j.ref) + ' · ' + esc(j.client) + ' · ' + esc(j.title) +
+      (j.balance > 0.005 ? ' · owes ' + money(j.balance) : ' · settled') + '</option>').join('');
+}
+function paymentForm(opts) {
+  const o = opts || {};
+  /* Money can be taken against any job, not only the ones that still owe: the counter is asked for an
+     advance on tomorrow's run, a second part-payment, and money back. Quotes stay out because the
+     book refuses a payment on one — it has to be booked as a job first. */
+  const all = (S.payJobs || []).filter((j) => j.kind !== 'Quote');
+  const jobRow = o.jobId ? '<input type="hidden" name="job_id" value="' + o.jobId + '">' :
+    '<label class="field wide"><span>Which job is this for?</span><select name="job_id" id="payJob">' +
+    '<option value="">Money kept on the client account (credit)</option>' +
+    payJobOptions(all, o.clientId) + '</select></label>';
+  const clientRow = o.jobId ? '' :
+    '<label class="field wide"><span>Client</span><select name="client_id" id="payClient">' +
+    '<option value="">Anyone — choose a job below</option>' +
+    S.clients.map((c) => '<option value="' + c.id + '"' + (o.clientId === c.id ? ' selected' : '') + '>' + esc(c.name) +
+      (c.account_credit ? ' · credit ' + money(c.account_credit) : '') + (c.balance_due > 0 ? ' · owes ' + money(c.balance_due) : '') +
+      '</option>').join('') + '</select></label>';
+  openModal(modalHeader('Receive money', o.jobId ? 'Applied to ' + esc(o.name || 'this job') + '.' :
+    'Pay it against a job, or keep it on the client’s account.') +
+    '<form id="payForm">' + (o.jobId ? '' : clientRow) + jobRow +
+    '<div class="f-grid">' +
+    '<label class="field"><span>Amount *</span>' +
+    moneyBox('amount', o.amount, '0.00', '', ' required data-autofocus') + '</label>' +
+    '<label class="field"><span>Type</span><select name="kind">' +
+    ['Deposit', 'Payment', 'Credit', 'Refund'].map((k) => '<option' + (k === 'Payment' ? ' selected' : '') + '>' + esc(k) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>Method</span><select name="method">' + S.boot.methods.map((m) =>
+      '<option' + (m === 'Cash' ? ' selected' : '') + '>' + esc(m) + '</option>').join('') + '</select></label>' +
+    '<label class="field"><span>Transaction ref</span><input name="reference" maxlength="80" placeholder="MoMo / bank id"></label>' +
+    '<label class="field"><span>Date paid</span><input name="paid_at" type="date" value="' + todayISO() + '"></label>' +
+    '<label class="field wide"><span>Note</span><input name="note" maxlength="500" placeholder="anything worth remembering"></label>' +
+    '</div><div class="calc"><div class="line"><span id="payHint">Balance after this payment</span><b id="payAfter">' +
+    (o.balance !== undefined ? esc(money(Math.max(o.balance - shopNum(o.amount), 0))) : '—') + '</b></div>' +
+    '<button type="button" class="btn sm" id="payFull" hidden>Cover the full balance</button>' +
+    '<p class="settles" id="paySettles" hidden></p></div>' +
+    '<div class="err" id="payErr"></div><div class="modal-foot"><span class="spacer"></span>' +
+    '<button type="button" class="btn" data-action="close-modal">Cancel</button>' +
+    '<button class="btn primary">Record payment</button></div></form>');
+  const box = $('#payForm');
+  const chip = $('#payFull');
+  const settles = $('#paySettles');
+  let owed = o.balance === undefined ? null : Number(o.balance);
+  /* Choosing the person narrows the jobs to theirs — a book of twenty-nine orders is not a list a
+     counter can scan while a client is standing at the desk. */
+  const who = box.querySelector('#payClient');
+  if (who) who.addEventListener('change', () => {
+    const sel = box.querySelector('#payJob');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">Money kept on the client account (credit)</option>' +
+      payJobOptions((S.payJobs || []).filter((j) => j.kind !== 'Quote'), who.value || null);
+    box.dispatchEvent(new Event('input'));
+  });
+  chip.addEventListener('click', () => {
+    box.amount.value = n2(owed);
+    if (box.kind.value === 'Deposit' || box.kind.value === 'Credit') box.kind.value = 'Payment';
+    if (!box.note.value) box.note.value = 'Paid in full';
+    box.dispatchEvent(new Event('input'));
+    box.amount.focus();
+  });
+  box.addEventListener('input', () => {
+    const sel = box.querySelector('[name=job_id]');
+    const amount = shopNum(box.amount.value);
+    const sign = box.kind.value === 'Refund' ? -1 : 1;
+    let balance = null;
+    if (sel && sel.tagName === 'SELECT') {
+      const job = (S.payJobs || []).filter((j) => String(j.id) === sel.value)[0];
+      balance = job ? job.balance : null;
+      $('#payHint').textContent = job ? 'Balance on ' + job.ref : 'Kept on the client account — no job balance';
+    } else if (o.balance !== undefined) {
+      balance = o.balance;
+      $('#payHint').textContent = 'Balance on this job after the payment';
+    }
+    $('#payAfter').textContent = balance === null ? '—' : money(Math.max(balance - sign * amount, 0)) +
+      (balance - sign * amount < -0.005 ? ' (credit)' : '');
+    if (balance === null) return;
+    if (box.kind.value === 'Deposit' && amount >= balance - 0.005) box.kind.value = 'Payment';
+    owed = balance;
+    const rest = balance - sign * amount;
+    const refunding = box.kind.value === 'Refund';
+    chip.hidden = !(rest > 0.005 && !refunding);
+    if (!chip.hidden) {
+      chip.textContent = (amount > 0.005 ? 'Cover the rest · ' : 'Cover the full balance · ') + money(rest);
+    }
+    const clears = rest <= 0.005 && amount > 0.005 && !refunding;
+    settles.hidden = !clears;
+    if (clears) settles.textContent = 'That is the whole balance — this job will read Paid in full.';
+  });
+  box.dispatchEvent(new Event('input'));
+}
+
+/* ------------------------------------------------------------- form binding */
+function bindModal() {
+  const card = $('#modalCard');
+  const jobFormEl = card.querySelector('#jobForm');
+  if (jobFormEl) {
+    const rowsBox = jobFormEl.querySelector('#itemRows');
+    const single = jobFormEl.querySelector('#singleBlock');
+    const readItems = () => $$('.item-row', rowsBox).map((tr) => ({
+      title: tr.querySelector('.it-title').value.trim(),
+      size: tr.querySelector('.it-size').value.trim(),
+      quantity: shopInt(tr.querySelector('.it-qty').value),
+      unit: tr.querySelector('.it-unit').value,
+      unit_price: shopNum(tr.querySelector('.it-price').value),
+      unit_cost: shopNum(tr.querySelector('.it-cost').value),
+      category: (jobFormEl.category ? jobFormEl.category.value : 'Other'),
+    })).filter((it) => it.title || it.quantity > 0 || it.unit_price > 0);
+    const calc = () => {
+      const f = jobFormEl;
+      const lines = readItems();
+      const hasLines = lines.length > 0;
+      const singleQty = shopInt(f.quantity ? f.quantity.value : 0);
+      const singlePrice = shopNum(f.unit_price ? f.unit_price.value : 0);
+      const singleCost = shopNum(f.unit_cost ? f.unit_cost.value : 0);
+      const gross = hasLines ? lines.reduce((a, it) => a + Math.max(it.quantity * it.unit_price, 0), 0)
+                             : singleQty * singlePrice;
+      const cost = hasLines ? lines.reduce((a, it) => a + Math.max(it.quantity * it.unit_cost, 0), 0)
+                            : singleQty * singleCost;
+      const extras = shopNum(f.extras.value);
+      const disc = shopNum(f.discount.value);
+      const total = Math.max(gross + extras - disc, 0);
+      const dep = shopNum(f.deposit ? f.deposit.value : 0);
+      jobFormEl.dataset.total = n2(total);
+      $$('.item-row', rowsBox).forEach((tr) => {
+        const t = Math.max(shopInt(tr.querySelector('.it-qty').value) *
+                           shopNum(tr.querySelector('.it-price').value), 0);
+        tr.querySelector('.it-line').textContent = money(t);
+      });
+      if (single) single.hidden = hasLines;
+      $('#cGross').parentNode.querySelector('span').textContent = hasLines
+        ? lines.length + ' item line' + (lines.length === 1 ? '' : 's') : 'Quantity × price';
+      $('#cTotalLabel').textContent = f.kind.value === 'Quote' ? 'Quoted total' : 'Job total';
+      $('#cGross').textContent = money(gross);
+      $('#cExtras').textContent = money(extras);
+      $('#cDisc').textContent = '-' + money(disc);
+      $('#cTotal').textContent = money(total);
+      $('#cCost').textContent = money(cost);
+      $('#cProfit').textContent = money(total - cost);
+      $('#cProfit').className = total - cost < 0 ? 'neg' : 'pos';
+      if (f.kind.value === 'Quote') {
+        $('#cPaidLabel').textContent = 'Cost if they accept';
+        $('#cBalance').textContent = money(cost);
+        $('#cPaidTag').textContent = 'Margin';
+        $('#cDue').textContent = money(total - cost);
+        return;
+      }
+      if (f.deposit) {
+        $('#cPaidLabel').textContent = 'Deposit taken now';
+        $('#cBalance').textContent = money(dep);
+        $('#cDue').textContent = money(Math.max(total - dep, 0));
+        $('#cPaidTag').textContent = 'Balance the client still owes';
+      } else {
+        const already = Number($('#calc').dataset.paid || 0);
+        $('#cPaidLabel').textContent = 'Balance after saving';
+        $('#cBalance').textContent = money(Math.max(total - already, 0));
+        $('#cDue').textContent = money(already);
+        $('#cPaidTag').textContent = 'Paid to date';
+      }
+    };
+    const addItem = (it) => {
+      rowsBox.insertAdjacentHTML('beforeend', itemRowHtml(it || {}));
+      const tr = rowsBox.lastElementChild;
+      tr.querySelector('.it-title').focus();
+      calc();
+      return tr;
+    };
+    jobFormEl.addEventListener('click', (e) => {
+      const add = e.target.closest('[data-add-item]');
+      if (add) { e.preventDefault(); addItem(); return; }
+      const rm = e.target.closest('[data-remove-item]');
+      if (rm) { e.preventDefault(); rm.closest('.item-row').remove(); calc(); }
+      /* The counter books one line and pays in the same breath, so the total is one press away
+         rather than a figure he has to do in his head and type again. */
+      const all = e.target.closest('[data-pay-all]');
+      if (all && jobFormEl.deposit) {
+        e.preventDefault();
+        jobFormEl.deposit.value = jobFormEl.dataset.total || '0.00';
+        const held = shopNum(jobFormEl.deposit.value);
+        const kind = 'Payment';
+        jobFormEl.dataset.moneyKind = kind;
+        $('#depositHint').textContent = held > 0
+          ? 'Recorded as money received on this job — nothing left owing.'
+          : 'Leave it empty when the client pays on collection.';
+        calc();
+        jobFormEl.deposit.focus();
+      }
+    });
+    /* A product list is typed line by line, not jumped back and forth across, so Enter inside the
+       item table opens the next line instead of saving the job half-written — which is what it used
+       to do, since every input in the table lives inside the form. */
+    rowsBox.addEventListener('keydown', (e) => {
+      const tr = e.target.closest('.item-row');
+      if (!tr) return;
+      const cells = $$('input,select', tr);
+      const at = cells.indexOf(e.target);
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        if (at < cells.length - 1) { cells[at + 1].focus(); return; }
+        if (tr === rowsBox.lastElementChild) addItem();
+        else { const nx = tr.nextElementSibling; if (nx) $('input', nx).focus(); }
+      } else if (e.key === 'Tab' && at === cells.length - 1 && !e.shiftKey &&
+                 tr === rowsBox.lastElementChild) {
+        e.preventDefault();
+        addItem();
+      }
+    });
+    /* Several products off one WhatsApp message or one notebook page arrive as text: pasting it into
+       the What column lays the lines out, one per row, instead of piling the whole list in one cell. */
+    rowsBox.addEventListener('paste', (e) => {
+      const cell = e.target.closest('.it-title');
+      if (!cell) return;
+      const cd = e.clipboardData || window.clipboardData;
+      const raw = (cd && cd.getData('text')) || '';
+      const rows = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      if (rows.length < 2) return;
+      e.preventDefault();
+      const tr = cell.closest('.item-row');
+      const empty = !cell.value && !rowsBox.querySelector('.item-row:not(:first-child)');
+      rows.forEach((line, i) => {
+        const bits = line.split(/\t| {2,}/).map((s) => s.trim());
+        const asItem = bits.length > 1
+          ? { title: bits[0], size: bits[1] || '', quantity: shopInt(bits[2] === undefined ? 1 : bits[2]),
+              unit_price: shopNum(bits[3] || 0), unit_cost: shopNum(bits[4] || 0) }
+          : { title: line, quantity: 1 };
+        if (i === 0 && empty) {
+          const row = tr;
+          row.querySelector('.it-title').value = asItem.title;
+          row.querySelector('.it-size').value = asItem.size || '';
+          row.querySelector('.it-qty').value = asItem.quantity || '';
+          row.querySelector('.it-price').value = asItem.unit_price ? n2(asItem.unit_price) : '';
+          row.querySelector('.it-cost').value = asItem.unit_cost ? n2(asItem.unit_cost) : '';
+          calc();
+          return;
+        }
+        addItem(asItem);
+      });
+      calc();
+    });
+    jobFormEl.addEventListener('input', calc);
+    jobFormEl.addEventListener('change', calc);
+    calc();
+    const find = card.querySelector('#clientFind');
+    if (find) {
+      const sel = $('#clientSelect');
+      const matches = () => S.clients.filter((c) => {
+        const f = find.value.trim().toLowerCase();
+        return f && (c.name.toLowerCase().indexOf(f) >= 0 || (c.phone || '').toLowerCase().indexOf(f) >= 0);
+      });
+      /* The list moves as he types, and one match is chosen for him: at this counter a name is
+         typed to pick a person, not to browse a list of twelve. */
+      find.addEventListener('input', () => {
+        const hit = matches();
+        sel.innerHTML = clientOptions(hit.length === 1 ? hit[0].id : sel.value, find.value);
+        $('#clientHint').textContent = !find.value.trim() ? S.clients.length + ' on file'
+          : (hit.length ? pluralise(hit.length, 'match') : 'nobody on file under that name — Enter puts them there');
+      });
+      /* Enter is the whole gesture: one match takes it, nothing on file opens the new-client box with
+         the name already typed. A walk-in off the street is one word and one key. */
+      find.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const hit = matches();
+        if (hit.length >= 1) { sel.value = String(hit[0].id); sel.dispatchEvent(new Event('change')); jobFormEl.title.focus(); return; }
+        const box = $('#newClientBox');
+        if (box.hidden) {
+          box.hidden = false;
+          $('[data-action="toggle-newclient"]').textContent = '− Cancel new client';
+        }
+        box.querySelector('input').value = find.value;
+        box.querySelector('input').focus();
+      });
+    }
+    jobFormEl.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const id = f.dataset.jobId;
+      const lines = readItems();
+      /* The server will not take a job with no title, and the counter has been typing one twice — once
+         in the item line, once in the name box. So the line names the job when he has not. */
+      const named = f.title.value.trim() || (lines[0] && lines[0].title) || '';
+      const payload = {
+        title: named, category: f.category.value, size: f.size.value,
+        description: f.description.value, extras: n2(shopNum(f.extras.value)),
+        discount: n2(shopNum(f.discount.value)),
+        status: f.status.value, priority: f.priority.value, due_date: f.due_date.value,
+        kind: f.kind.value,
+        quantity: lines.length ? lines.reduce((a, it) => a + (it.quantity || 0), 0) : shopInt(f.quantity.value),
+        unit: lines.length === 1 ? lines[0].unit : 'job',
+        unit_price: lines.length ? n2(lines.reduce((a, it) => a + it.quantity * it.unit_price, 0) /
+                                        Math.max(lines.reduce((a, it) => a + it.quantity, 0), 1))
+                                 : n2(shopNum(f.unit_price.value)),
+        items: lines,
+      };
+      if (f.valid_until) payload.valid_until = f.valid_until.value;
+      $('#jobErr').textContent = '';
+      try {
+        /* Money typed on the order screen that the shop cannot read must stop the booking, not
+           quietly become nothing: a job booked with the cash never recorded is worse than the
+           form refusing to close. */
+        const typed = f.deposit ? f.deposit.value.trim() : '';
+        if (typed && !(shopNum(typed) > 0)) {
+          throw new Error('The money box reads "' + typed + '" — write it as 1200 or 1,200.50, or leave it empty.');
+        }
+        let clientId = f.client_id.value;
+        /* A retry after a refused booking reuses the client that was already put on file, so the same
+           walk-in never becomes two people in the accounts. */
+        if (!clientId && f.dataset.newClient) clientId = f.dataset.newClient;
+        if (!clientId && f.new_name && f.new_name.value.trim()) {
+          const created = await api('/api/clients', { method: 'POST', body: JSON.stringify({
+            name: f.new_name.value, phone: f.new_phone.value,
+            whatsapp: f.new_whatsapp.value || f.new_phone.value, email: f.new_email.value,
+            whatsapp_updates: f.new_whatsapp_updates.checked, email_updates: f.new_email_updates.checked,
+            kind: f.new_kind.value, address: f.new_address.value }) });
+          clientId = created.id;
+          f.dataset.newClient = String(created.id);
+          S.clients.push(created);
+          toast('Client ' + created.name + ' added', 'good');
+        }
+        if (!clientId) throw new Error('Pick a client, or type a new name and press Enter.');
+        if (!named) throw new Error('Say what is being printed, or write it on the first item line.');
+        if (!lines.length && !(shopInt(payload.quantity) > 0 || shopNum(payload.unit_price) > 0)) {
+          throw new Error('Add at least one item line, or give a quantity and price.');
+        }
+        if (!lines.length && shopNum(f.unit_cost.value) > 0) {
+          // The cost of a single-line job has nowhere to live on the jobs row, so it is
+          // kept as one item line. The maths is identical, the profit is not lost.
+          payload.items = [{ title: payload.title, size: payload.size,
+            quantity: shopInt(payload.quantity) || 1, unit: payload.unit,
+            unit_price: shopNum(payload.unit_price) || 0, unit_cost: shopNum(f.unit_cost.value) }];
+        }
+        payload.client_id = clientId;
+        if (id) {
+          const saved = await api('/api/jobs/' + id, { method: 'PUT', body: JSON.stringify(payload) });
+          if (saved.offlineQueued) { closeModal(); toast('Job changes saved on this device; waiting to sync.', 'good'); return; }
+          closeModal(); toast('Job updated', 'good'); await render(); openJobDrawer(Number(id));
+          return;
+        }
+        const job = await api('/api/jobs', { method: 'POST', body: JSON.stringify(payload) });
+        /* This number was only just handed out, so any copy this device holds of it under that name
+           describes a job that is no longer in the book — and the cash about to be booked against it
+           would be turned away as "changed on another device". The answer the shop just sent IS the
+           current record, so it is kept as that, without a tag to quote. */
+        if (job && job.id && !job.offlineQueued) {
+          await offlineWrite('responses', { key: '/api/jobs/' + job.id, value: job,
+                                            etag: '', savedAt: Date.now() });
+        }
+        /* Money with the order used to be filed as a Deposit even when it was the whole price, so the
+           accounts said a settled job still owed something. The figure decides, the same way the
+           counter decides. */
+        const taken = shopNum(f.deposit ? f.deposit.value : 0);
+        if (job.kind !== 'Quote' && taken > 0) {
+          await api('/api/jobs/' + job.id + '/payment', { method: 'POST', body: JSON.stringify({
+            amount: n2(taken), method: f.method.value,
+            kind: taken + 0.005 >= Number(job.total) ? 'Payment' : 'Deposit' }) });
+        }
+        closeModal();
+        if (job.offlineQueued) {
+          toast('Job saved on this device; it is on the list, marked Held on this device.', 'good');
+          return;
+        }
+        toast((job.kind === 'Quote' ? 'Quoted ' : 'Booked ') + job.ref + ' — ' + money(job.total), 'good');
+        await render(); go('jobs', { kind: job.kind }, job.id);
+      } catch (err) { $('#jobErr').textContent = err.message; }
+    });
+  }
+  const payFormEl = card.querySelector('#payForm');
+  if (payFormEl) payFormEl.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const payload = {
+      amount: n2(shopNum(f.amount.value)), kind: f.kind.value, method: f.method.value,
+      reference: f.reference.value, paid_at: f.paid_at.value, note: f.note.value,
+    };
+    const jobSel = f.querySelector('[name=job_id]');
+    const clientSel = f.querySelector('[name=client_id]');
+    if (jobSel) payload.job_id = jobSel.value || null;
+    if (clientSel) payload.client_id = clientSel.value;
+    $('#payErr').textContent = '';
+    try {
+      /* An amount the shop cannot read is not zero money — saying so beats the server's
+         "enter an amount greater than zero", which the counter reads as the box being broken. */
+      if (!(shopNum(f.amount.value) > 0)) throw new Error('Type the amount as it was handed over — 1200, or 1,200.50.');
+      const saved = await api('/api/payments', { method: 'POST', body: JSON.stringify(payload) });
+      closeModal();
+      if (saved.offlineQueued) { toast('Payment saved on this device; waiting to sync.', 'good'); return; }
+      toast('Received ' + money(saved.amount) + ' from ' + saved.client, 'good');
+      await afterMutation();
+      if (saved.job_id) openJobDrawer(saved.job_id);
+    } catch (err) { $('#payErr').textContent = err.message; }
+  });
+  const clientFormEl = card.querySelector('#clientForm');
+  if (clientFormEl) clientFormEl.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const id = f.dataset.clientId;
+    const payload = { name: f.name.value, phone: f.phone.value, whatsapp: f.whatsapp.value,
+      email: f.email.value, whatsapp_updates: f.whatsapp_updates.checked,
+      email_updates: f.email_updates.checked, kind: f.kind.value,
+      address: f.address.value, notes: f.notes.value };
+    $('#clientErr').textContent = '';
+    try {
+      const saved = id ? await api('/api/clients/' + id, { method: 'PUT', body: JSON.stringify(payload) })
+                      : await api('/api/clients', { method: 'POST', body: JSON.stringify(payload) });
+      S.clients = [];
+      closeModal();
+      if (saved.offlineQueued) { toast('Client saved on this device; waiting to sync.', 'good'); return; }
+      toast(id ? 'Client updated' : 'Client ' + saved.name + ' added', 'good');
+      await refreshChrome();
+      await render();
+      if (!id) go(S.route.view, {}, saved.id);
+      else openClientDrawer(saved.id);
+    } catch (err) { $('#clientErr').textContent = err.message; }
+  });
+  const expenseFormEl = card.querySelector('#expenseForm');
+  if (expenseFormEl) expenseFormEl.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const id = f.dataset.expenseId;
+    const payload = {
+      amount: n2(shopNum(f.amount.value)), category: f.category.value, payee: f.payee.value,
+      method: f.method.value, spent_on: f.spent_on.value, reference: f.reference.value,
+      job_id: f.job_id.value || null, note: f.note.value,
+    };
+    $('#expenseErr').textContent = '';
+    try {
+      const saved = id
+        ? await api('/api/expenses/' + id, { method: 'PUT', body: JSON.stringify(payload) })
+        : await api('/api/expenses', { method: 'POST', body: JSON.stringify(payload) });
+      if (saved.offlineQueued) { closeModal(); toast('Expense saved on this device; waiting to sync.', 'good'); return; }
+      closeModal(); toast(id ? 'Expense updated' : 'Money out recorded', 'good');
+      await afterMutation(true);
+      if (payload.job_id) openJobDrawer(Number(payload.job_id));
+    } catch (err) { $('#expenseErr').textContent = err.message; }
+  });
+  const spoilageFormEl = card.querySelector('#spoilageForm');
+  if (spoilageFormEl) spoilageFormEl.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const id = f.dataset.spoilageId;
+    const payload = {
+      job_id: f.job_id.value, quantity: String(shopInt(f.quantity.value)), amount: n2(shopNum(f.amount.value)),
+      spoiled_on: f.spoiled_on.value, reason: f.reason.value,
+    };
+    $('#spoilageErr').textContent = '';
+    try {
+      const saved = id
+        ? await api('/api/spoiled/' + id, { method: 'PUT', body: JSON.stringify(payload) })
+        : await api('/api/spoiled', { method: 'POST', body: JSON.stringify(payload) });
+      if (saved.offlineQueued) { closeModal(); toast('Spoilage record saved on this device; waiting to sync.', 'good'); return; }
+      closeModal(); toast(id ? 'Spoilage record updated' : 'Spoilage recorded against ' + saved.ref, 'good');
+      await afterMutation(true);
+      if (payload.job_id) openJobDrawer(Number(payload.job_id));
+    } catch (err) { $('#spoilageErr').textContent = err.message; }
+  });
+  const leadFormEl = card.querySelector('#leadForm');
+  if (leadFormEl) leadFormEl.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const id = f.dataset.leadId;
+    const payload = {
+      name: f.name.value, phone: f.phone.value, whatsapp: f.whatsapp.value,
+      email: f.email.value, source: f.source.value, interest: f.interest.value,
+      value: n2(shopNum(f.value.value)), stage: f.stage.value, follow_up: f.follow_up.value, note: f.note.value,
+    };
+    $('#leadErr').textContent = '';
+    try {
+      const saved = id ? await api('/api/leads/' + id, { method: 'PUT', body: JSON.stringify(payload) })
+                       : await api('/api/leads', { method: 'POST', body: JSON.stringify(payload) });
+      closeModal();
+      if (saved.offlineQueued) { toast('Enquiry saved on this device; waiting to sync.', 'good'); return; }
+      toast(id ? 'Enquiry updated' : 'Enquiry written down', 'good');
+      const keep = S.route.params.toString();
+      const target = '#/leads/' + saved.id + (keep ? '?' + keep : '');
+      if (location.hash === target) { await refreshChrome(); await render(); }
+      else location.hash = target;
+    } catch (err) { $('#leadErr').textContent = err.message; }
+  });
+  const convertEl = card.querySelector('#convertLeadForm');
+  if (convertEl) {
+    const total = () => {
+      const f = convertEl;
+      $('#cvTotal').textContent = money(Math.max(shopInt(f.quantity.value) *
+        shopNum(f.unit_price.value), 0));
+    };
+    convertEl.addEventListener('input', total);
+    convertEl.addEventListener('change', total);
+    total();
+    convertEl.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      $('#convertErr').textContent = '';
+      const payload = {
+        title: f.title.value, category: f.category.value, quantity: String(shopInt(f.quantity.value)),
+        unit: f.unit.value, unit_price: n2(shopNum(f.unit_price.value)), due_date: f.due_date.value,
+        priority: f.priority.value,
+      };
+      try {
+        const res = await api('/api/leads/' + f.dataset.leadId + '/convert',
+          { method: 'POST', body: JSON.stringify(payload) });
+        closeModal();
+        if (res.offlineQueued) { toast('Booking saved on this device; waiting to sync.', 'good'); return; }
+        S.clients = [];
+        toast('Booked ' + res.job.ref + ' for ' + res.lead.name, 'good');
+        await afterMutation(true);
+        go('jobs', { kind: 'Job' }, res.job.id);
+      } catch (err) { $('#convertErr').textContent = err.message; }
+    });
+  }
+}
+
+/* ------------------------------------------------------------------ actions */
+async function afterMutation(keepDrawer) {
+  await refreshChrome();
+  await render();
+  if (!keepDrawer) closeDrawer();
+}
+async function moveStage(id, status) {
+  const before = (S.boot && S.boot.to_send) || 0;
+  await api('/api/jobs/' + id + '/status', { method: 'POST', body: JSON.stringify({ status: status }) });
+  await refreshChrome();
+  const owed = ((S.boot && S.boot.to_send) || 0) - before;
+  toast(owed > 0 ? 'Marked as ' + status + ' — client message ready to send'
+                 : 'Marked as ' + status, 'good');
+}
+const ACTIONS = {
+  /* The page's own menu bar: one button opens one menu, one row does one thing. Everything a row
+     can ask for is already a name the Mac's menu bar asks for too, so the two can never drift. */
+  'menu-open'(el) {
+    const at = Number(el.dataset.menu);
+    if (menuOpen === at) closeMenus(); else openMenuAt(at);
+  },
+  'menu-item'(el) { closeMenus(); runMenuItem(el.dataset.do); },
+  'settings'() { go('settings'); },
+  'install-app'() { installApp().catch(fail); },
+  async 'shop-password'(el) {
+    try { passwordForm((await api('/api/shop')).login); } catch (err) { fail(err); }
+  },
+  async 'shop-password-off'() {
+    try { passwordOffForm((await api('/api/shop')).login); } catch (err) { fail(err); }
+  },
+  'setup-page'() { window.open('/setup', '_blank'); },
+  'shop-devices'() { render().catch(fail); },
+  async 'origin-clear'() {
+    try {
+      await api('/api/shop-origin', { method: 'PUT', body: JSON.stringify({ address: '' }) });
+      toast('No machine is named first, so every counter is read the same way', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  'shop-security'() { render().catch(fail); },
+  async 'book-copy'() {
+    try {
+      await api('/api/backups', { method: 'POST', body: '{}' });
+      toast('The book was copied and counted against itself', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  /* A copy is a whole book in one file, and the only honest way to decide about it is to read it out.
+     This GET writes nothing, so it is offered from any machine — and what it says back is what decides
+     whether the put-back control appears, so the card never offers what the engine would refuse. */
+  async 'open-copy'(el) {
+    try {
+      copyLookout(await api('/api/backup-copy?name=' + encodeURIComponent(el.dataset.name)));
+    } catch (err) { fail(err); }
+  },
+  'take-copy'(el) {
+    window.location = '/api/backup?name=' + encodeURIComponent(el.dataset.name);
+    toast('Taking ' + el.dataset.name + ' out of the shop — it lands in this machine’s downloads',
+          'good');
+  },
+  /* Putting a copy back replaces every record at once, so the file has to be named twice: the first
+     press only re-labels the button with the copy it means, and the second sends that name as the
+     confirmation the engine asks for. The engine copies the book as it stands before it swaps, so a
+     put-back is always undoable by another put-back. */
+  async 'put-back'(el) {
+    const name = el.dataset.name;
+    if (el.dataset.sure !== '1') {
+      el.dataset.sure = '1';
+      el.textContent = 'Yes — put ' + name + ' back over the book';
+      return;
+    }
+    el.disabled = true;
+    try {
+      const answer = await api('/api/backup-restore', {
+        method: 'POST', body: JSON.stringify({name: name, confirm: name})
+      });
+      toast(answer.note || 'The book was put back the way that copy held it.', 'good');
+      await render();
+    } catch (err) {
+      el.disabled = false;
+      el.dataset.sure = '';
+      el.textContent = 'Put this copy back over the book';
+      fail(err);
+    }
+  },
+  'close-copy'() {
+    const box = $('#copyLook');
+    if (box) box.innerHTML = '';
+  },
+  /* The other half of a hand-asked copy: "Copy it now" writes onto the shop's own disk, which is
+     worth nothing to the machine you are sitting at once that Mac is switched off. This walk is what
+     puts the shop's screens into this device's own memory. It otherwise runs on a twenty-minute
+     clock, so pressing it is how the copy is taken deliberately — at close, before the Mac goes dark.
+     With nobody answering there is nothing to copy, and the device would be re-reading its own
+     memory, so it says so instead of stamping a carry it did not make. */
+  async 'carry-now'() {
+    if (warmingBook) {
+      toast('A copy is being taken onto this device right now — press again in a moment to see how' +
+            ' much of the shop it holds.', 'good');
+      return;
+    }
+    if (!navigator.onLine || !S.connected) {
+      toast('Nothing to copy: the book is only read from the shop while its Mac is answering. Take' +
+            ' this copy before switching the Mac off.', 'bad');
+      return;
+    }
+    toast('Copying the shop’s screens onto this device…', 'good');
+    await warmOfflineBook();
+    const carried = S.offlineCarried || {};
+    if (carried.screens) {
+      toast(plural(carried.screens, 'screen') + ' copied onto this device at ' + wxReadAt(carried.at),
+            'good');
+    } else {
+      toast('The shop stopped answering partway — this device keeps the copy it already held.', 'bad');
+    }
+    await render();
+  },
+  async 'sign-out-all-devices'() {
+    try {
+      const answer = await api('/api/devices', { method: 'DELETE' });
+      toast((answer.devices || 0) + ' other device(s) thrown out — they will have to know the' +
+            ' password again', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  async 'device-revoke'(el) {
+    try {
+      await api('/api/devices/' + el.dataset.deviceRevoke, { method: 'DELETE' });
+      toast('That device is signed out.', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  async 'unname-computer'(el) {
+    try {
+      const answer = await api('/api/shop-computers/' + el.dataset.id, { method: 'DELETE' });
+      toast(answer.unnamed + ' is a visiting machine again, and has been signed out', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  'email-refresh'() { render().catch(fail); },
+  'email-new'() { emailEditing = 'new'; render().catch(fail); },
+  'email-cancel'() { emailEditing = null; render().catch(fail); },
+  'email-edit'(el) { emailEditing = Number(el.dataset.id); render().catch(fail); },
+  async 'email-default'(el) {
+    try {
+      await api('/api/email-accounts/' + el.dataset.id + '/default', { method: 'POST', body: '{}' });
+      toast('Client notices will go out through that mailbox', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  async 'email-test'(el) {
+    try {
+      const answer = await api('/api/email-accounts/' + el.dataset.id + '/test',
+        { method: 'POST', body: '{}' });
+      toast('The mail server took the letter for ' + answer.sent_to + ' — look in that inbox', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  async 'email-forget'(el) {
+    try {
+      await api('/api/email-accounts/' + el.dataset.id, { method: 'DELETE' });
+      toast('That mailbox is forgotten, and the word saved beside the book with it', 'good');
+      await render();
+    } catch (err) { fail(err); }
+  },
+  async 'sign-out'() {
+    try {
+      await api('/api/logout', { method: 'POST', body: '{}' });
+      loginScreen('Signed out of the shop book.');
+    } catch (err) { fail(err); }
+  },
+  'toggle-more'() {
+    const sheet = $('#moresheet');
+    if (!sheet) return;
+    sheet.hidden = !sheet.hidden;
+    $('#moreTab').setAttribute('aria-expanded', String(!sheet.hidden));
+    if (!sheet.hidden) sheet.scrollTop = 0;
+  },
+  async 'sync-now'() { await syncOfflineQueue(); },
+  async 'sync-keep'(el) {
+    const row = await offlineRead('outbox', el.dataset.syncKeep);
+    if (!row || row.state !== 'conflict' || !row.currentEtag) return;
+    row.baseEtag = row.currentEtag;
+    row.operationId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : String(Date.now()) + '-' + Math.random().toString(36).slice(2);
+    row.state = 'pending';
+    row.error = '';
+    delete row.current;
+    delete row.currentEtag;
+    await offlineWrite('outbox', row);
+    toast('Saved change queued for review-resolved sync', 'good');
+    await paintNetworkStatus();
+    if (navigator.onLine) await syncOfflineQueue();
+    else await render();
+  },
+  async 'sync-discard'(el) {
+    const row = await offlineRead('outbox', el.dataset.syncDiscard);
+    if (!row || !confirm('Discard this saved local change? The shared version will remain.')) return;
+    row.state = 'discarded';
+    await offlineWrite('outbox', row);
+    toast('Local change discarded');
+    await paintNetworkStatus();
+    await render();
+  },
+  async 'new-job'(el) { if (!S.clients.length) await loadClients(); jobForm(null, el.dataset.client); },
+  async 'new-quote'(el) { if (!S.clients.length) await loadClients(); jobForm(null, el.dataset.client, true); },
+  async 'new-client'() { clientForm(null); },
+  async 'receive-payment'(el) {
+    if (!S.clients.length) await loadClients();
+    S.payJobs = await api('/api/jobs?status=all&kind=Job&sort=created');
+    paymentForm({});
+  },
+  'close-modal'() { closeModal(); },
+  'close-drawer'() { closeDrawer(); },
+  'clear-filters'() { go(S.route.view, {}); },
+  'backup'() { window.location = '/api/backup'; toast('Backup downloading — keep it somewhere safe', 'good'); },
+  'export'(el) {
+    const p = {};
+    S.route.params.forEach((v, k) => { p[k] = v; });
+    delete p.status;
+    window.location = '/api/export/' + el.dataset.export + '.csv?' + qs(p);
+  },
+  async 'toggle-newclient'(el) {
+    const box = $('#newClientBox');
+    box.hidden = !box.hidden;
+    el.textContent = box.hidden ? '+ Register a new client' : '− Cancel new client';
+    if (!box.hidden) box.querySelector('input').focus();
+  },
+  async 'del-job'(el) {
+    if (!confirm('Delete ' + el.dataset.delName + ' and its payments? This cannot be undone.')) return;
+    try { await api('/api/jobs/' + el.dataset.delJob, { method: 'DELETE' }); closeDrawer(); toast('Job deleted'); await afterMutation(true); }
+    catch (err) { fail(err); }
+  },
+  async 'del-payment'(el) {
+    if (!confirm('Remove this payment of ' + money(el.dataset.delAmount) + ' from the book?')) return;
+    try { await api('/api/payments/' + el.dataset.delPayment, { method: 'DELETE' }); toast('Payment removed'); await afterMutation(); }
+    catch (err) { fail(err); }
+  },
+  async 'pay-job'(el) {
+    if (!S.clients.length) await loadClients();
+    S.payJobs = await api('/api/jobs?status=all&kind=Job&sort=created');
+    const job = await api('/api/jobs/' + el.dataset.payJob);
+    /* A settled job starts the amount box empty rather than at 0.00: the counter is typing an advance
+       or money back, not the nothing it used to owe. */
+    paymentForm({ jobId: job.id, name: job.client + ' · ' + job.ref,
+                  amount: job.balance > 0.005 ? job.balance : '', balance: job.balance });
+  },
+  async 'reorder-job'(el) {
+    if (!S.clients.length) await loadClients();
+    const job = await api('/api/jobs/' + el.dataset.reorderJob);
+    const again = {
+      client_id: job.client_id, category: job.category, size: job.size, unit: job.unit,
+      quantity: job.quantity, unit_price: job.unit_price, extras: job.extras, discount: job.discount,
+      description: job.description, status: 'Pending', priority: job.priority,
+      kind: 'Job', ref: job.ref, id: job.id, paid: 0, balance: 0,
+      /* Last time's line is this time's starting point, quantity and price and all. */
+      items: (job.items || []).map((it) => ({ title: it.title, size: it.size, quantity: it.quantity,
+        unit: it.unit, unit_price: it.unit_price, unit_cost: it.unit_cost })),
+    };
+    if (!(again.items || []).length) again.item_count = 0;
+    await jobForm(null, job.client_id, false, again);
+  },
+  async 'pay-client'(el) {
+    if (!S.clients.length) await loadClients();
+    S.payJobs = await api('/api/jobs?status=all&kind=Job&sort=created');
+    paymentForm({ clientId: Number(el.dataset.payClient), name: el.dataset.payName });
+  },
+  async 'new-job-for'(el) { await jobForm(null, Number(el.dataset.newJobFor)); },
+  async 'edit-job'(el) { const job = await api('/api/jobs/' + el.dataset.editJob); await jobForm(job); },
+  async 'edit-client'(el) { const c = await api('/api/clients/' + el.dataset.editClient); clientForm(c); },
+  async 'archive-client'(el) {
+    const archiving = el.dataset.archived === '0';
+    try {
+      await api('/api/clients/' + el.dataset.archiveClient + (archiving ? '' : '/restore'),
+        { method: archiving ? 'DELETE' : 'POST' });
+      S.clients = []; toast(archiving ? 'Client archived' : 'Client restored', 'good'); closeDrawer(); await afterMutation(true);
+    } catch (err) { fail(err); }
+  },
+  async 'status'(el) {
+    const id = Number(el.dataset.statusJob);
+    try {
+      await moveStage(id, el.dataset.status);
+      await afterMutation(true); openJobDrawer(id);
+    } catch (err) { fail(err); }
+  },
+  /* The collect screen moves the same stage from its own card, but stays put afterwards: the
+     client is at the counter and the next number goes in the same box. */
+  async 'collect-ready'(el) {
+    try {
+      await moveStage(Number(el.dataset.statusJob), el.dataset.status);
+      await afterMutation(true);
+    } catch (err) { fail(err); }
+  },
+  'collect-pay'(el) {
+    const owed = Number(el.dataset.payAmount || 0);
+    paymentForm({ jobId: Number(el.dataset.payJob), name: el.dataset.payName,
+                  amount: owed, balance: owed });
+  },
+  async 'collect-handover'(el) {
+    const id = Number(el.dataset.statusJob);
+    if (!confirm('Give ' + el.dataset.statusName + ' to the client and close it in the book?')) return;
+    try {
+      await moveStage(id, 'Delivered');
+      await afterMutation(true);
+    } catch (err) { fail(err); }
+  },
+  async 'notify-queue'(el) {
+    const id = Number(el.dataset.notifyQueue);
+    try {
+      await api('/api/jobs/' + id + '/notify', { method: 'POST', body: JSON.stringify({ event: el.dataset.notifyEvent }) });
+      toast(el.dataset.notifyEvent + ' message written for ' + (S.notify.client || 'the client'), 'good');
+      await paintNotify(id);
+    } catch (err) { fail(err); }
+  },
+  async 'notify-open'(el) {
+    const m = S.notify.byId[Number(el.dataset.notifyOpen)];
+    if (!m) return;
+    if (!openExternal(m.link)) { toast('This Mac would not open ' + m.channel + ' — copy the words instead', 'bad'); return; }
+    if (m.state !== 'Sent') {
+      try { await api('/api/notifications/' + m.id + '/state', { method: 'POST', body: JSON.stringify({ state: 'Opened' }) }); }
+      catch (e) { /* the words are on the screen whatever the book says */ }
+    }
+    toast('Opened in ' + m.channel + '. Press send there, then mark it sent here.', 'good');
+    paintNotify(m.job_id);
+  },
+  async 'notify-state'(el) {
+    const m = S.notify.byId[Number(el.dataset.notifyState)];
+    try {
+      await api('/api/notifications/' + (m ? m.id : el.dataset.notifyState) + '/state',
+        { method: 'POST', body: JSON.stringify({ state: el.dataset.notifyTo }) });
+      toast(el.dataset.notifyTo === 'Sent' ? 'Marked as sent — the client is up to date on that'
+                                           : 'Back in the queue', 'good');
+      if (m) paintNotify(m.job_id);
+    } catch (err) { fail(err); }
+  },
+  async 'notify-retry'(el) {
+    const id = Number(el.dataset.notifyRetry);
+    try {
+      await api('/api/notifications/' + id + '/retry', { method: 'POST', body: '{}' });
+      toast('Delivery retry queued', 'good');
+      const message = S.notify.byId[id];
+      if (message) await paintNotify(message.job_id);
+    } catch (err) { fail(err); }
+  },
+  async 'notify-copy'(el) {
+    const m = S.notify.byId[Number(el.dataset.notifyCopy)];
+    if (!m) return;
+    let ok = false;
+    try { await navigator.clipboard.writeText(m.body); ok = true; } catch (e) { ok = false; }
+    toast(ok ? 'Copied — paste it into WhatsApp or Mail' : 'Select the words and copy them yourself',
+      ok ? 'good' : 'bad');
+  },
+  async 'notify-del'(el) {
+    const m = S.notify.byId[Number(el.dataset.notifyDel)];
+    if (!m) return;
+    if (!confirm('Take the ' + m.event + ' ' + m.channel + ' message out of the queue?\n\n' +
+      'The job record keeps what was already written.')) return;
+    try {
+      await api('/api/notifications/' + m.id, { method: 'DELETE' });
+      toast('Message removed from the queue');
+      paintNotify(m.job_id);
+    } catch (err) { fail(err); }
+  },
+  async 'convert-job'(el) {
+    try {
+      const job = await api('/api/jobs/' + el.dataset.convertJob);
+      if (!confirm('Turn ' + job.ref + ' into a booked job?\n\n' +
+        'It gets a CH- reference and starts counting as money owed. ' +
+        'Anything already paid on the quote is kept.')) return;
+      const saved = await api('/api/jobs/' + el.dataset.convertJob + '/convert',
+        { method: 'POST', body: JSON.stringify({ status: 'Pending' }) });
+      closeModal();
+      if (saved.offlineQueued) { toast('Quote booking saved on this device; waiting to sync.', 'good'); return; }
+      toast('Booked as ' + saved.ref, 'good');
+      await afterMutation(true);
+      go('jobs', { kind: 'Job' }, saved.id);
+    } catch (err) { fail(err); }
+  },
+  async 'new-expense'(el) {
+    const jobs = await api('/api/jobs?status=all&kind=Job&sort=created');
+    expenseForm(null, el.dataset.job, jobs);
+  },
+  async 'new-spoilage'(el) {
+    const jobs = await api('/api/jobs?status=all&kind=Job&sort=created');
+    spoilageForm(null, jobs, el.dataset.newSpoilage || null);
+  },
+  async 'edit-spoilage'(el) {
+    const [row, jobs] = await Promise.all([
+      api('/api/spoiled/' + el.dataset.editSpoilage),
+      api('/api/jobs?status=all&kind=Job&sort=created'),
+    ]);
+    spoilageForm(row, jobs);
+  },
+  async 'del-spoilage'(el) {
+    if (!confirm('Remove the spoiled-work record for ' + el.dataset.delQuantity + ' items on ' +
+        el.dataset.delJob + '? Its spoilage cost will also be removed from that job.')) return;
+    try {
+      await api('/api/spoiled/' + el.dataset.delSpoilage, { method: 'DELETE' });
+      toast('Spoilage record removed'); await refreshChrome(); await render();
+    } catch (err) { fail(err); }
+  },
+  async 'job-expense'(el) {
+    const jobs = await api('/api/jobs?status=all&kind=Job&sort=created');
+    expenseForm(null, Number(el.dataset.jobExpense), jobs);
+  },
+  async 'edit-expense'(el) {
+    const row = await api('/api/expenses/' + el.dataset.editExpense);
+    const jobs = await api('/api/jobs?status=all&kind=Job&sort=created');
+    expenseForm(row, null, jobs);
+  },
+  async 'del-expense'(el) {
+    if (!confirm('Remove this expense of ' + money(el.dataset.delAmount) + ' from the book?')) return;
+    try { await api('/api/expenses/' + el.dataset.delExpense, { method: 'DELETE' }); toast('Expense removed'); await afterMutation(true); }
+    catch (err) { fail(err); }
+  },
+  async 'new-lead'() { leadForm(null); },
+  async 'edit-lead'(el) { const l = await api('/api/leads/' + el.dataset.editLead); leadForm(l); },
+  async 'del-lead'(el) {
+    if (!confirm('Delete the enquiry from ' + el.dataset.delName + '? This cannot be undone.')) return;
+    try { await api('/api/leads/' + el.dataset.delLead, { method: 'DELETE' }); closeDrawer(); toast('Enquiry removed'); await afterMutation(true); }
+    catch (err) { fail(err); }
+  },
+  async 'lead-stage'(el) {
+    try {
+      await api('/api/leads/' + el.dataset.stageLead + '/stage', { method: 'POST', body: JSON.stringify({ stage: el.dataset.leadStage }) });
+      toast('Moved to ' + el.dataset.leadStage, 'good'); await afterMutation(true); openLeadDrawer(Number(el.dataset.stageLead));
+    } catch (err) { fail(err); }
+  },
+  async 'convert-lead'(el) {
+    const l = await api('/api/leads/' + el.dataset.convertLead);
+    convertLeadForm(l);
+  },
+};
+
+function restoreFocus() {
+  const q = S.route.params.get('q');
+  if (q) {
+    const el = $('#topbar [data-filter="q"]');
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  }
+}
+
+/* ------------------------------------------------------------------- appearance
+   The shop's clock is the only look there is: light between DAY_START and DAY_END, dark outside
+   them, turning over by itself while the counter works. He asked for this on 2026-10-13 — "Remove
+   Light, Dark or System because By clock is already there" — so the choice is gone rather than
+   defaulted, and nothing is stored: an old `crispprint-theme` value left in a browser from the days
+   when the page did have buttons is read by nobody now. The same two hours are written a second time
+   in the head script of index.html (which runs before this file exists) and a third in
+   desktop/src/Theme.swift; tools/check-daylight-theme.py and tools/check-app-daylight.py fail if the
+   three ever disagree. */
+const DAY_START = 8;
+const DAY_END = 17;
+
+/* Which look a given moment asks for. Pure, and the moment can be handed in: the screen has to turn
+   over at 5:00 pm without anyone touching it, and a check cannot wait for the day to do it. */
+function themeIsDark(when) {
+  const h = (when || new Date()).getHours();
+  return h < DAY_START || h >= DAY_END;
+}
+
+function paintTheme() {
+  document.documentElement.dataset.theme = themeIsDark() ? "dark" : "light";
+}
+
+/* ------------------------------------------------- the counter's own window */
+/* The Mac app brings three things the shop reaches for without thinking: a menu bar, a Settings
+   window with four tabs, and a hand on the ⌘ keys. A Windows computer has none of them — its
+   launcher opens Edge at this page in a window with no address bar and no menu — so the page has to
+   carry all three itself.
+
+   Two rules keep this honest, and both come from the same fact: the page a counter opens may be
+   served by the shop's own Mac.
+   - A choice that belongs to the machine standing at the counter — the screen it opens on, the size
+     of its words, the paper behind them — is kept in that browser's own memory, never in the engine.
+     A setting that reached through the engine would be a setting on the shop's Mac, made by somebody
+     else. Only Settings ▸ Profile touches the book, because the shop's name and number ARE the book.
+   - A control the engine would refuse is not offered. Profile shows the refusal instead, in the
+     engine's own words, so the screen never promises a save it cannot make. */
+const IN_MAC_SHELL = !!(window.webkit && window.webkit.messageHandlers &&
+                        window.webkit.messageHandlers.sheetPrint);
+
+/* The same names the Mac's own Settings window writes into the machine's preferences, so one word
+   describes the choice on either kind of computer. */
+const PREF_NAMES = {
+  start: 'crispprint-start-route',
+  last: 'crispprint-last-route',
+  text: 'crispprint-text-size',
+  bg: 'crispprint-background',
+  awake: 'crispprint-keep-awake',
+};
+
+function pref(name, def) {
+  try {
+    const got = localStorage.getItem(PREF_NAMES[name] || name);
+    return got === null || got === '' ? def : got;
+  } catch (e) { return def; }
+}
+function savePref(name, value) {
+  try { localStorage.setItem(PREF_NAMES[name] || name, value); } catch (e) { /* a private window */ }
+}
+
+const SCREENS = [
+  ['dashboard', 'Dashboard'], ['jobs', 'Print jobs'], ['collect', 'Collect'],
+  ['spoiled', 'Spoiled work'], ['sync', 'Pending sync'], ['clients', 'Clients'],
+  ['leads', 'Enquiries'], ['accounts', 'Accounts'], ['expenses', 'Expenses'],
+  ['reports', 'Reports'], ['shop', 'Shop & devices'], ['settings', 'Settings'],
+];
+/* The steps the Mac's text-size slider covers (0.9 to 1.4), written as a choice instead of a
+   slider because a slider a counter has to drag with a mouse on a shop PC lands on odd numbers. */
+const TEXT_SIZES = [['0.9', 'Small'], ['1', 'Normal — the shop default'], ['1.1', 'Large'],
+                    ['1.25', 'Very large'], ['1.4', 'Largest']];
+/* The shop's own paper first, then the four colour washes and the wallpapers, in the same order and
+   the same words as Settings ▸ Appearance in the Mac's window. */
+const PAPERS = [
+  ['plain', 'Plain — the shop’s own paper'], ['sky', 'Sky'], ['leaf', 'Leaf'],
+  ['sand', 'Sand'], ['rose', 'Rose'], ['waves', 'Waves wallpaper'], ['dots', 'Dots wallpaper'],
+  ['linen', 'Linen wallpaper'], ['violet', 'Violet lines'], ['beams', 'Teal beams'],
+  ['circuit', 'Circuit'], ['constellation', 'Constellation'], ['dusk', 'Dusk'], ['bloom', 'Bloom'],
+];
+const SETTINGS_TABS = [['general', 'General'], ['appearance', 'Appearance'],
+                       ['profile', 'Profile'], ['updates', 'Updates']];
+const COUNTER_REPO = 'https://github.com/HowellDaniel/ChrisphicsHub';
+
+/* One control, one choice, kept on this computer. The engine is never told, because the engine may
+   be the shop's Mac — and the shop's Mac does not change its own screen because a counter pressed
+   something at a different one. */
+function setCounterPref(name, el) {
+  if (IN_MAC_SHELL) return;
+  if (name === 'awake') {
+    holdAwake(el.checked).then(() => {
+      const line = $('#awakeState');
+      if (line) line.textContent = awakeWords();
+      toast(el.checked ? 'This window will ask the computer not to sleep — ' + awakeWords()
+                       : 'The computer may sleep when it is left alone.',
+            el.checked && awakeHold ? 'good' : 'bad');
+    });
+    return;
+  }
+  savePref(name, el.value);
+  if (name === 'text' || name === 'bg') applyCounterLook();
+  const words = {
+    start: ['Next time this window opens, it opens on ',
+            (SCREENS.find((s) => s[0] === el.value) || ['', 'where you left off'])[1]],
+    text: ['The words are ', (TEXT_SIZES.find((s) => s[0] === el.value) || ['', 'normal'])[1]],
+    bg: ['The paper is ', (PAPERS.find((s) => s[0] === el.value) || ['', 'plain'])[1]],
+  }[name];
+  if (words) toast(words[0] + words[1], 'good');
+}
+
+/* What this computer asked the page to look like, applied to it. Held back inside the Mac's own
+   window, where Settings ▸ Appearance has already painted the paper before this file is loaded: the
+   app window's native panel owns that computer, and two owners of one wallpaper is how a screen ends
+   up flicking between them. */
+function applyCounterLook() {
+  if (IN_MAC_SHELL) return;
+  const scale = parseFloat(pref('text', '1')) || 1;
+  document.documentElement.style.setProperty('--text-scale', String(scale));
+  const paper = pref('bg', 'plain');
+  document.documentElement.dataset.bg = paper;
+}
+
+/* The start screen is stored as the bare name the rail uses ("jobs"), the way the Mac's own General
+   pane keeps it; "Where I left off" is the one value that is not a name at all — and it is also the
+   default, so treating it as a screen would put every fresh window at a hash no view answers (#/auto)
+   and never read the last screen back. A name only counts if the rail has that screen. */
+function startHash() {
+  const chosen = pref('start', 'auto');
+  if (SCREENS.some((screen) => screen[0] === chosen)) return '#/' + chosen;
+  const last = pref('last', '').replace(/^#\/?/, '');
+  return SCREENS.some((screen) => screen[0] === last) ? '#/' + last : '#/dashboard';
+}
+
+/* Keeping the screen awake. A Mac holds the shop open with an assertion of its own; a browser can
+   only ask not to be put to sleep while its own window is showing, and takes the ask back the moment
+   the window is hidden. The pane says which of the two this computer actually did, because a tick
+   box that claims to have kept a PC awake when the browser refused is worse than no tick box. */
+let awakeHold = null;
+let awakeWanted = pref('awake', '0') === '1';
+let awakeWhy = '';
+
+async function holdAwake(on) {
+  awakeWanted = !!on;
+  savePref('awake', awakeWanted ? '1' : '0');
+  if (!awakeWanted) {
+    if (awakeHold) { try { await awakeHold.release(); } catch (e) { /* already gone */ } }
+    awakeHold = null;
+    awakeWhy = '';
+    return;
+  }
+  if (!('wakeLock' in navigator)) {
+    awakeWhy = 'this browser does not offer it';
+    return;
+  }
+  try {
+    awakeHold = await navigator.wakeLock.request('screen');
+    awakeWhy = 'held while this window is showing';
+    awakeHold.addEventListener('release', () => {
+      awakeHold = null;
+      awakeWhy = 'given back while the window was hidden';
+      const line = $('#awakeState');
+      if (line) line.textContent = awakeWords();
+    });
+  } catch (e) {
+    awakeHold = null;
+    awakeWhy = 'the browser refused it just now';
+  }
+}
+
+function awakeWords() {
+  if (!awakeWanted) return 'not asked for';
+  if (awakeHold) return 'awake — ' + awakeWhy;
+  if (awakeWhy) return 'asked, but ' + awakeWhy;
+  return 'asked for';
+}
+/* The browser hands the ask back every time the window is hidden, so coming back to it is coming
+   back to the counter's own choice. */
+document.addEventListener('visibilitychange', () => {
+  if (awakeWanted && document.visibilityState === 'visible') holdAwake(true).then(() => {
+    const line = $('#awakeState');
+    if (line) line.textContent = awakeWords();
+  });
+});
+
+/* Cut, copy, paste and select-all in the Edit menu. The browser already does these with its own
+   keys; the menu is here because a counter who has only ever had a menu should not have to learn
+   which keys this window keeps. */
+function browserEdit(what) {
+  if (what === 'paste') {
+    const field = document.activeElement;
+    const into = field && /^(INPUT|TEXTAREA)$/.test(field.tagName);
+    if (!navigator.clipboard || !navigator.clipboard.readText || !into) {
+      return toast('Use ' + (IN_MAC_SHELL ? '⌘' : 'Ctrl') + '+V here — the browser will not let a' +
+                   ' page read the clipboard without asking first.', 'bad');
+    }
+    return navigator.clipboard.readText().then((said) => {
+      const from = field.selectionStart || 0, to = field.selectionEnd || 0;
+      field.value = field.value.slice(0, from) + said + field.value.slice(to);
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      field.focus();
+    }, () => toast('This browser would not hand the clipboard to the page. Use ' +
+                   (IN_MAC_SHELL ? '⌘' : 'Ctrl') + '+V.', 'bad'));
+  }
+  const command = { cut: 'cut', copy: 'copy', all: 'selectAll' }[what];
+  if (!command) return;
+  try {
+    document.execCommand(command);
+  } catch (e) {
+    toast('Use ' + (IN_MAC_SHELL ? '⌘' : 'Ctrl') + '+K for that — the browser keeps its own keys.', 'bad');
+  }
+}
+
+/* The sheet a client signs is its own page, printed from itself, exactly as it is in the Mac's
+   window: File ▸ Print Job Sheet works on the job that is open and says so when none is. */
+function printJobSheet() {
+  const open = (S.notify && S.notify.job && S.notify.job.id) || (S.route && S.route.id);
+  if (!open) return toast('Open a job first — the sheet a client signs is its own page.', 'bad');
+  const win = window.open('/print/' + open, '_blank');
+  if (!win) toast('This browser blocked the sheet window. Allow pop-ups for the shop, or press' +
+                  ' Job sheet on the job.', 'bad');
+}
+
+/* Every menu row and every Alt key lands here, so the words on the screen and the keys under the
+   hand can never be taught two different things. */
+function runMenuItem(what) {
+  if (!what) return;
+  if (what.indexOf('view:') === 0) return go(what.slice(5));
+  if (what.indexOf('edit:') === 0) return browserEdit(what.slice(5));
+  if (what.indexOf('settings:') === 0) return go('settings', { pane: what.slice(9) });
+  if (what === 'reload') return location.reload();
+  if (what === 'settings') return go('settings');
+  if (what === 'print-sheet') return printJobSheet();
+  if (what === 'settings-refresh') { S.counter = null; return render().catch(fail); }
+  if (what === 'settings-shop-save') return saveShopProfile();
+  if (what === 'settings-check') return checkForUpdate();
+  if (what === 'settings-download') return downloadUpdate();
+  if (what === 'settings-install') return installUpdate();
+  if (what === 'settings-repo') return window.open(COUNTER_REPO, '_blank');
+  if (what === 'focus-search') {
+    const box = $('#topbar input[data-filter="q"]');
+    if (box) { box.focus(); box.select(); }
+    return;
+  }
+  const handler = ACTIONS[what];
+  if (typeof handler === 'function') {
+    /* A menu carries no row, so nothing here has a client or a job to hand over — the same
+       request, made as if the counter had pressed the button on the screen itself. */
+    handler(document.body);
+    return;
+  }
+  toast('Nothing is bound to that yet.', 'bad');
+}
+
+/* The four fields Settings ▸ Profile shows on the Mac, written back the one way the book takes
+   them: a PUT the engine answers only for the shop's own computer. The engine's refusal is printed
+   in its own words rather than smoothed over, because a counter who is told "saved" when nothing
+   was saved loses the change and the trust in one go. */
+async function saveShopProfile() {
+  const grab = (id) => { const el = $('#' + id); return el ? el.value.trim() : ''; };
+  const line = $('#updateResult');
+  try {
+    const answer = await api('/api/shop', { method: 'PUT', body: JSON.stringify({
+      name: grab('setName'), tagline: grab('setTagline'),
+      phone: grab('setPhone'), address: grab('setAddress'),
+    }) });
+    const kept = answer.shop || {};
+    toast('Saved. New sheets and client messages carry ' + (kept.name || 'these words') +
+          ' from now on.', 'good');
+    await render();
+  } catch (err) {
+    if (line) line.textContent = err.message;
+    fail(err);
+  }
+}
+
+/* One week, one answer, kept by the engine.
+   The page used to fetch the repository's VERSION itself, so a counter whose own internet was down
+   read "could not be reached" while the shop's Mac was perfectly online — the same fault the weather
+   tile had, and the same fix: ask the engine, which has the shop's road out. The engine also asks by
+   itself once a week (server.py: watch_updates), so this screen has news before anybody presses. */
+function updateWords(up) {
+  if (!up) return '';
+  if (!up.asked_at) {
+    return 'No computer here has asked the repository yet. The engine that answers this screen does it' +
+           ' by itself once a week, and within a minute of first coming up.';
+  }
+  if (up.verdict === 'newer') {
+    return 'Version ' + up.remote + ' is on the repository and this build is ' + up.this + '.';
+  }
+  if (up.verdict === 'ahead') {
+    return 'This build carries version ' + up.this + ' — the repository is still on ' + up.remote + '.';
+  }
+  if (up.verdict === 'same') {
+    return 'Nothing newer: this build (' + up.this + ') is the newest version the repository has.';
+  }
+  return up.trouble || 'The last ask brought no answer back.';
+}
+
+/* The newer build itself: what has come down, how much is left, and what the button would do next.
+   The engine stages the files beside the book and proves every one of them; nothing here installs
+   anything by itself, because taking a build in closes the shop for a few seconds. */
+function packageWords(pack) {
+  if (!pack) return '';
+  if (pack.state === 'ready') {
+    return 'Version ' + pack.install_version + ' is here and checked — ' + pack.files + ' files, ' +
+           bytesWords(pack.size) + '. Install it and the shop closes, then opens again on the new build.';
+  }
+  if (pack.state === 'downloading') {
+    const share = pack.total ? Math.min(100, Math.round(100 * pack.bytes / pack.total)) : 0;
+    return 'Bringing version ' + (pack.version || '') + ' down — ' + (pack.said || '…') +
+           (pack.total ? ' (' + share + '%)' : '') + '.';
+  }
+  if (pack.state === 'reading') return 'Reading the repository’s build record…';
+  if (pack.state === 'failed') return (pack.said || pack.trouble || 'The download did not finish.') +
+                                      ' Nothing on this computer was changed.';
+  if (pack.state === 'waiting') {
+    return 'Version ' + pack.version + ' is waiting on the repository. Press Download and it comes' +
+           ' down and is checked before anything changes here.';
+  }
+  return '';
+}
+
+function bytesWords(count) {
+  const n = Number(count || 0);
+  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  if (n >= 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' bytes';
+}
+
+function askNextWords(up) {
+  if (!up || !up.asked_at) return 'the first time this engine comes up';
+  if (up.due) return 'any minute now';
+  const hours = up.next_in_hours || 0;
+  if (hours < 24) return 'in about ' + hours + ' hour' + (hours === 1 ? '' : 's');
+  return 'in about ' + Math.round(hours / 24) + ' day' + (Math.round(hours / 24) === 1 ? '' : 's');
+}
+
+async function checkForUpdate() {
+  const say = (words) => { const line = $('#updateResult'); if (line) line.textContent = words; };
+  say('Asking the repository…');
+  try {
+    /* A plain fetch, not api(): this is not a record, so it must never join the queue a dark shop
+       keeps of writes to send later, nor be remembered as one of the book's idempotent operations. */
+    const answer = await fetch('/api/update-check', { method: 'POST' });
+    const body = await answer.json().catch(() => null);
+    if (!answer.ok) throw new Error((body && body.error) || ('the engine answered ' + answer.status));
+    S.counter = null;
+    /* The pane is redrawn from the same facts the answer was kept in. The line is re-read after the
+       redraw because render() replaces the element the old line pointed at. */
+    await counterFacts(true);
+    await render();
+    say('Asked just now. ' + updateWords(((S.counter || {}).updates) || {}));
+  } catch (e) {
+    say('The shop’s engine could not ask the repository (' + e.message + ').');
+  }
+}
+
+/* Download: the engine fetches the newer build from the shop's own repository, checks every file
+   against the record it was published with, and keeps it beside the book. The screen follows it. */
+async function downloadUpdate() {
+  const say = (words) => { const line = $('#updateResult'); if (line) line.textContent = words; };
+  say('Asking the repository for the newer build…');
+  try {
+    const answer = await fetch('/api/update-download', { method: 'POST' });
+    const body = await answer.json().catch(() => null);
+    if (!answer.ok) throw new Error((body && body.trouble) || ('the engine answered ' + answer.status));
+  } catch (e) {
+    return say('The newer build did not come down (' + e.message + '). Nothing here was changed.');
+  }
+  for (let look = 0; look < 400; look += 1) {
+    S.counter = null;
+    const facts = await counterFacts(true);
+    const pack = ((facts || {}).updates || {}).package || {};
+    await render();
+    const line = $('#updateResult');
+    if (line) line.textContent = packageWords(pack);
+    if (pack.state === 'ready' || pack.state === 'failed') return;
+    await new Promise((done) => setTimeout(done, 800));
+  }
+  say('The download is taking longer than this screen waits. Come back to Updates in a minute.');
+}
+
+/* Install: the one press that changes this computer. The app closes (the Mac's own window or the
+   tab), the engine hands the checked files to the apply script, and the script brings the shop
+   back. The records are never part of the package, so the book is exactly where it was. */
+async function installUpdate() {
+  const facts = await counterFacts(true);
+  const pack = ((facts || {}).updates || {}).package || {};
+  if (!pack.ready) return toast('There is no checked build here to install yet.', 'bad');
+  const sure = window.confirm('Install version ' + pack.install_version + ' now?\n\nThe shop closes for a ' +
+                              'few seconds and opens again on the new build. Clients, jobs, money and ' +
+                              'every record stay exactly as they are.');
+  if (!sure) return;
+  const say = (words) => { const line = $('#updateResult'); if (line) line.textContent = words; };
+  say('Closing the shop to install ' + pack.install_version + '… it will open again by itself.');
+  try {
+    const answer = await fetch('/api/update-install', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app: '' }),
+    });
+    const body = await answer.json().catch(() => null);
+    if (!answer.ok || !(body && body.armed)) {
+      throw new Error((body && body.trouble) || ('the engine answered ' + answer.status));
+    }
+    say('Installing ' + pack.install_version + '. The shop is closing and will open again on its own. ' +
+        'This page reloads when it is back.');
+  } catch (e) {
+    return say('The install did not start (' + e.message + '). Nothing here was changed.');
+  }
+  for (let look = 0; look < 120; look += 1) {
+    await new Promise((done) => setTimeout(done, 1000));
+    try {
+      const back = await fetch('/healthz', { cache: 'no-store' });
+      if (back.ok) return location.reload();
+    } catch (ignored) { /* the shop is between engines; keep waiting */ }
+  }
+  say('The shop has not answered yet. Open it again from its own icon in a minute — the install is done.');
+}
+
+
+/* Alt is the menu key on a Windows computer, and it has to be: the browser itself keeps Ctrl+N for
+   a new window, Ctrl+W for this one, Ctrl+R for a reload and Ctrl+1 to Ctrl+9 for its own tabs, and
+   none of those reach the page however hard the shop presses. So the Mac's ⌘ keys come across as the
+   same letters under Alt, and each menu row prints the key it answers to.
+   This list and the rows below are one thing, not two: a key nobody printed on a row is a key no
+   counter will ever find, and a row that prints a key the page does not answer is a lie.
+   tools/check-counter-settings.py reads both and fails if they ever disagree. */
+const MENU_KEYS = {
+  n: 'new-job', 'shift+n': 'new-quote', i: 'new-lead', k: 'new-client',
+  r: 'receive-payment', e: 'new-expense', p: 'print-sheet', b: 'book-copy', c: 'carry-now',
+  s: 'settings', 'shift+r': 'reload',
+  1: 'view:dashboard', 2: 'view:jobs', 3: 'view:clients', 4: 'view:leads', 5: 'view:accounts',
+  6: 'view:expenses', 7: 'view:reports', 8: 'view:spoiled', 9: 'view:sync', 0: 'view:shop',
+};
+
+const MENU = [
+  { label: 'File', hint: 'Alt+F', rows: [
+      ['New Job', 'Alt+N', 'new-job'],
+      ['New Quote', 'Alt+Shift+N', 'new-quote'],
+      ['New Enquiry', 'Alt+I', 'new-lead'],
+      ['New Client', 'Alt+K', 'new-client'],
+      ['Receive Payment', 'Alt+R', 'receive-payment'],
+      ['Record Money Out', 'Alt+E', 'new-expense'],
+      ['-'],
+      ['Print Job Sheet', 'Alt+P', 'print-sheet'],
+      ['-'],
+      ['Copy the book onto this device', 'Alt+C', 'carry-now'],
+  ] },
+  { label: 'Edit', rows: [
+      ['Cut', 'Ctrl+X', 'edit:cut'], ['Copy', 'Ctrl+C', 'edit:copy'],
+      ['Paste', 'Ctrl+V', 'edit:paste'], ['Select All', 'Ctrl+A', 'edit:all'],
+      ['-'], ['Search this book', '/', 'focus-search'],
+  ] },
+  { label: 'View', rows: [
+      ['Reload this screen', 'Alt+Shift+R', 'reload'],
+      ['-'],
+      ['Dashboard', 'Alt+1', 'view:dashboard'],
+      ['Print Jobs', 'Alt+2', 'view:jobs'],
+      ['Collect', '', 'view:collect'],
+      ['Clients', 'Alt+3', 'view:clients'],
+      ['Enquiries', 'Alt+4', 'view:leads'],
+      ['Accounts', 'Alt+5', 'view:accounts'],
+      ['Expenses', 'Alt+6', 'view:expenses'],
+      ['Reports', 'Alt+7', 'view:reports'],
+      ['Spoiled Work', 'Alt+8', 'view:spoiled'],
+      ['Pending Sync', 'Alt+9', 'view:sync'],
+      ['Shop & Devices', 'Alt+0', 'view:shop'],
+  ] },
+  { label: 'Data', rows: [
+      ['Copy the Book Now', 'Alt+B', 'book-copy'],
+      ['Download the Copy', '', 'backup'],
+      ['-'],
+      ['Setup and Install Page', '', 'setup-page'],
+  ] },
+  { label: 'Shop', rows: [
+      ['Settings…', 'Alt+S', 'settings'],
+      ['-'],
+      ['Install This App', '', 'install-app'],
+      ['Change the Shop Password', '', 'shop-password'],
+      ['-'],
+      ['Sign Out of This Device', '', 'sign-out'],
+  ] },
+];
+
+function menuRowHtml(row) {
+  if (row[0] === '-') return '<span class="menusep" role="separator"></span>';
+  const [label, key, doWhat] = row;
+  return '<button type="button" role="menuitem" class="menuitem" data-action="menu-item"' +
+    ' data-do="' + esc(doWhat) + '"><span>' + esc(label) + '</span>' +
+    (key ? '<i>' + esc(key) + '</i>' : '') + '</button>';
+}
+
+let menuOpen = -1;
+
+function paintMenuBar() {
+  const bar = $('#menubar');
+  if (!bar) return;
+  /* The Mac's window has a real menu bar above it; a phone has a tab bar and no room; only a
+     computer opened straight in a browser window needs the page to carry one. PHONE is the same
+     turnstile the tab bar uses, so the two can never both be away or both be there. */
+  const showing = !IN_MAC_SHELL && !PHONE.matches;
+  bar.hidden = !showing;
+  /* The sticky title bar sits under the strip only while the strip exists — hence the flag rather
+     than a plain height, which would leave a dead gap in the Mac's own window. */
+  document.documentElement.dataset.menubar = showing ? 'on' : 'off';
+  if (!showing) return;
+  if (bar.childElementCount) return;
+  bar.innerHTML = MENU.map((menu, at) =>
+    '<span class="menuwrap">' +
+    '<button type="button" class="menubtn" data-action="menu-open" data-menu="' + at + '"' +
+    ' aria-haspopup="menu" aria-expanded="false">' + esc(menu.label) + '</button>' +
+    '<span class="menudrop" role="menu" hidden>' + menu.rows.map(menuRowHtml).join('') + '</span>' +
+    '</span>').join('') +
+    '<span class="spacer"></span>' +
+    '<span class="menuhint">Alt holds the keys &middot; Settings is Alt+S</span>';
+}
+
+function closeMenus() {
+  menuOpen = -1;
+  $$('#menubar .menudrop').forEach((drop) => { drop.hidden = true; });
+  $$('#menubar .menubtn').forEach((btn) => btn.setAttribute('aria-expanded', 'false'));
+}
+
+function openMenuAt(at) {
+  closeMenus();
+  const drop = $('#menubar .menudrop[data-drop="' + at + '"]') ||
+               $$('#menubar .menudrop')[at];
+  const btn = $$('#menubar .menubtn')[at];
+  if (!drop || !btn) return;
+  menuOpen = at;
+  drop.hidden = false;
+  btn.setAttribute('aria-expanded', 'true');
+}
+
+async function counterFacts(force) {
+  if (!force && S.counter) return S.counter;
+  S.counter = await api('/api/counter');
+  paintMenuBar();
+  return S.counter;
+}
+
+/* -------------------------------------------------------------------- Settings */
+function settingsTabs(active) {
+  return '<div class="tabs" role="tablist">' + SETTINGS_TABS.map((tab) =>
+    '<button type="button" class="tab' + (tab[0] === active ? ' on' : '') + '"' +
+    ' data-action="menu-item" data-do="settings:' + tab[0] + '"' +
+    ' role="tab" aria-selected="' + (tab[0] === active ? 'true' : 'false') + '">' +
+    esc(tab[1]) + '</button>').join('') + '</div>';
+}
+
+function settingsRow(label, control, note) {
+  return '<div class="srow"><label class="slabel">' + esc(label) + '</label>' +
+    '<div class="sfield">' + control +
+    (note ? '<p class="hint">' + note + '</p>' : '') + '</div></div>';
+}
+function settingsValue(text, title) {
+  return '<code' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text || '—') + '</code>';
+}
+function heldInShell() {
+  return IN_MAC_SHELL ? ' disabled' : '';
+}
+function selectOf(options, chosen, name) {
+  return '<select class="wide" data-pref="' + name + '"' + heldInShell() + '>' +
+    options.map((o) => '<option value="' + esc(o[0]) + '"' + (o[0] === chosen ? ' selected' : '') +
+      '>' + esc(o[1]) + '</option>').join('') + '</select>';
+}
+
+function settingsGeneral(facts) {
+  const joinedToShop = facts.answered_by === "the shop's own computer";
+  return '<div class="card"><h3>This computer</h3><div class="card-b">' +
+    settingsRow('Open this screen first:',
+      selectOf([['auto', 'Where I left off']].concat(SCREENS), pref('start', 'auto'), 'start'),
+      IN_MAC_SHELL ? 'The app window keeps this in its own Settings ▸ General.'
+                   : 'Kept on this computer only. The next time this window opens, it opens here.') +
+    settingsRow('Text size:', selectOf(TEXT_SIZES, pref('text', '1'), 'text'),
+      'Every screen grows and shrinks together. The sheet a client signs keeps the size it prints at.') +
+    settingsRow('Keep this screen awake:',
+      '<label class="schk"><input type="checkbox" data-pref="awake"' + (awakeWanted ? ' checked' : '') +
+      heldInShell() + '><span>Ask ' + (IN_MAC_SHELL ? 'this Mac' : 'this computer') +
+      ' not to sleep while the shop is open</span></label>' +
+      '<p class="hint" id="awakeState">' + esc(awakeWords()) + '</p>',
+      IN_MAC_SHELL
+        ? 'The app holds its own claim on the Mac. A browser can only ask while its own window is' +
+          ' showing, and gives the ask back when the window is hidden.'
+        : 'A browser can only ask while this window is showing, and takes the ask back the moment' +
+          ' it is hidden or the tab is put away.') +
+    '</div></div>' +
+    '<div class="card"><h3>The records engine answering this screen</h3><div class="card-b">' +
+    settingsRow('Answering for:', settingsValue(facts.answered_by + ' — ' + facts.system),
+      'the computer whose engine is serving this page') +
+    settingsRow('Computer:', settingsValue(facts.machine)) +
+    settingsRow('Address:', settingsValue(facts.address)) +
+    settingsRow('Book:', settingsValue(facts.book)) +
+    settingsRow('Copies:', settingsValue(facts.backups)) +
+    settingsRow('Sign-in:', settingsValue(facts.sign_in.required
+      ? (facts.sign_in.from_environment ? 'set by the service'
+                                         : 'one shop password, kept in the book')
+      : 'not required — anything on this Wi-Fi could read the book')) +
+    settingsRow('Version:', settingsValue(facts.version || 'no number carried in')) +
+    '<p><button class="btn sm" data-action="menu-item" data-do="settings-refresh">Read it again</button>' +
+    (joinedToShop
+      ? '<button class="btn sm ghost" data-action="menu-item" data-do="view:shop">Shop &amp; devices</button>'
+      : '') + '</p>' +
+    '<p class="hint">' + (facts.system.indexOf('Windows') === 0
+      ? 'Whether this PC keeps its own book or joins the shop’s is not a page choice: it is the two' +
+        ' links the setup put in this computer’s Start menu — <b>Join the shop’s book</b> and' +
+        ' <b>Keep this PC’s own book</b>. This computer keeps its own book: ' +
+        (facts.keeps_own_book ? 'yes' : 'no') + '; last shop address it wrote down: ' +
+        (facts.joined || 'none') + '.'
+      : 'This computer keeps its own book: ' + (facts.keeps_own_book ? 'yes' : 'no') +
+        '; the shop address it wrote down: ' + (facts.joined || 'none') + '.') + '</p>' +
+    '<p class="hint">Nothing in this tab is written into the book or into the engine. It lives in' +
+      ' this browser’s own memory, on this computer, because the engine answering the screen may be' +
+      ' the shop’s Mac and not the one you are standing at.</p>' +
+    '</div></div>';
+}
+
+function settingsAppearance() {
+  return '<div class="card"><h3>The paper behind the screens</h3><div class="card-b">' +
+    settingsRow('Background:', selectOf(PAPERS, pref('bg', 'plain'), 'bg'),
+      'The clock still owns day and night — this only repaints what the clock lights, and it stays' +
+      ' on this computer’s copy of the page. The job sheet a client signs always keeps the white' +
+      ' paper it must.') +
+    settingsRow('Text size:', selectOf(TEXT_SIZES, pref('text', '1'), 'text'),
+      'Kept with the paper because both are this screen’s own skin.') +
+    (IN_MAC_SHELL ? '<p class="hint">This window is the Mac’s own app: its Settings ▸ Appearance' +
+                    ' panel holds these, and the page leaves them to it.</p>' : '') +
+    '</div></div>';
+}
+
+function settingsProfile(facts, shop) {
+  const may = !!facts.shop_computer;
+  const values = shop.shop || {};
+  const entry = (id, label, value, limit) => settingsRow(label,
+    '<input class="wide" id="' + id + '" value="' + esc(value || '') + '"' +
+    (limit ? ' maxlength="' + limit + '"' : '') + (may ? '' : ' disabled') + '>');
+  return '<div class="card"><h3>The shop’s own details</h3><div class="card-b">' +
+    entry('setName', 'Shop name:', values.name, 120) +
+    entry('setTagline', 'Tagline:', values.tagline, 120) +
+    entry('setPhone', 'Phone:', values.phone, 40) +
+    entry('setAddress', 'Address:', values.address, 120) +
+    settingsRow('MoMo number:', settingsValue(shop.momo_number || 'not set')) +
+    settingsRow('Devices install from:', settingsValue(shop.address || '—')) +
+    settingsRow('Currency:', settingsValue((values.currency_symbol || '₵') + ' ' +
+                                           (values.currency || 'GHS'))) +
+    '<p>' +
+    '<button class="btn primary" data-action="menu-item" data-do="settings-shop-save"' +
+    (may ? '' : ' disabled') + '>Save</button>' +
+    '<button class="btn ghost" data-action="menu-item" data-do="settings-refresh">Load again</button>' +
+    '<button class="btn ghost" data-action="menu-item" data-do="view:shop">Sign-in and devices…</button>' +
+    '</p>' +
+    '<p class="hint">' + (may
+      ? 'Kept in the book, so every device and every printed sheet sees the same shop.'
+      : 'The shop’s own details are changed on the shop’s computer. This screen can read them, and' +
+        ' that is the whole of it — the box is shut, not broken.') + '</p>' +
+    '</div></div>';
+}
+
+function settingsUpdates(facts) {
+  const up = facts.updates || {};
+  const pack = up.package || {};
+  const installed = up.installed || {};
+  const asked = up.asked_at ? up.asked_at.slice(0, 16) : 'not asked yet';
+  const buttons = [];
+  buttons.push('<button class="btn" data-action="menu-item" data-do="settings-check">Ask now</button>');
+  if (pack.state === 'waiting' || pack.state === 'failed') {
+    buttons.push('<button class="btn primary" data-action="menu-item" data-do="settings-download">' +
+                 (pack.state === 'failed' ? 'Try the download again' : 'Download it') + '</button>');
+  } else if (pack.state === 'downloading' || pack.state === 'reading') {
+    buttons.push('<button class="btn primary" disabled>Bringing it down…</button>');
+  } else if (pack.state === 'ready') {
+    buttons.push('<button class="btn primary" data-action="menu-item" data-do="settings-install">' +
+                 'Install and reopen</button>');
+  }
+  buttons.push('<button class="btn ghost" data-action="menu-item" data-do="settings-repo">' +
+               'Open the repository</button>');
+  const stateRow = pack.state && pack.state !== 'none'
+    ? settingsRow('Newer build:', settingsValue(pack.state === 'ready'
+        ? pack.install_version + ' — checked and ready'
+        : pack.state === 'downloading' || pack.state === 'reading'
+          ? 'coming down (' + (pack.said || 'starting') + ')'
+          : pack.state === 'failed' ? 'the download did not finish'
+            : 'waiting to be brought down'))
+    : '';
+  const installedRow = installed.result === 'done' && installed.version
+    ? settingsRow('Last installed:', settingsValue('version ' + installed.version + ' at ' +
+                                                   String(installed.at || '').slice(0, 16)))
+    : installed.result === 'failed'
+      ? settingsRow('Last install:', settingsValue('did not finish — the old build is back in place'))
+      : '';
+  return '<div class="card"><h3>Updates</h3><div class="card-b">' +
+    settingsRow('This build:', settingsValue(facts.version || 'no number carried in')) +
+    settingsRow('Engine:', settingsValue(facts.system + ' · Python ' + facts.python)) +
+    settingsRow('Repository:', settingsValue(COUNTER_REPO)) +
+    settingsRow('Asks the repository:', settingsValue('once a week, by itself')) +
+    settingsRow('Last asked:', settingsValue(asked)) +
+    settingsRow('Next ask:', settingsValue(askNextWords(up))) +
+    settingsRow('Repository’s newest:', settingsValue(up.remote || 'nothing read back yet')) +
+    stateRow + installedRow +
+    '<p>' + buttons.join('') + '</p>' +
+    '<p class="hint" id="updateResult">' + esc(packageWords(pack) || updateWords(up)) + '</p>' +
+    '<p class="hint">Once a week the engine answering here asks the shop’s own repository for its' +
+      ' newest version number and keeps the answer in a file beside the book — never in it. When a' +
+      ' newer build is waiting, Download brings its files down and checks every one of them before' +
+      ' anything changes here; Install then closes the shop for a few seconds and opens it again on' +
+      ' the new build. Your clients, jobs, money and every record are never part of the package, so' +
+      ' the book stays exactly where it is. An ask that reached nothing is tried again within the hour.</p>' +
+    (facts.answered_by === "the shop's own computer"
+      ? '<p class="hint">The version shown is the one on the computer answering this screen — the' +
+        ' shop’s own, while this counter is joined to its book. A computer working on a book of its' +
+        ' own answers for itself.</p>' : '') +
+    '</div></div>';
+}
+
+async function viewSettings(r) {
+  const asked = (r.params.get('pane') || 'general').toLowerCase();
+  const pane = SETTINGS_TABS.some((tab) => tab[0] === asked) ? asked : 'general';
+  const facts = await counterFacts();
+  topbar('Settings', 'One book, every screen — this tab belongs to ' +
+         esc(facts.machine) + ' alone', '',
+    [{ label: '+ New job', action: 'new-job' }]);
+  let body;
+  if (pane === 'profile') {
+    body = settingsProfile(facts, await api('/api/shop'));
+  } else if (pane === 'appearance') {
+    body = settingsAppearance();
+  } else if (pane === 'updates') {
+    body = settingsUpdates(facts);
+  } else {
+    body = settingsGeneral(facts);
+  }
+  $('#view').innerHTML = settingsTabs(pane) + body;
+}
+
+/* ------------------------------------------------------------------- wiring */
+const ACTION_SEL = ['[data-action]'].concat(Object.keys(ACTIONS).map((k) => '[data-' + k + ']')).join(',');
+function actionFor(el) {
+  if (el.dataset.action) return ACTIONS[el.dataset.action];
+  const hit = Object.keys(ACTIONS).filter((k) => el.hasAttribute('data-' + k))[0];
+  return hit ? ACTIONS[hit] : null;
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#menubar')) closeMenus();
+  if (e.target.closest('.drawer-scrim')) { closeDrawer(); return; }
+  if (e.target.closest('.modal-scrim')) { closeModal(); return; }
+  const cell = e.target.closest('.qe');
+  if (cell) { openEditor(cell); return; }
+  const actor = e.target.closest(ACTION_SEL);
+  if (actor) {
+    const fn = actionFor(actor);
+    if (fn) { e.preventDefault(); fn(actor, e); return; }
+  }
+  const tab = e.target.closest('.tab[data-filter]');
+  if (tab) { setFilter(tab.dataset.filter, tab.dataset.value); return; }
+  // Reaching this point means the click landed on a real field: typing in it, or opening
+  // its picker, is not the same as choosing the row around it.
+  if (e.target.closest('input,select,textarea')) return;
+  const open = e.target.closest('[data-open]');
+  if (open && !e.target.closest('a,button')) {
+    const cut = open.dataset.open.split('/');
+    go(cut[0], {}, cut[1]);
+  }
+  const leadRow = e.target.closest('[data-open-lead]');
+  if (leadRow && !e.target.closest('a,button')) go('leads', {}, leadRow.dataset.openLead);
+});
+document.addEventListener('change', (e) => {
+  const ctl = e.target.closest('[data-filter]');
+  if (ctl && (ctl.tagName === 'SELECT' || ctl.type === 'date')) setFilter(ctl.dataset.filter, ctl.value);
+  const held = e.target.closest('[data-pref]');
+  if (held) setCounterPref(held.dataset.pref, held);
+});
+document.addEventListener('input', (e) => {
+  const ctl = e.target.closest('input[data-filter="q"]');
+  if (!ctl) return;
+  clearTimeout(S.timer);
+  S.timer = setTimeout(() => setFilter('q', ctl.value, true), 260);
+});
+document.addEventListener('submit', (e) => {
+  const nf = e.target.closest('[data-note-form]');
+  if (!nf) return;
+  e.preventDefault();
+  api('/api/jobs/' + nf.dataset.noteForm + '/note', { method: 'POST', body: JSON.stringify({ note: nf.note.value }) })
+    .then(() => { toast('Note added to the record', 'good'); openJobDrawer(Number(nf.dataset.noteForm)); })
+    .catch(fail);
+});
+function setFilter(key, value, quiet) {
+  const p = {};
+  S.route.params.forEach((v, k) => { p[k] = v; });
+  p[key] = value || '';
+  const hash = '#/' + S.route.view + (qs(p) ? '?' + qs(p) : '');
+  if (hash === location.hash) return;
+  if (quiet) {
+    history.replaceState(null, '', hash);
+    S.route = parseHash();
+    render();
+  } else {
+    location.hash = hash; /* the hashchange listener renders */
+  }
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (menuOpen >= 0) { closeMenus(); return; }
+    if (!$('#modal').hidden) closeModal();
+    else if (!$('#drawer').hidden) closeDrawer();
+  }
+  /* The Mac's ⌘ keys, brought across under Alt — see MENU_KEYS for why not Ctrl. Every one of them
+     is also a row in the menu bar, so a hand that prefers the keyboard and a hand that prefers the
+     mouse are reading one list. */
+  if (e.altKey && !e.ctrlKey && !e.metaKey && e.key !== 'Alt') {
+    const chord = (e.shiftKey ? 'shift+' : '') + String(e.key).toLowerCase();
+    const hit = MENU_KEYS[chord];
+    if (hit) { e.preventDefault(); closeMenus(); runMenuItem(hit); }
+    return;
+  }
+  if (e.key === '/' && !/input|textarea|select/i.test(document.activeElement.tagName)) {
+    const s = $('#topbar input[data-filter="q"]');
+    if (s) { e.preventDefault(); s.focus(); }
+  }
+  /* The counter's hands stay on the keys: a booking is saved without hunting for the button, and a
+     new order is one key away from anywhere in the shop. Neither fires while he is typing. */
+  const typing = /input|textarea|select/i.test(document.activeElement.tagName);
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+    const f = document.activeElement.closest ? document.activeElement.closest('form') : null;
+    const form = f || $('#modalCard form');
+    if (form && !$('#modal').hidden) { e.preventDefault(); requestSubmit(form); }
+  } else if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey && e.key === 'n' &&
+             $('#modal').hidden) {
+    e.preventDefault();
+    ACTIONS['new-job'](document.body);
+  }
+});
+function requestSubmit(form) {
+  if (typeof form.requestSubmit === 'function') form.requestSubmit();
+  else form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+}
+window.addEventListener('hashchange', () => { closeMore(); render(); });
+window.addEventListener('online', () => {
+  S.connected = true;
+  shopDarkUntil = 0;
+  paintNetworkStatus();
+  syncOfflineQueue().then(() => render()).catch(fail);
+});
+window.addEventListener('offline', () => {
+  S.connected = false;
+  shopDarkUntil = Date.now() + SHOP_DARK_MS;
+  paintNetworkStatus();
+});
+
+/* The native menu bar has no buttons of its own, so it asks for these by name.
+   If the current screen happens to show the matching button, it is handed over
+   so any data-* it carries (client, job) still reaches the form. */
+window.chrisphics = {
+  act(name) {
+    const handler = ACTIONS[name];
+    if (typeof handler !== 'function') return false;
+    handler(document.querySelector('[data-action="' + name + '"]') || document.body);
+    return true;
+  },
+  /* The Mac app's own menu still calls this until the shell is rebuilt; there is no choice
+     left in it to hand over, so it simply re-asks the clock. */
+  theme() { paintTheme(); },
+  /* Which look a given hour of the shop's day asks for, asked directly — the check tool walks all
+     twenty-four through here instead of waiting for the evening to arrive. */
+  look(hour) { return themeIsDark(new Date(2026, 0, 15, hour, 0, 0)); },
+};
+
+(async function start() {
+  applyCounterLook();
+  /* A counter who ticked "keep this screen awake" yesterday expects the window to be awake today,
+     not only after the next time it is hidden and shown again. */
+  if (awakeWanted) holdAwake(true);
+  paintTheme();
+  shellChrome();
+  try {
+    await paintNetworkStatus();
+    const session = await api('/api/session');
+    S.session = session;
+    paintSession();
+    if (session.required && !session.authenticated) { loginScreen('', session.hours); return; }
+    await boot();
+    await refreshChrome();
+    if (navigator.onLine) await syncOfflineQueue();
+    if (!location.hash) location.hash = startHash();
+    await render();
+    watchOfflineBook();
+    watchBook();
+    let remembered = '';
+    try {
+      remembered = sessionStorage.getItem('chrisphics-note') || '';
+      sessionStorage.removeItem('chrisphics-note');
+    } catch (e) { /* a private window keeps no notes */ }
+    if (remembered) toast(remembered, 'bad');
+    launchShortcut();
+  } catch (err) {
+    if (err.status === 401) loginScreen(err.message);
+    else $('#view').innerHTML = emptyState('The app cannot reach its database', err.message +
+      ' — connect to the shop Wi-Fi to sync; saved changes remain on this device.');
+  }
+})();

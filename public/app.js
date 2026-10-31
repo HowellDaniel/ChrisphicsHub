@@ -1825,11 +1825,16 @@ function loadWeather() {
       wxDown = true;
     });
 }
-function todayCard() {
+function todayCard(k) {
   const now = new Date();
   const evening = themeIsDark(now);
   const applied = document.documentElement.dataset.theme === 'dark';
   calStamp = stampOf(now);
+  const booked = Number((k || {}).jobs_today || 0);
+  const taken = Number((k || {}).collected_today || 0);
+  const glance = booked || taken
+    ? plural(booked, 'job') + ' booked today · ' + money(taken) + ' taken'
+    : 'Nothing booked yet today — the first entry starts the day.';
   return '<div class="card today' + (applied ? ' night' : '') + '" id="todayCard">' +
     '<div class="card-b today-face">' +
     '<div class="today-cal" id="todayCal" role="img" aria-label="' + esc(calAria(now)) + '">' +
@@ -1838,6 +1843,7 @@ function todayCard() {
     '<div class="today-when">' +
     '<div class="today-clock" id="todayClock">' + clockHtml(now) + '</div>' +
     '<p class="today-date" id="todayDate">' + esc(dateWords(now)) + '</p>' +
+    '<p class="today-glance" id="todayGlance">' + esc(glance) + '</p>' +
     '<div class="today-line"><span class="pill ' + (evening ? 'maybe' : 'stage') + '" id="todayLook">' +
     esc(lookWords(now)) + '</span><span class="spacer"></span></div>' +
     '<p class="hint">The screen keeps the light look between ' + hourWords(DAY_START) + ' and ' +
@@ -1948,10 +1954,15 @@ async function viewDashboard() {
         ['Quote', 'Worth', 'Price holds', '']);
 
   topbar('Dashboard', '', filtersBar('dashboard', []));
-  $('#view').innerHTML = '<p class="hint editable-hint">Anything underlined you can click: move a due date, change a status, ' +
-    'reprice an enquiry — it saves as soon as you press Enter.</p>' +
-    todayCard() +
+  /* The day and the shop's hours answer different questions and both are short, so they share one
+     row instead of pushing every figure down the screen. Under them the figures are grouped in the
+     order a counter thinks in — money, the floor, then what is priced and what went out — and each
+     group says its name so none of the twelve needs a second look to be placed. */
+  $('#view').innerHTML =
+    '<div class="grid split dash-top">' +
+    todayCard(d.kpi) +
     hoursCard(d.hours) +
+    '</div>' +
     '<div class="card bookband" role="status" aria-label="What the book holds">' +
     '<span><b>' + onFile + '</b>jobs on file</span>' +
     '<span><b>' + delivered + '</b>finished</span>' +
@@ -1959,8 +1970,9 @@ async function viewDashboard() {
     '<span><b>' + k.clients + '</b>clients</span>' +
     '<span><b>' + money(k.billed_month) + '</b>billed this month</span>' +
     '</div>' +
-    '<div class="grid kpis">' +
-    stat('Collected today', money(k.collected_today), k.collected_today > 0 ? 'payments entered' : 'nothing entered yet', 'amt good',
+    '<p class="band-title">Money</p>' +
+    '<div class="grid kpis money">' +
+    stat('Collected today', money(k.collected_today), k.collected_today > 0 ? 'payments entered' : 'nothing entered yet', 'amt good hero',
       '#/accounts', 'Click to see money in and out') +
     stat('This week', money(k.collected_week), 'last 7 days', 'amt', '#/accounts', 'Click to see the accounts book') +
     stat('Month to date', money(k.collected_month), monthName(day10(d.today)), 'amt', '#/reports', 'Click for this month in reports') +
@@ -1970,6 +1982,7 @@ async function viewDashboard() {
     stat('Owed to the shop', money(k.outstanding), 'job balances not yet paid', k.outstanding > 0 ? 'amt warn' : 'amt',
       '#/accounts', 'Click to work the balances') +
     '</div>' +
+    '<p class="band-title">The floor</p>' +
     '<div class="grid kpis">' +
     stat('Open jobs', k.open_jobs, k.open_jobs ? statusLine(d.by_status) + ' in the pipeline'
       : delivered + ' on file, all finished — nothing waiting', '', '#/jobs', 'Click to see the queue') +
@@ -1979,6 +1992,7 @@ async function viewDashboard() {
       k.overdue_jobs ? 'warn' : '', '#/jobs?overdue=1', 'Click to chase late work') +
     stat('Clients on file', k.clients, 'registered, with their jobs and balances', '', '#/clients', 'Click for the client book') +
     '</div>' +
+    '<p class="band-title">Priced and spent</p>' +
     '<div class="grid kpis">' +
     stat('Quotes waiting', k.open_quotes, k.open_quotes ? money(k.quoted_value) + ' priced, not booked' : 'nothing priced and waiting',
       '', '#/jobs?kind=Quote', 'Click to see open quotes') +
@@ -2038,7 +2052,9 @@ async function viewDashboard() {
     '</div></div>' +
     cardTable('Recently booked', '<a href="#/jobs" class="btn sm ghost">All jobs</a>',
       jobRows(d.recent), ['Job', 'Total', 'Balance', 'Status', 'Due']) +
-    '</div>';
+    '</div>' +
+    '<p class="hint editable-hint">Anything underlined you can click: move a due date, change a status, ' +
+    'reprice an enquiry — it saves as soon as you press Enter.</p>';
 }
 function monthName(iso) {
   return MON[Number((iso || '').slice(5, 7)) - 1] + ' ' + (iso || '').slice(0, 4);
@@ -5163,7 +5179,6 @@ const PAPERS = [
 const SETTINGS_TABS = [['general', 'General'], ['appearance', 'Appearance'],
                        ['profile', 'Profile'], ['updates', 'Updates']];
 const COUNTER_REPO = 'https://github.com/HowellDaniel/ChrisphicsHub';
-const COUNTER_VERSION_URL = 'https://raw.githubusercontent.com/HowellDaniel/ChrisphicsHub/main/VERSION';
 
 /* One control, one choice, kept on this computer. The engine is never told, because the engine may
    be the shop's Mac — and the shop's Mac does not change its own screen because a counter pressed
@@ -5316,6 +5331,8 @@ function runMenuItem(what) {
   if (what === 'settings-refresh') { S.counter = null; return render().catch(fail); }
   if (what === 'settings-shop-save') return saveShopProfile();
   if (what === 'settings-check') return checkForUpdate();
+  if (what === 'settings-download') return downloadUpdate();
+  if (what === 'settings-install') return installUpdate();
   if (what === 'settings-repo') return window.open(COUNTER_REPO, '_blank');
   if (what === 'focus-search') {
     const box = $('#topbar input[data-filter="q"]');
@@ -5354,35 +5371,150 @@ async function saveShopProfile() {
   }
 }
 
+/* One week, one answer, kept by the engine.
+   The page used to fetch the repository's VERSION itself, so a counter whose own internet was down
+   read "could not be reached" while the shop's Mac was perfectly online — the same fault the weather
+   tile had, and the same fix: ask the engine, which has the shop's road out. The engine also asks by
+   itself once a week (server.py: watch_updates), so this screen has news before anybody presses. */
+function updateWords(up) {
+  if (!up) return '';
+  if (!up.asked_at) {
+    return 'No computer here has asked the repository yet. The engine that answers this screen does it' +
+           ' by itself once a week, and within a minute of first coming up.';
+  }
+  if (up.verdict === 'newer') {
+    return 'Version ' + up.remote + ' is on the repository and this build is ' + up.this + '.';
+  }
+  if (up.verdict === 'ahead') {
+    return 'This build carries version ' + up.this + ' — the repository is still on ' + up.remote + '.';
+  }
+  if (up.verdict === 'same') {
+    return 'Nothing newer: this build (' + up.this + ') is the newest version the repository has.';
+  }
+  return up.trouble || 'The last ask brought no answer back.';
+}
+
+/* The newer build itself: what has come down, how much is left, and what the button would do next.
+   The engine stages the files beside the book and proves every one of them; nothing here installs
+   anything by itself, because taking a build in closes the shop for a few seconds. */
+function packageWords(pack) {
+  if (!pack) return '';
+  if (pack.state === 'ready') {
+    return 'Version ' + pack.install_version + ' is here and checked — ' + pack.files + ' files, ' +
+           bytesWords(pack.size) + '. Install it and the shop closes, then opens again on the new build.';
+  }
+  if (pack.state === 'downloading') {
+    const share = pack.total ? Math.min(100, Math.round(100 * pack.bytes / pack.total)) : 0;
+    return 'Bringing version ' + (pack.version || '') + ' down — ' + (pack.said || '…') +
+           (pack.total ? ' (' + share + '%)' : '') + '.';
+  }
+  if (pack.state === 'reading') return 'Reading the repository’s build record…';
+  if (pack.state === 'failed') return (pack.said || pack.trouble || 'The download did not finish.') +
+                                      ' Nothing on this computer was changed.';
+  if (pack.state === 'waiting') {
+    return 'Version ' + pack.version + ' is waiting on the repository. Press Download and it comes' +
+           ' down and is checked before anything changes here.';
+  }
+  return '';
+}
+
+function bytesWords(count) {
+  const n = Number(count || 0);
+  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  if (n >= 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' bytes';
+}
+
+function askNextWords(up) {
+  if (!up || !up.asked_at) return 'the first time this engine comes up';
+  if (up.due) return 'any minute now';
+  const hours = up.next_in_hours || 0;
+  if (hours < 24) return 'in about ' + hours + ' hour' + (hours === 1 ? '' : 's');
+  return 'in about ' + Math.round(hours / 24) + ' day' + (Math.round(hours / 24) === 1 ? '' : 's');
+}
+
 async function checkForUpdate() {
-  const line = $('#updateResult');
-  const say = (words) => { if (line) line.textContent = words; };
+  const say = (words) => { const line = $('#updateResult'); if (line) line.textContent = words; };
   say('Asking the repository…');
-  const mine = (S.counter || {}).version || '';
   try {
-    const asked = await fetch(COUNTER_VERSION_URL, {
-      headers: { 'Accept': 'text/plain' },
-    });
-    if (!asked.ok) throw new Error('answer ' + asked.status);
-    const remote = (await asked.text()).trim();
-    if (!remote) throw new Error('an empty answer');
-    if (!mine) {
-      say('The repository is on version ' + remote + '. The build answering here carries no' +
-          ' number, so the two cannot be compared — rebuild it with tools/build-installer.py or' +
-          ' desktop/build-app.sh to give it one.');
-      return;
-    }
-    const against = versionCompare(mine, remote);
-    say(against < 0
-      ? 'Version ' + remote + ' is on the repository and this build is ' + mine + '. Rebuild it to' +
-        ' take the newer version in.'
-      : against > 0
-        ? 'This build carries version ' + mine + ' — the repository is still on ' + remote + '.'
-        : 'This build (' + mine + ') is the newest version the repository has.');
+    /* A plain fetch, not api(): this is not a record, so it must never join the queue a dark shop
+       keeps of writes to send later, nor be remembered as one of the book's idempotent operations. */
+    const answer = await fetch('/api/update-check', { method: 'POST' });
+    const body = await answer.json().catch(() => null);
+    if (!answer.ok) throw new Error((body && body.error) || ('the engine answered ' + answer.status));
+    S.counter = null;
+    /* The pane is redrawn from the same facts the answer was kept in. The line is re-read after the
+       redraw because render() replaces the element the old line pointed at. */
+    await counterFacts(true);
+    await render();
+    say('Asked just now. ' + updateWords(((S.counter || {}).updates) || {}));
   } catch (e) {
-    say('The repository could not be reached just now (' + e.message + ').');
+    say('The shop’s engine could not ask the repository (' + e.message + ').');
   }
 }
+
+/* Download: the engine fetches the newer build from the shop's own repository, checks every file
+   against the record it was published with, and keeps it beside the book. The screen follows it. */
+async function downloadUpdate() {
+  const say = (words) => { const line = $('#updateResult'); if (line) line.textContent = words; };
+  say('Asking the repository for the newer build…');
+  try {
+    const answer = await fetch('/api/update-download', { method: 'POST' });
+    const body = await answer.json().catch(() => null);
+    if (!answer.ok) throw new Error((body && body.trouble) || ('the engine answered ' + answer.status));
+  } catch (e) {
+    return say('The newer build did not come down (' + e.message + '). Nothing here was changed.');
+  }
+  for (let look = 0; look < 400; look += 1) {
+    S.counter = null;
+    const facts = await counterFacts(true);
+    const pack = ((facts || {}).updates || {}).package || {};
+    await render();
+    const line = $('#updateResult');
+    if (line) line.textContent = packageWords(pack);
+    if (pack.state === 'ready' || pack.state === 'failed') return;
+    await new Promise((done) => setTimeout(done, 800));
+  }
+  say('The download is taking longer than this screen waits. Come back to Updates in a minute.');
+}
+
+/* Install: the one press that changes this computer. The app closes (the Mac's own window or the
+   tab), the engine hands the checked files to the apply script, and the script brings the shop
+   back. The records are never part of the package, so the book is exactly where it was. */
+async function installUpdate() {
+  const facts = await counterFacts(true);
+  const pack = ((facts || {}).updates || {}).package || {};
+  if (!pack.ready) return toast('There is no checked build here to install yet.', 'bad');
+  const sure = window.confirm('Install version ' + pack.install_version + ' now?\n\nThe shop closes for a ' +
+                              'few seconds and opens again on the new build. Clients, jobs, money and ' +
+                              'every record stay exactly as they are.');
+  if (!sure) return;
+  const say = (words) => { const line = $('#updateResult'); if (line) line.textContent = words; };
+  say('Closing the shop to install ' + pack.install_version + '… it will open again by itself.');
+  try {
+    const answer = await fetch('/api/update-install', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app: '' }),
+    });
+    const body = await answer.json().catch(() => null);
+    if (!answer.ok || !(body && body.armed)) {
+      throw new Error((body && body.trouble) || ('the engine answered ' + answer.status));
+    }
+    say('Installing ' + pack.install_version + '. The shop is closing and will open again on its own. ' +
+        'This page reloads when it is back.');
+  } catch (e) {
+    return say('The install did not start (' + e.message + '). Nothing here was changed.');
+  }
+  for (let look = 0; look < 120; look += 1) {
+    await new Promise((done) => setTimeout(done, 1000));
+    try {
+      const back = await fetch('/healthz', { cache: 'no-store' });
+      if (back.ok) return location.reload();
+    } catch (ignored) { /* the shop is between engines; keep waiting */ }
+  }
+  say('The shop has not answered yet. Open it again from its own icon in a minute — the install is done.');
+}
+
 
 /* Alt is the menu key on a Windows computer, and it has to be: the browser itself keeps Ctrl+N for
    a new window, Ctrl+W for this one, Ctrl+R for a reload and Ctrl+1 to Ctrl+9 for its own tabs, and
@@ -5623,34 +5755,59 @@ function settingsProfile(facts, shop) {
 }
 
 function settingsUpdates(facts) {
+  const up = facts.updates || {};
+  const pack = up.package || {};
+  const installed = up.installed || {};
+  const asked = up.asked_at ? up.asked_at.slice(0, 16) : 'not asked yet';
+  const buttons = [];
+  buttons.push('<button class="btn" data-action="menu-item" data-do="settings-check">Ask now</button>');
+  if (pack.state === 'waiting' || pack.state === 'failed') {
+    buttons.push('<button class="btn primary" data-action="menu-item" data-do="settings-download">' +
+                 (pack.state === 'failed' ? 'Try the download again' : 'Download it') + '</button>');
+  } else if (pack.state === 'downloading' || pack.state === 'reading') {
+    buttons.push('<button class="btn primary" disabled>Bringing it down…</button>');
+  } else if (pack.state === 'ready') {
+    buttons.push('<button class="btn primary" data-action="menu-item" data-do="settings-install">' +
+                 'Install and reopen</button>');
+  }
+  buttons.push('<button class="btn ghost" data-action="menu-item" data-do="settings-repo">' +
+               'Open the repository</button>');
+  const stateRow = pack.state && pack.state !== 'none'
+    ? settingsRow('Newer build:', settingsValue(pack.state === 'ready'
+        ? pack.install_version + ' — checked and ready'
+        : pack.state === 'downloading' || pack.state === 'reading'
+          ? 'coming down (' + (pack.said || 'starting') + ')'
+          : pack.state === 'failed' ? 'the download did not finish'
+            : 'waiting to be brought down'))
+    : '';
+  const installedRow = installed.result === 'done' && installed.version
+    ? settingsRow('Last installed:', settingsValue('version ' + installed.version + ' at ' +
+                                                   String(installed.at || '').slice(0, 16)))
+    : installed.result === 'failed'
+      ? settingsRow('Last install:', settingsValue('did not finish — the old build is back in place'))
+      : '';
   return '<div class="card"><h3>Updates</h3><div class="card-b">' +
     settingsRow('This build:', settingsValue(facts.version || 'no number carried in')) +
     settingsRow('Engine:', settingsValue(facts.system + ' · Python ' + facts.python)) +
     settingsRow('Repository:', settingsValue(COUNTER_REPO)) +
-    '<p><button class="btn" data-action="menu-item" data-do="settings-check">Check for update</button>' +
-    '<button class="btn ghost" data-action="menu-item" data-do="settings-repo">Open the repository</button></p>' +
-    '<p class="hint" id="updateResult">Nothing leaves this computer unless the Check button is' +
-      ' pressed: it asks the shop’s own repository for the newest version number and compares it' +
-      ' with the build answering here.</p>' +
+    settingsRow('Asks the repository:', settingsValue('once a week, by itself')) +
+    settingsRow('Last asked:', settingsValue(asked)) +
+    settingsRow('Next ask:', settingsValue(askNextWords(up))) +
+    settingsRow('Repository’s newest:', settingsValue(up.remote || 'nothing read back yet')) +
+    stateRow + installedRow +
+    '<p>' + buttons.join('') + '</p>' +
+    '<p class="hint" id="updateResult">' + esc(packageWords(pack) || updateWords(up)) + '</p>' +
+    '<p class="hint">Once a week the engine answering here asks the shop’s own repository for its' +
+      ' newest version number and keeps the answer in a file beside the book — never in it. When a' +
+      ' newer build is waiting, Download brings its files down and checks every one of them before' +
+      ' anything changes here; Install then closes the shop for a few seconds and opens it again on' +
+      ' the new build. Your clients, jobs, money and every record are never part of the package, so' +
+      ' the book stays exactly where it is. An ask that reached nothing is tried again within the hour.</p>' +
     (facts.answered_by === "the shop's own computer"
       ? '<p class="hint">The version shown is the one on the computer answering this screen — the' +
         ' shop’s own, while this counter is joined to its book. A computer working on a book of its' +
         ' own answers for itself.</p>' : '') +
     '</div></div>';
-}
-
-/* 1.2 against 1.10: every dotted part is a number, so ten is ten and never a one — the same rule
-   the Mac's Settings ▸ Updates pane uses, written out again here so a counter gets one answer. */
-function versionCompare(a, b) {
-  const pa = String(a || '0').split('.').map((part) => parseInt(part, 10) || 0);
-  const pb = String(b || '0').split('.').map((part) => parseInt(part, 10) || 0);
-  const long = Math.max(pa.length, pb.length);
-  while (pa.length < long) pa.push(0);
-  while (pb.length < long) pb.push(0);
-  for (let i = 0; i < long; i += 1) {
-    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
-  }
-  return 0;
 }
 
 async function viewSettings(r) {

@@ -1,0 +1,109 @@
+{
+ "base": "main/update/chrisphics-hub-1.9",
+ "files": [
+  {
+   "name": "VERSION",
+   "sha256": "afc6e13a0622e1444a83d4eeafdfab6021e1ea26a4f16e8d8f2448f81b4dfa30",
+   "size": 4
+  },
+  {
+   "name": "public/app.js",
+   "sha256": "df096bfe9b3515d877360c5bc92dbecb9d2a8781024c73569c024eee0e7496e6",
+   "size": 349480
+  },
+  {
+   "name": "public/img/apple-touch-icon.png",
+   "sha256": "1dec8cfce7b2bfd15c1b36557dcfed397386b2679161cdacd1cd888901e71bce",
+   "size": 15907
+  },
+  {
+   "name": "public/img/bg-beams.png",
+   "sha256": "a385e8624a0d24bf9f27719c2801f42ae8bf600d2b500293ed15d4535161be76",
+   "size": 203871
+  },
+  {
+   "name": "public/img/bg-bloom.png",
+   "sha256": "645de67472724fa9fb5d87336cf04afdc7c3e204f74bacc51f6329c20caa5bcc",
+   "size": 208205
+  },
+  {
+   "name": "public/img/bg-circuit.png",
+   "sha256": "29aa15c7cb84892b0b344d88b15195d41835b5ffd37cb7a218641746a2bb6c7a",
+   "size": 138904
+  },
+  {
+   "name": "public/img/bg-constellation.png",
+   "sha256": "6d3177e62816e8e9cedef806521bb2067397b5022d51dbdc5528369d4d69f530",
+   "size": 235783
+  },
+  {
+   "name": "public/img/bg-dusk.png",
+   "sha256": "81f0b585ae06ae4dc57a982dc8d350d8f0295d1ca4291668843bbbcf19caac84",
+   "size": 77405
+  },
+  {
+   "name": "public/img/bg-violet.png",
+   "sha256": "342518949be364bc216cd4798f7ebd30dcaed4fa5b2e4aaf9af6e34da2f85ae6",
+   "size": 240409
+  },
+  {
+   "name": "public/img/brand.png",
+   "sha256": "ea2cd28ca370438cb380db78810b682a651f95682f4810f9b575f8fc77437cf2",
+   "size": 43812
+  },
+  {
+   "name": "public/img/icon-192.png",
+   "sha256": "6762abc6d8232433563bce96902f2598cd12370ab387a425091b6461355e5654",
+   "size": 17017
+  },
+  {
+   "name": "public/img/icon-512.png",
+   "sha256": "c7a6e825425c3b8db4fd6da86bc175ab7a0bdfdae1d8b521d86caff34cb2486f",
+   "size": 68224
+  },
+  {
+   "name": "public/img/icon-maskable-512.png",
+   "sha256": "49086146d97a78f3c17c63bebebe311b22c9c65d731975cac877f3a666ab7c86",
+   "size": 67690
+  },
+  {
+   "name": "public/img/mark.png",
+   "sha256": "3a94cd0c2a063161d8da01c563cbd6ff3f9cdbf1a38407e51c424d67d07309f0",
+   "size": 41870
+  },
+  {
+   "name": "public/index.html",
+   "sha256": "d8e62580bb0f90e3ed35599d101020320ba2bc4a28d8c282d2e650a63e26ed85",
+   "size": 6285
+  },
+  {
+   "name": "public/manifest.webmanifest",
+   "sha256": "591ba32d8e025733872a0b2312ef82b873f71c9925a8de61fcbdafa528cd40bd",
+   "size": 1497
+  },
+  {
+   "name": "public/styles.css",
+   "sha256": "1a83f4dad3d1ee6d18ce9d9ba2db680aa53931a5f1a6f3ff8848e1fc5f510f36",
+   "size": 79840
+  },
+  {
+   "name": "public/sw.js",
+   "sha256": "d443cd35cf28ea59df9d8d9024955f7bd0e62c2d2c8633f024954001c339d978",
+   "size": 3521
+  },
+  {
+   "name": "schema.sql",
+   "sha256": "66ad21db9101a3f168c3164fc214ce0605692e1c062db26e356d85fc312300a0",
+   "size": 20170
+  },
+  {
+   "name": "server.py",
+   "sha256": "3339ebc9fd3ebabda6eadc5f17b48bac911fd6eaa5c5f8f51f46c2f2cd8ed2b1",
+   "size": 434949
+  }
+ ],
+ "folder": "chrisphics-hub-1.9",
+ "notes": "Weekly update check with a checked download, an install the cashier presses, and a shop that closes and reopens on the newer build. The book is never part of the package.",
+ "size": 2254843,
+ "version": "1.9"
+}

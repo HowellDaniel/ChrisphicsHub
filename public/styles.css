@@ -463,6 +463,17 @@ input::placeholder { color: var(--placeholder); }
 .stat.warn .v { color: var(--bad); }
 .stat.good .v { color: var(--ok); }
 .stat.amt .v { font-family: var(--num); font-weight: 600; }
+/* The dashboard's three groups of figures say their name in a line of their own, so twelve tiles read
+   as three thoughts rather than one long list. The rule carries the eye across to the end of the row. */
+.band-title { display: flex; align-items: center; gap: 12px; margin: 4px 2px -6px;
+  font-size: .72em; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.band-title::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+/* Today's takings are the figure the counter looks for first, so its tile is the one that is a little
+   larger and carries the shop's own colour down its edge. */
+.kpis.money { grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); }
+.stat.hero { border-left: 4px solid var(--brand); }
+.stat.hero .v { font-size: clamp(25px, 1.9vw + 14px, 36px); }
+.today-glance { margin: 7px 0 3px; font-size: .95em; font-weight: 500; color: var(--text); }
 /* A shop address is one unbroken token, and the name is longer than the number ever was: set at the
    size a figure gets, it ran past the edge of its own card. So it keeps a figure's weight at a
    reading size, and is allowed to break where a device has to break it. */
@@ -649,6 +660,9 @@ input::placeholder { color: var(--placeholder); }
   backdrop-filter: blur(20px) saturate(130%);
 }
 .view.glass .stat { border: 1px solid var(--glass-line); }
+/* The hero tile keeps its brand edge through the glass: the ring above sets every side to the
+   one-pixel rim, so the edge that marks today's takings is put back by name. */
+.view.glass .stat.hero { border-left: 4px solid var(--brand); }
 /* The specular rim: light along the edge, brightest where it meets the top-left and picking up
    again at the bottom-right. A one-pixel ring drawn from a gradient, with its own middle masked
    out — both spellings of the mask, because WebKit and Blink name the composite differently. */
@@ -674,7 +688,7 @@ input::placeholder { color: var(--placeholder); }
    work. A screen with nothing to list is the other case: its `.empty` is a panel in its own right
    (a top-level one, so it is the same tier as a card and not a second glass inside a glass), and so
    its words need no special ink. */
-.view.glass > .hint { color: var(--muted-on-wash); }
+.view.glass > .hint, .view.glass > .band-title { color: var(--muted-on-wash); }
 /* A way in written inside that line is the same case as the line itself: no glass over it, so the
    brand crimson it would inherit reads 4.14:1 by day and 3.50:1 at night. Both palettes lift it. */
 .view.glass > .hint a { color: var(--link-on-wash); }
@@ -1119,6 +1133,7 @@ label.field.wide { grid-column: 1 / -1; }
   /* Two figures side by side still read at phone width; one per row buried the shop's
      whole day below the fold. */
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpis.money { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .stat { padding: 12px; }
   /* A month needs seven columns to stay legible, so on a phone it takes the whole row and the clock
      drops underneath it — same two widgets, stacked rather than shrunk to unreadable cells. */
@@ -1128,6 +1143,8 @@ label.field.wide { grid-column: 1 / -1; }
      breathe, so it stays the six cells the desktop shows rather than becoming a shorter list. */
   .today-wx { width: 100%; }
   .stat .v { font-size: 20px; }
+  .stat.hero .v { font-size: 23px; }
+  .band-title { margin-top: 0; }
   .stat .n { font-size: .74em; }
   .f-grid { grid-template-columns: minmax(0, 1fr); }
   .f-grid .field.wide { grid-column: auto; }

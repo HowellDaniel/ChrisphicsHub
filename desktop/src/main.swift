@@ -1227,7 +1227,20 @@ final class UpdatesPane: Pane {
     override var paneTitle: String { "Updates" }
     override var symbol: String { "arrow.triangle.2.circlepath" }
 
-    private var result: NSTextField!
+    /* The one road out is the engine's, and the one road in is this Mac's own press. The engine asks
+       the repository once a week by itself and keeps the answer beside the book; Download brings the
+       newer build down and checks every file; Install closes the shop for a few seconds, puts the
+       checked files in place and opens it again. The records are never part of the package. */
+
+    private var askedValue: NSTextField!
+    private var nextValue: NSTextField!
+    private var newestValue: NSTextField!
+    private var stateValue: NSTextField!
+    private var answerValue: NSTextField!
+    private var askButton: NSButton!
+    private var downloadButton: NSButton!
+    private var installButton: NSButton!
+    private var busy = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -1236,10 +1249,20 @@ final class UpdatesPane: Pane {
         let commit = info?["ChrisphicsBuildCommit"] as? String ?? "unknown"
         let built = info?["ChrisphicsBuildDate"] as? String ?? "unknown"
 
-        result = noteLabel("This build is \(version) from commit \(commit), made \(built).")
-        result.preferredMaxLayoutWidth = 430
+        askedValue = valueLabel("…")
+        nextValue = valueLabel("…")
+        newestValue = valueLabel("…")
+        stateValue = valueLabel("…")
+        answerValue = noteLabel("This build is \(version) from commit \(commit), made \(built).")
+        answerValue.preferredMaxLayoutWidth = 430
+        // Pane.say() writes here; without the link this pane's one line would never change.
+        statusLabel = answerValue
 
-        let buttons = NSStackView(views: [pushButton("Check for update", self, #selector(check)),
+        askButton = pushButton("Ask now", self, #selector(check))
+        downloadButton = pushButton("Download it", self, #selector(download))
+        installButton = pushButton("Install and reopen", self, #selector(install))
+        for button in [downloadButton!, installButton!] { button.isHidden = true }
+        let buttons = NSStackView(views: [askButton, downloadButton, installButton,
                                           pushButton("Open the repository", self, #selector(openRepo))])
         buttons.orientation = .horizontal
         buttons.spacing = 8
@@ -1247,63 +1270,209 @@ final class UpdatesPane: Pane {
         place(form([("This build:", valueLabel(version + "  (commit " + commit + ")")),
                     ("Built:", valueLabel(built)),
                     ("Repository:", valueLabel(UpdatesPane.repository)),
+                    ("Last asked:", askedValue),
+                    ("Next ask:", nextValue),
+                    ("Repository's newest:", newestValue),
+                    ("Newer build:", stateValue),
                     ("", buttons)],
-                   notes: [result, noteLabel("Nothing leaves this Mac unless the Check button is pressed: it asks "
-                                                + "the shop's own repository for the newest version number and "
-                                                + "compares it with this build's. Each change to the app moves the "
-                                                + "number on — 1.0, 1.1, 1.2 — and rebuilding is done on this Mac "
-                                                + "with desktop/build-app.sh.")]))
+                   notes: [answerValue, noteLabel("Once a week the records engine asks the shop's own repository "
+                                                + "for its newest version number and keeps the answer in a file "
+                                                + "beside the book — never in it. When a newer build is waiting, "
+                                                + "Download brings its files down and checks every one of them; "
+                                                + "Install then closes the shop for a few seconds and opens it "
+                                                + "again on the new build. Clients, jobs, money and every record "
+                                                + "stay exactly where they are — the package holds only the "
+                                                + "software.")]))
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        load()
     }
 
     static let repository = "https://github.com/HowellDaniel/ChrisphicsHub"
-
-    /// 1.2 against 1.10: every dotted part is a number, so ten is ten and never a one.
-    static func versionCompare(_ a: String, _ b: String) -> ComparisonResult {
-        var pa = a.split(separator: ".").compactMap { Int($0) }
-        var pb = b.split(separator: ".").compactMap { Int($0) }
-        while pa.count < pb.count { pa.append(0) }
-        while pb.count < pa.count { pb.append(0) }
-        for (x, y) in zip(pa, pb) where x != y {
-            return x < y ? .orderedAscending : .orderedDescending
-        }
-        return .orderedSame
-    }
 
     @objc private func openRepo() {
         if let url = URL(string: UpdatesPane.repository) { NSWorkspace.shared.open(url) }
     }
 
     @objc private func check() {
-        result.stringValue = "Asking GitHub…"
-        guard let url = URL(string: "https://raw.githubusercontent.com/HowellDaniel/ChrisphicsHub/main/VERSION")
-        else { return result.stringValue = "That address could not be built." }
-        var request = URLRequest(url: url, timeoutInterval: 10)
-        let mine = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
-        request.setValue("\(kAppName)/\(mine)", forHTTPHeaderField: "User-Agent")
-        let session = URLSession(configuration: .ephemeral)
-        session.dataTask(with: request) { data, response, error in
-            session.finishTasksAndInvalidate()
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let remote = (data.flatMap { String(data: $0, encoding: .utf8) } ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            DispatchQueue.main.async {
-                guard error == nil, status == 200, !remote.isEmpty else {
-                    self.result.stringValue = "GitHub could not be reached just now"
-                        + "\(error.map { " (\($0.localizedDescription))" } ?? "")."
-                    return
-                }
-                switch Self.versionCompare(mine, remote) {
-                case .orderedAscending:
-                    self.result.stringValue = "Version \(remote) is on the repository and this build is \(mine). "
-                        + "Rebuild with desktop/build-app.sh to take the newer version in."
-                case .orderedSame:
-                    self.result.stringValue = "This build (\(mine)) is the newest version the repository has."
-                case .orderedDescending:
-                    self.result.stringValue = "This build carries version \(mine) — the repository is still "
-                        + "on \(remote)."
-                }
+        guard !busy else { return }
+        say("Asking the repository…")
+        ShopAPI.call("POST", "api/update-check") { [weak self] outcome in
+            guard let self = self else { return }
+            switch outcome {
+            case .failure(let refused): self.say(refused.why, .systemRed)
+            case .success: self.load()
             }
-        }.resume()
+        }
+    }
+
+    @objc private func download() {
+        guard !busy else { return }
+        busy = true
+        say("Asking the repository for the newer build…")
+        ShopAPI.call("POST", "api/update-download") { [weak self] outcome in
+            guard let self = self else { return }
+            if case .failure(let refused) = outcome { self.say(refused.why, .systemRed) }
+            self.follow()
+        }
+    }
+
+    /// Follow the download until the engine says the build is checked, then hand the screen over.
+    private func follow() {
+        ShopAPI.call("GET", "api/counter") { [weak self] outcome in
+            guard let self = self else { return }
+            guard case .success(let facts) = outcome else { self.busy = false; return }
+            let up = facts["updates"] as? [String: Any] ?? [:]
+            let pack = up["package"] as? [String: Any] ?? [:]
+            self.paint(up)
+            let state = pack["state"] as? String ?? "none"
+            if state == "ready" || state == "failed" || state == "none" {
+                self.busy = false
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self.follow() }
+        }
+    }
+
+    @objc private func install() {
+        guard !busy, let facts = lastUp, let pack = facts["package"] as? [String: Any],
+              (pack["ready"] as? Bool) == true else {
+            return say("There is no checked build here to install yet.", .secondaryLabelColor)
+        }
+        let version = pack["install_version"] as? String ?? ""
+        let alert = NSAlert()
+        alert.messageText = "Install version \(version) now?"
+        alert.informativeText = "The shop closes for a few seconds and opens again on the new build. "
+            + "Clients, jobs, money and every record stay exactly as they are — the package holds "
+            + "only the software."
+        alert.addButton(withTitle: "Install and reopen")
+        alert.addButton(withTitle: "Not now")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        busy = true
+        say("Installing \(version). The shop is closing and will open again on its own.", .systemOrange)
+        ShopAPI.call("POST", "api/update-install",
+                     ["app": Bundle.main.bundlePath]) { [weak self] outcome in
+            guard let self = self else { return }
+            switch outcome {
+            case .failure(let refused):
+                self.busy = false
+                self.say(refused.why, .systemRed)
+            case .success(let armed):
+                guard (armed["armed"] as? Bool) == true else {
+                    self.busy = false
+                    return self.say(armed["trouble"] as? String ?? "The install did not start.",
+                                    .systemRed)
+                }
+                // The engine closes itself in two seconds; this window follows it, and the installer
+                // opens the app again on the new build.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { NSApp.terminate(nil) }
+            }
+        }
+    }
+
+    private var lastUp: [String: Any]?
+
+    @objc private func load() {
+        ShopAPI.call("GET", "api/counter") { [weak self] outcome in
+            guard let self = self else { return }
+            switch outcome {
+            case .failure(let refused): self.say(refused.why, .systemRed)
+            case .success(let facts):
+                self.paint(facts["updates"] as? [String: Any] ?? [:])
+            }
+        }
+    }
+
+    /// The same sentences the browser's Updates tab makes from the same facts.
+    private func paint(_ up: [String: Any]) {
+        lastUp = up
+        let asked = up["asked_at"] as? String ?? ""
+        let remote = up["remote"] as? String ?? ""
+        let mine = up["this"] as? String ?? ""
+        let verdict = up["verdict"] as? String ?? ""
+        let pack = up["package"] as? [String: Any] ?? [:]
+        let state = pack["state"] as? String ?? "none"
+        let installed = up["installed"] as? [String: Any] ?? [:]
+        askedValue.stringValue = asked.isEmpty ? "not asked yet" : String(asked.prefix(16))
+        if asked.isEmpty {
+            nextValue.stringValue = "when this engine next comes up"
+        } else if (up["due"] as? Bool) == true {
+            nextValue.stringValue = "any minute now"
+        } else {
+            let hours = (up["next_in_hours"] as? Int) ?? 0
+            nextValue.stringValue = hours >= 48
+                ? "in about \(Int(round(Double(hours) / 24))) days"
+                : "in about \(hours) hours"
+        }
+        newestValue.stringValue = remote.isEmpty ? "nothing read back yet" : remote
+
+        askButton.isHidden = state == "downloading" || state == "reading" || busy
+        downloadButton.isHidden = !(state == "waiting" || state == "failed")
+        installButton.isHidden = state != "ready"
+        downloadButton.title = state == "failed" ? "Try the download again" : "Download it"
+
+        switch state {
+        case "waiting":
+            stateValue.stringValue = "version \(remote) — waiting to be brought down"
+        case "reading":
+            stateValue.stringValue = "reading the repository's build record…"
+        case "downloading":
+            let total = (pack["total"] as? Int) ?? 0
+            let got = (pack["bytes"] as? Int) ?? 0
+            let share = total > 0 ? min(100, Int(round(100.0 * Double(got) / Double(total)))) : 0
+            stateValue.stringValue = "coming down — \(pack["said"] as? String ?? "…")"
+                + (total > 0 ? " (\(share)%)" : "")
+        case "ready":
+            stateValue.stringValue = "version \(pack["install_version"] as? String ?? "")"
+                + " — checked and ready to install"
+        case "failed":
+            stateValue.stringValue = "the download did not finish"
+        default:
+            stateValue.stringValue = installed["result"] as? String == "done"
+                ? "already installed version \(installed["version"] as? String ?? "")"
+                : "nothing newer"
+        }
+
+        if installed["result"] as? String == "done", let version = installed["version"] as? String {
+            say("Updated to \(version) at \(String((installed["at"] as? String ?? "").prefix(16))).",
+                .systemGreen)
+            return
+        }
+        if installed["result"] as? String == "failed" {
+            say("The last install did not finish, so the old build is back in place.",
+                .systemOrange)
+            return
+        }
+        switch state {
+        case "ready":
+            say("Version \(pack["install_version"] as? String ?? "") is here and checked. Install it and "
+                + "the shop closes, then opens again on the new build.", .systemOrange)
+        case "downloading", "reading":
+            say(pack["said"] as? String ?? "Bringing the newer build down…", .secondaryLabelColor)
+        case "failed":
+            say((pack["said"] as? String ?? "The download did not finish.")
+                + " Nothing on this Mac was changed.", .systemRed)
+        case "waiting":
+            say("Version \(remote) is waiting on the repository. Press Download and it comes down and "
+                + "is checked before anything changes here.", .systemOrange)
+        default:
+            switch verdict {
+            case "newer":
+                say("Version \(remote) is on the repository and this build is \(mine).",
+                    .systemOrange)
+            case "same":
+                say("Nothing newer: this build (\(mine)) is the newest version the repository has.",
+                    .secondaryLabelColor)
+            case "ahead":
+                say("This build carries \(mine) — the repository is still on \(remote), which usually "
+                    + "means a push is owed.", .secondaryLabelColor)
+            default:
+                say((up["trouble"] as? String) ?? "The engine has not brought an answer back yet.",
+                    .secondaryLabelColor)
+            }
+        }
     }
 }
 

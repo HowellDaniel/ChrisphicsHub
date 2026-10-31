@@ -62,7 +62,7 @@ and the window resizes to whichever pane you are in.
 | **General** | open at login; which screen the app shows first (any of the ten, or "Where I left off"); text size 90–140%; keep this Mac awake while the shop is open; which records engine the window is attached to; where the book and the backups live, with Back up now / Show book in Finder / Open backups |
 | **Appearance** | the paper behind every screen — the shop's own plain page, a coloured paper or one of the wallpapers. The clock still decides light and dark, and a job sheet always keeps the white paper it must be |
 | **Profile** | the shop's name, tagline, phone and address, kept *in the book*; the MoMo number, the address devices install from, and the currency are read out but not editable here |
-| **Updates** | this build's version, commit and build date, the repository, **Check for update**, and a button to open the repository |
+| **Updates** | this build's version, commit and build date, the repository, when the engine last asked, what version the repository holds, **Ask now**, **Download it** and **Install and reopen**, and a button to open the repository |
 
 General describes one machine, so it lives in that Mac's own preferences
 (`UserDefaults`) and never in the book. Profile is the opposite: **Save** posts through the shop's
@@ -70,7 +70,8 @@ API into the book, so every later job sheet, quote and queued client message is 
 words, and a phone signing in to the same server sees them too. That is why the server takes
 profile writes only from the shop computer itself — and why the pane says so when it is refused.
 Clearing a field and saving drops it back to the default `server.py` (or its environment) seeded.
-**Check for update** is the only outward call in the window; see [Notes](#notes).
+**Check for update** is now the engine's own weekly ask, and the pane reads its answer; see
+[Notes](#notes).
 
 **The same menus where there is no Mac.** A Windows PC opened by `Chrisphics Hub.cmd`, or any browser
 pointed at the shop's address, has no native menu bar and no `⌘,` to answer it — so the page draws the
@@ -439,15 +440,15 @@ behaves:
 | --- | --- |
 | **General** | the engine address on this computer, with **Refresh**; **Open in browser**; this computer's book and its size, with **Show in Finder**; the copies folder with how many copies it holds and the free space left, with **Open folder** and **Copy the book now**; page size 90–140%; keep this Mac awake while the shop is open; open the app at sign-in |
 | **Profile** | the shop's name, tagline, phone and address, saved into this computer's own book; the currency, the MoMo number and the address devices install from are read out, not typed |
-| **Updates** | this build's commit and the day and time it was made, the repository, **Check for update**, and **Open the repository** |
+| **Updates** | this build's commit and the day and time it was made, the repository, when the engine last asked, what the repository holds, **Ask now**, **Download it** and **Install and reopen**, and **Open the repository** |
 
 General's choices belong to this Mac and live in its own preferences (`UserDefaults`); Profile's
 belong to the shop and go through the engine into the book, so the same words reach every job sheet,
 quote and queued client message; Updates reads its stamp out of the bundle's `Info.plist`, which the
 build writes (`ChrisphicsBuildDate`) beside the commit, so two handovers can be told apart by opening
-the window. **Check for update** is the one outward call in the whole app, and it happens only when
-the button is pressed. The copies count and the free space come from the engine, so they are the
-figures the dashboard shows, not a second opinion.
+the window. **Ask now** makes the engine read the repository's version number at once; left alone, it
+does that itself once a week. The copies count and the free space come from the engine, so they are
+the figures the dashboard shows, not a second opinion.
 
 ```
 Chrisphics Hub for Mac (Apple silicon)/
@@ -1394,6 +1395,7 @@ The dev checks live in `tools/`, and none of them needs anything installed:
 | `python3 tools/check-app-daylight.py` | does the Mac app's own **By clock** keep the same day as the page? `desktop/src/Theme.swift` is compiled on its own into a throwaway command that answers for all twenty-four hours, so the window chrome's rule is run rather than read; it also fails if the shell's 8/17 ever disagrees with the page's, and refuses any appearance mode, menu or Settings pane coming back. |
 | `python3 tools/check-flexible-entry.py` | can the counter take an order and its money without fighting the screen? A real WebKit view drives the shipped page against a **copy** of the book: the caret landing in a box, `1,200` and `₵0.25` booking ₵ 300.00, Enter stepping through the lines instead of half-booking, a pasted list laying itself out, cash on the order screen recorded as a Payment so the balance reads zero, money taken on a job the book already calls settled, one press repeating yesterday's ticket, a refused figure coming back typed, and the whole ticket readable at 390px. Runs one at a time — the view's browser data is per address, so a second concurrent run wipes the first one's mid-scenario. |
 | `python3 tools/check-shop-boot.py` | does the counter open by itself? The real keeper is run against a **copy** of the book, a throwaway support folder, a throwaway certificate and a stand-in helper, and watched through three scenes: switched on before the Wi-Fi has joined (it waits, says so in the log, and serves the moment the lease appears — nobody restarts anything), the address moving under a shop that is already serving (it lets go of the dead bind, re-certifies for the new number, and is serving again by itself when the lease comes back), and a second keeper arriving to find the shop answering (it refuses to start another engine over one book). It then reads the live service file for the keys that make the rest true — login start, restart on a bad exit, the five-minute re-arm, the short throttle, and no address of the day pinned in it — reads the watchman's own file and asks launchd whether *it* is actually running (a watchman that login skipped is no watchman, and that is the failure it exists for), reads the timesheet it signs to prove the watchman ran and read a door that answers, then runs the served watchman against a throwaway world to prove its other roads — a dark door is counted before it is touched, two counted turns with a real address is a restart, a second restart has to wait its half hour, a Mac with no Wi-Fi number is left to the keeper, and a door that is held ends the counting — while showing the engine trading on the live book never changed. It then proves the served copies of all three tools match this repository, that the address rule lives in one place, and closes by showing the live book is exactly the bytes it started with. Ports 8911–8914 are claimed first, so a number somebody else is holding cannot fake a pass. |
+| `python3 tools/check-weekly-updates.py` | does the book hear about a newer build by itself, and can that build be taken in without touching a record? A **stand-in repository** answers on a port of this run, so nothing here asks GitHub: the week's clock is turned by hand in both directions, a refusal, an empty answer and junk are read as "nothing learned", an ask that reached nothing is retried within the hour, and every ask is proven not to open the book, not to count as a write and not to make other counters repaint. A real WebKit view then presses the page's own button and reads the whole Updates tab; the engine downloads a published build from the stand-in, proves every file against its record (and refuses an outside path, a hidden file, a tool and bytes that do not match), stages it beside the book, and runs the apply script against a **copy** of an app — the new build in place, the old files kept, the shop brought back, and the old build **restored** when the new one does not answer. Closes by proving the book is the same bytes and rows it started with, and that only the shop's own computer may install |
 | `python3 tools/check-email-accounts.py` | can the shop register the mailboxes it sends from, and does the mail actually go? A **throwaway SMTP server** is run on this Mac — real sockets, real STARTTLS, real `AUTH`, on a certificate minted for this one run from its own CA — so *Test this account* is proved against a server rather than a mock. Runs two throwaway shop servers on free ports it asks the kernel for, against a **copy** of the book, in its own support and backup folders: registration and its refusals, the first mailbox becoming the sender and a second waiting, an edit with the password box left empty keeping the saved word, a mailbox that is no longer in the book answered honestly, and every path gated so a phone out on the Wi-Fi can read the list but cannot add, change, forget, choose or test. It then proves the two rules the feature exists for: that no copy of the book, no server log, no API response and no stored provider error ever carries a word, while the secrets file sits beside the book at mode `600` and not among the copies; and that a client's **Ready** notice goes out by itself through the mailbox the shop chose, over TLS, with the provider's own receipt kept against the message and the job timeline saying so. A refusal is checked to be a 400 about the mail rather than a 500 about the Mac, an untrusted certificate is checked to be refused, a provider that repeats the word back is checked to come back `[hidden]`, and the registered mailbox is checked to win over `CHRISPHICS_EMAIL_*`. Closes by proving only the throwaway job and client moved, in the copy, and that the shop's own file is the bytes it started with. |
 | `swift tools/make-qr.swift "<address>" /tmp/shop-qr.png 520` | the counter's QR as a printable PNG — and every code is read back before the file is trusted (`--verify <file.png>` checks one already drawn) |
 | `swiftc -O tools/wk-probe.swift -o /tmp/wk-probe` then `/tmp/wk-probe <url> <dir> "open\|/#/jobs" "shot\|jobs"` | what a screen actually rendered, in the same WebKit the app uses, as text plus a PNG. `WKPROBE_HANDLERS=external` registers a handler the app's shell registers, so a page can be read as the app sees it — what it posts there comes back as `posted external: …`. `WKPROBE_SCRIPT=<file>` injects a script before the page's own, and `WKPROBE_FRESH_DATA=1` starts the browser with none of the history it kept from the last run |
@@ -1406,13 +1408,21 @@ The dev checks live in `tools/`, and none of them needs anything installed:
   the Wi-Fi, and it does so behind the shop password.
 - Data is never sent anywhere. There is no analytics and no cloud. Devices on the shop Wi-Fi
   sign in to this Mac with one password; nothing reaches an outside account, and no account
-  reaches in. The app looks outward only where you start it: pressing **WhatsApp** or **Email**
-  on the **Tell the client** card asks macOS to open `wa.me` or your mail app with the words
-  already typed, and pressing **Check for update** in `Settings ▸ Updates` asks GitHub for the
-  newest commit in the shop's own repository and compares that hash with the stamp baked into
-  this build — a plain read of a public repository, with no shop name, no records and no sign-in
-  detail in it. Nothing else is sent, uploaded or contacted while you work, and the app will not
-  load any outside page inside its own window.
+  reaches in. The app looks outward only for the shop's own software: pressing **WhatsApp** or
+  **Email** on the **Tell the client** card asks macOS to open `wa.me` or your mail app with the
+  words already typed, and once a week — and whenever somebody presses **Ask now** in
+  `Settings ▸ Updates` — the engine asks the shop's own repository for the newest version number
+  and keeps the answer in a file beside the book, never in it. That ask is a plain read of a
+  public repository: no shop name, no records and no sign-in detail in it. When a newer build is
+  reported, **Download it** brings that build's files down into the support folder beside the book
+  and checks every one against the published list before anything is called ready; **Install and
+  reopen** then closes the shop for a few seconds while the checked files take the place of the
+  old ones, and opens it again on the new build — putting the old files back if the new build does
+  not answer. Clients, jobs, money and every record are never part of that package, so the book is
+  exactly where it was. A build can be installed only from the shop's own computer, never from a
+  phone or another counter on the Wi-Fi, and the same answer can be read without the window:
+  `python3 server.py --update-check`. Nothing else is sent, uploaded or contacted while you work,
+  and the app will not load any outside page inside its own window.
 - Job sheets print black on white for a clean photocopy.
 - Run one engine at a time. The app looks for the always-on shop server before it starts anything:
   if something answers on `https://127.0.0.1:8834/healthz`, the app opens *that* server instead of

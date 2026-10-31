@@ -1797,10 +1797,13 @@ static NSString *sizeWords(unsigned long long bytes) {
                                                                pushButton(@"Open the repository", self,
                                                                           @selector(openRepo))])]],
                                  @[_newest,
-                                   noteText(@"Nothing leaves this Mac unless Check is pressed: it asks GitHub "
-                                            "for the newest version number in the shop's own repository and "
-                                            "compares it with the build above. Each change to the app moves "
-                                            "the number on — 1.0, 1.1, 1.2."),
+                                   noteText(@"Once a week the records engine on this computer asks GitHub for "
+                                            "the newest version number in the shop's own repository, compares "
+                                            "it with the build above and keeps the answer in a file beside the "
+                                            "book — never in it. Check is for the day you want the answer "
+                                            "this minute. A newer build is taken in from the page's "
+                                            "Settings ▸ Updates — Download it, then Install and reopen — and "
+                                            "the book is not part of it, so every record stays where it is."),
                                    self.status]);
     [self place:grid];
 }

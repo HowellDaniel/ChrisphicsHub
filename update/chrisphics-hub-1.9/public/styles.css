@@ -1,0 +1,1202 @@
+/* CRISPprint Ghana — counter-side UI.
+   One typeface (Poppins), the two inks lifted from the shop's logo (crimson #AB1F23,
+   warm grey #808085), and two palettes the shop's clock picks between: light between
+   08:00 and 17:00, dark outside them. Every colour in this file goes through a token so
+   both stay coherent. */
+:root {
+  color-scheme: light;
+  /* paper and ink */
+  --paper: #f6f5f5;
+  --surface: #ffffff;
+  --surface-2: #f2f0f1;
+  --surface-hover: #faf6f6;
+  --line: #e7e3e4;
+  --line-2: #d5d0d1;
+  --text: #221d1f;
+  --muted: #6f686a;
+  --placeholder: #9d9698;
+  /* The quiet ink when the shop's wash is the whole background rather than a panel's: see the glass
+     block. Measured over the brightest wash stop, `--muted` reads 3.16:1 with nothing to hold it back;
+     this reads 4.74:1. */
+  --muted-on-wash: #534e50;
+  /* A link inside that quiet line: `--link` is 4.14:1 over the brightest wash stop, under the line
+     the rest of this pass was measured to, so bare-wash links take the darkened brand instead. */
+  --link-on-wash: #8c171b;
+  /* the logo's crimson: money coming in, and anything the shop acts on */
+  --brand: #ab1f23;
+  --brand-ink: #8c171b;
+  --brand-soft: #fbeceb;
+  /* Crimson type sitting on a crimson wash. On the dark palette the ink would sink into the wash,
+     so this is the one pairing that takes the brightened brand instead. */
+  --on-brand-soft: var(--brand-ink);
+  --on-brand: #ffffff;
+  --link: #ab1f23;
+  /* the logo's grey: money going out, and everything quiet */
+  --grey: #808085;
+  --grey-soft: #efeeef;
+  /* meaning */
+  --ok: #1a7a44;
+  --ok-soft: #e2f3e8;
+  --warn: #8f5c07;
+  --warn-soft: #fbf0d8;
+  --bad: #a3171c;
+  --bad-soft: #fbe9e8;
+  --cool: #3d5b67;
+  --cool-soft: #e3eef2;
+  /* the dashboard's glass: a panel the shop's day shows through, not a filter laid over the ink.
+     The wash is the shop's three colours as BRIGHT tints at high alpha, not dark pigment at a
+     whisper: a panel that is 72% white lets through only the lightness of what is under it, so a
+     crimson at .16 arrived as grey and nobody could see the material at all. These clear AA with
+     room because the hue rides on luminance rather than taking it away. */
+  --glass: rgba(255, 255, 255, .72);
+  --glass-hover: rgba(255, 255, 255, .86);
+  --glass-line: rgba(34, 29, 31, .10);
+  --glass-rim: rgba(255, 255, 255, .95);
+  --glass-spec: rgba(255, 255, 255, 1);
+  --glass-spec-2: rgba(255, 255, 255, .20);
+  --glass-spec-3: rgba(255, 255, 255, .82);
+  --glass-shadow: 0 2px 6px rgba(34, 29, 31, .07), 0 18px 46px rgba(34, 29, 31, .13);
+  --wash-brand: rgba(255, 150, 175, .72);
+  --wash-cool: rgba(136, 202, 255, .70);
+  --wash-warn: rgba(255, 206, 124, .66);
+  --r-glass: 18px;
+  /* the dashboard's calendar widget: the month on its own face, in the shop's own colours rather
+     than somebody else's red. Today's roundel rotates through the seven inks below as the date
+     moves — a different circle every day, crimson, blue, black, green, brown and the rest — and the
+     number always rides in white, which clears 7:1 on the darkest of them. The quiet edge days read
+     5.43:1 and the month name is the one ink that has to move with the palette, because the dark
+     brand would fail on the dark face. tools/check-daylight-theme.py re-measures all of them out of
+     these tokens. */
+  --cal-mark-0: #ab1f23;
+  --cal-mark-1: #1f4e8c;
+  --cal-mark-2: #1c1517;
+  --cal-mark-3: #1a6e3c;
+  --cal-mark-4: #7a4a21;
+  --cal-mark-5: #5b2a86;
+  --cal-mark-6: #0f6b6b;
+  --cal-mark-ink: #ffffff;
+  --cal-head: var(--brand);
+  --cal-face: var(--surface);
+  --cal-ink: var(--text);
+  --cal-soft: var(--muted);
+  /* the counter's shadow — the sidebar stays dark in both appearances */
+  --ink: #1c1517;
+  --ink-2: #2b2023;
+  --side-text: #efeaea;
+  --side-dim: #a5969a;
+  --side-mid: #c8bfc1;
+  --side-hi: #ffffff;
+  --side-hover: rgba(255,255,255,.07);
+  --side-active: rgba(255,255,255,.12);
+  --side-line: rgba(255,255,255,.1);
+  --topbar: rgba(246,245,245,.88);
+  --scrim: rgba(28,21,23,.45);
+  --focus: #ab1f23;
+  --ring: rgba(171,31,35,.18);
+  --shadow: 0 1px 2px rgba(34,29,31,.05), 0 8px 24px rgba(34,29,31,.07);
+  --shadow-lg: 0 24px 60px rgba(20,15,17,.24);
+  --bar-top: #c33a3f;
+  --bar-bot: #8c171b;
+  --r: 10px;
+  --r-sm: 7px;
+  --pad: clamp(14px, 1.6vw, 26px);
+  --gap: clamp(10px, 1.1vw, 18px);
+  --fs: calc(clamp(13px, .34vw + 12.2px, 15px) * var(--text-scale, 1));
+  /* The counter's own text size, kept by the page on a computer that has no app window to set it
+     in — see Settings ▸ General. One multiplier in one token, so every size written in `em` lifts
+     with it; the big display figures keep their own clamp and do not swell off the card. */
+  --text-scale: 1;
+  --h: clamp(19px, 1.5vw + 12px, 27px);
+  --face: "Poppins", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+  /* Figures keep the same face; tabular-nums is asked for so money lines up on any
+     Poppins build that carries the feature, and stays legible on the ones that do not. */
+  --num: var(--face);
+}
+/* The dark palette is a full replacement, not a filter: surfaces lift off black, the
+   crimson brightens so it survives on a dark counter, and pills go from pale washes to
+   deep ones with lightened type. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #131011;
+  --surface: #1b1718;
+  --surface-2: #241f21;
+  --surface-hover: #251d1f;
+  --line: #322c2e;
+  --line-2: #443c3e;
+  --text: #ece7e7;
+  --muted: #a49a9c;
+  --placeholder: #7d7375;
+  --muted-on-wash: #cdc0c3;
+  /* The night half of the same measure: `--link` reads 3.50:1 over the evening wash, so a bare-wash
+     link takes the brand lifted until it clears 4.5 — #ffc9cc measures 5.82:1. */
+  --link-on-wash: #ffc9cc;
+  --brand: #c93a3f;
+  --brand-ink: #a8262c;
+  --brand-soft: #33191b;
+  --on-brand-soft: #ef8a90;
+  --on-brand: #ffffff;
+  --link: #ef8a90;
+  --grey: #8d8d93;
+  --grey-soft: #2a2627;
+  --ok: #4caf76;
+  --ok-soft: #16301f;
+  --warn: #d69a3a;
+  --warn-soft: #332609;
+  --bad: #ef7f85;
+  --bad-soft: #3a1a1c;
+  --cool: #7fb3c4;
+  --cool-soft: #16292f;
+  --glass: rgba(26, 22, 23, .55);
+  --glass-hover: rgba(41, 34, 36, .78);
+  --glass-line: rgba(236, 231, 231, .12);
+  --glass-rim: rgba(255, 255, 255, .14);
+  --glass-spec: rgba(255, 255, 255, .40);
+  --glass-spec-2: rgba(255, 255, 255, .05);
+  --glass-spec-3: rgba(255, 255, 255, .22);
+  --glass-shadow: 0 2px 6px rgba(0, 0, 0, .34), 0 18px 46px rgba(0, 0, 0, .46);
+  --wash-brand: rgba(240, 92, 108, .46);
+  --wash-cool: rgba(96, 186, 236, .38);
+  --wash-warn: rgba(246, 186, 92, .32);
+  /* The widget on the dark palette: the roundel wears the same seven rotating inks as by day —
+     they are deep enough to hold white type on the lifted face too — and the month name cannot wear
+     this palette's brand (3.22:1 on the lifted face), so it takes the brightened link red at 6.74:1.
+     The face lifts off black, not to white, and the numerals ride on it at 13.26:1. */
+  --cal-mark-0: #ab1f23;
+  --cal-mark-1: #1f4e8c;
+  --cal-mark-2: #1c1517;
+  --cal-mark-3: #1a6e3c;
+  --cal-mark-4: #7a4a21;
+  --cal-mark-5: #5b2a86;
+  --cal-mark-6: #0f6b6b;
+  --cal-mark-ink: #ffffff;
+  --cal-head: var(--link);
+  --cal-face: var(--surface-2);
+  --cal-ink: var(--text);
+  --cal-soft: var(--muted);
+  --ink: #0d0b0c;
+  --ink-2: #171214;
+  --side-text: #e8e3e3;
+  --side-dim: #9c8f92;
+  --side-mid: #bdb3b5;
+  --side-hover: rgba(255,255,255,.06);
+  --side-active: rgba(255,255,255,.1);
+  --side-line: rgba(255,255,255,.08);
+  --topbar: rgba(19,16,17,.88);
+  --scrim: rgba(0,0,0,.62);
+  --focus: #ef8a90;
+  --ring: rgba(224,96,102,.22);
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.34);
+  --shadow-lg: 0 24px 60px rgba(0,0,0,.6);
+  --bar-top: #e06066;
+  --bar-bot: #a8262c;
+}
+/* The page's background, chosen in the app's Settings ▸ Appearance, then written onto the page by
+   the shell. The clock still owns day and night — these only repaint the paper and the top bar, or
+   hang a quiet wallpaper behind them. Plain is the shop's own look and stays the default: nothing
+   changes until a choice is made. The papers below were measured first — the quiet ink reads 4.7:1
+   on every one of them by day, and the night pairings sit above 6:1. */
+:root[data-bg="sky"] { --paper: #eaf2f8; --topbar: rgba(234, 242, 248, .88); }
+:root[data-bg="leaf"] { --paper: #ecf3ec; --topbar: rgba(236, 243, 236, .88); }
+:root[data-bg="sand"] { --paper: #f5efe5; --topbar: rgba(245, 239, 229, .88); }
+:root[data-bg="rose"] { --paper: #f8ecec; --topbar: rgba(248, 236, 236, .88); }
+:root[data-bg="sky"][data-theme="dark"] { --paper: #0c141a; --topbar: rgba(12, 20, 26, .88); }
+:root[data-bg="leaf"][data-theme="dark"] { --paper: #101812; --topbar: rgba(16, 24, 18, .88); }
+:root[data-bg="sand"][data-theme="dark"] { --paper: #171310; --topbar: rgba(23, 19, 16, .88); }
+:root[data-bg="rose"][data-theme="dark"] { --paper: #1a1213; --topbar: rgba(26, 18, 19, .88); }
+/* Wallpapers hang off the paper in its own ink at a whisper, so the measured text pairings do not
+   move — they are texture, not colour, and they follow the palette as the clock turns. */
+:root { --wall-ink: rgba(34, 29, 31, .045); }
+:root[data-theme="dark"] { --wall-ink: rgba(236, 231, 231, .05); }
+:root[data-bg="waves"] body {
+  background-image:
+    radial-gradient(ellipse 90% 55% at 15% 8%, var(--wall-ink), transparent 62%),
+    radial-gradient(ellipse 80% 50% at 85% 92%, var(--wall-ink), transparent 60%),
+    radial-gradient(ellipse 60% 40% at 60% 45%, var(--wall-ink), transparent 65%);
+  background-attachment: fixed;
+}
+:root[data-bg="dots"] body {
+  background-image: radial-gradient(var(--wall-ink) 1.1px, transparent 1.2px);
+  background-size: 24px 24px;
+}
+:root[data-bg="linen"] body {
+  background-image:
+    repeating-linear-gradient(45deg, var(--wall-ink) 0 1px, transparent 1px 9px),
+    repeating-linear-gradient(-45deg, var(--wall-ink) 0 1px, transparent 1px 9px);
+}
+/* The six pictures the shop picked hang behind a wash of the palette's own paper instead of
+   replacing it, so the measured text pairings still stand on paper and the job sheet a client signs
+   is untouched. The wash follows the clock: lighter by day, heavier after dark, because a bright
+   photograph behind night text is how a screen ends up unreadable at the counter. */
+:root { --wall-veil: rgba(246, 245, 245, .80); }
+:root[data-theme="dark"] { --wall-veil: rgba(19, 16, 17, .88); }
+:root[data-bg="violet"] body, :root[data-bg="beams"] body, :root[data-bg="circuit"] body,
+:root[data-bg="constellation"] body, :root[data-bg="dusk"] body, :root[data-bg="bloom"] body {
+  background-size: cover, cover;
+  background-position: center, center;
+  background-attachment: fixed, fixed;
+  background-repeat: no-repeat, no-repeat;
+}
+:root[data-bg="violet"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-violet.png");
+}
+:root[data-bg="beams"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-beams.png");
+}
+:root[data-bg="circuit"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-circuit.png");
+}
+:root[data-bg="constellation"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-constellation.png");
+}
+:root[data-bg="dusk"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-dusk.png");
+}
+:root[data-bg="bloom"] body {
+  background-image: linear-gradient(var(--wall-veil), var(--wall-veil)), url("img/bg-bloom.png");
+}
+/* A picture's bright corners lift the washed paper and pull the quiet ink down with them: measured
+   over these six, the ordinary `--muted` falls to 3.12:1 by day, which is unreadable at the counter.
+   The on-wash ink — the darker quiet colour already kept for the day cards — holds 4.69:1 or better
+   on every pixel of all six, in both halves of the clock. So a picture theme repaints the quiet ink
+   as well as the paper, and the pictures themselves stay as bright as they were picked. */
+:root[data-bg="violet"], :root[data-bg="beams"], :root[data-bg="circuit"],
+:root[data-bg="constellation"], :root[data-bg="dusk"], :root[data-bg="bloom"] {
+  --muted: var(--muted-on-wash);
+}
+* { box-sizing: border-box; }
+/* .drawer/.modal set display, which would otherwise beat the UA's [hidden] rule. */
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--text);
+  font: 400 var(--fs)/1.5 var(--face);
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  transition: background .22s ease, color .22s ease;
+}
+h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -.01em; }
+a { color: var(--link); text-decoration: none; }
+button { font: inherit; color: inherit; }
+code { font-family: var(--num); font-size: .88em; }
+
+/* ---------- frame ---------- */
+.shell { display: grid; grid-template-columns: clamp(210px, 17vw, 264px) minmax(0, 1fr); min-height: 100vh; }
+.side {
+  background: linear-gradient(178deg, var(--ink) 0%, var(--ink-2) 100%);
+  color: var(--side-text); padding: var(--pad) 0 18px;
+  display: flex; flex-direction: column; gap: 20px;
+  position: sticky; top: 0; height: 100vh;
+  transition: background .22s ease;
+}
+/* The lockup is a fixed-colour artwork on white, so it keeps its own plate on the dark rail. */
+.brand { display: flex; flex-direction: column; gap: 9px; padding: 0 var(--pad); }
+.brand-mark { display: block; width: 100%; max-width: 190px; height: auto;
+  background: #fff; border-radius: 9px; padding: 9px 11px 7px; }
+.brand-sub { margin: 0; padding: 0 var(--pad); font-size: .72em; font-weight: 600;
+  letter-spacing: .09em; text-transform: uppercase; color: var(--side-dim); }
+.network-status { margin: -12px 0 -8px; padding: 0 var(--pad); font-size: .72em; color: var(--side-dim); }
+.network-status::before { content: ""; display: inline-block; width: 7px; height: 7px;
+  margin-right: 7px; border-radius: 50%; background: var(--ok); }
+.network-status.offline::before { background: var(--warn); }
+.sync-entry { margin-bottom: var(--gap); }
+.sync-entry pre { max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 10px; }
+.sync-entry details { margin: 8px 0; }
+.login-card { width: min(440px, calc(100% - 2 * var(--pad))); margin: clamp(30px, 10vh, 100px) auto; padding: var(--pad); }
+.nav { display: flex; flex-direction: column; gap: 2px; padding: 0 12px; }
+.nav a {
+  padding: 9px 14px; border-radius: var(--r-sm); color: #cfc5c7; font-weight: 500;
+  display: flex; justify-content: space-between; align-items: center; gap: 7px;
+}
+.nav a:hover { background: var(--side-hover); color: var(--side-hi); }
+.nav a.on { background: var(--side-active); color: var(--side-hi); box-shadow: inset 3px 0 0 var(--brand); }
+.nav a span { font: 500 .78em/1 var(--num); color: var(--side-dim); }
+.nav a.on span { color: var(--side-text); }
+.side-cta { display: flex; flex-direction: column; gap: 7px; padding: 0 var(--pad); }
+/* What the book holds, where it lives, and the quiet ways out of it. These belong under the
+   screens rather than in the rail: the rail is the shop's commands, this strip is the book's
+   own state, read the same way from any screen. Nothing about the look is decided here — the
+   clock decides it, on every screen and on every machine. */
+.pagefoot {
+  border-top: 1px solid var(--line); color: var(--muted); font-size: .82em;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 5px 18px;
+  padding: 11px var(--pad) calc(11px + env(safe-area-inset-bottom));
+}
+.pagefoot .kv { display: flex; gap: 8px; }
+.pagefoot .kv span { white-space: nowrap; }
+.pagefoot .kv b { color: var(--text); font-family: var(--num); font-weight: 500; white-space: nowrap; }
+.pagefoot .hint { font-size: 1em; flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.pagefoot .spacer { flex: 1; }
+/* An overdue copy of the book is the one fact on this strip that changes what to do next. */
+.pagefoot .kv b.late { color: var(--bad); }
+/* Notes sit on paper most of the time; only the rail's and the sheet's are pale on ink. */
+.hint { font-size: .74em; color: var(--muted); margin: 0; }
+.side .hint { color: var(--side-mid); }
+.linkbtn { background: none; border: 0; padding: 0; text-align: left; color: var(--link);
+  cursor: pointer; font-size: .92em; text-decoration: underline; text-underline-offset: 3px; }
+.linkbtn:hover { color: var(--text); }
+.main { display: flex; flex-direction: column; min-width: 0; }
+.topbar {
+  position: sticky; top: 0; z-index: 6; background: var(--topbar); backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line); padding: calc(var(--pad) * .72) var(--pad);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.view { padding: var(--pad); display: grid; gap: var(--gap); align-content: start; min-height: 0; flex: 1 0 auto; }
+/* ---------- the page's own menu bar ----------
+   The Mac opens the shop inside its app window and gets Apple's menu bar for free; a PC opened by the
+   launcher in a browser window gets none, so File, Edit, View, Data and Shop are drawn here instead.
+   app.js leaves this hidden inside the Mac's window and on a phone, and marks the root with
+   data-menubar="on" only while the strip is actually showing — which is the one time the title bar
+   below has to stick under it rather than to the top of the page. The strip does not follow the
+   scroll: a counter who wants a menu reaches the top of the window for it, exactly as on the Mac. */
+.menubar { display: flex; align-items: center; gap: 2px; padding: 3px var(--pad);
+  background: var(--surface-2); border-bottom: 1px solid var(--line); position: relative; z-index: 8; }
+.menubtn { border: 0; background: none; font: inherit; color: var(--text); padding: 5px 11px;
+  border-radius: var(--r-sm); cursor: pointer; font-size: .9em; font-weight: 500; }
+.menubtn:hover, .menubtn[aria-expanded="true"] { background: var(--brand-soft); color: var(--brand-ink); }
+.menuwrap { position: relative; }
+.menudrop { position: absolute; top: calc(100% + 3px); left: 0; z-index: 30; min-width: 264px;
+  background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--r);
+  box-shadow: var(--shadow-lg); padding: 5px; display: flex; flex-direction: column; gap: 1px; }
+.menuitem { display: flex; align-items: baseline; gap: 16px; border: 0; background: none; text-align: left;
+  font: inherit; color: var(--text); padding: 7px 9px; border-radius: var(--r-sm); cursor: pointer; }
+.menuitem:hover { background: var(--brand-soft); color: var(--brand-ink); }
+.menuitem i { flex: 1; text-align: right; font-style: normal; color: var(--muted); font-size: .8em;
+  white-space: nowrap; }
+.menusep { height: 1px; background: var(--line); margin: 4px 5px; }
+.menuhint { margin-left: auto; color: var(--muted); font-size: .78em; padding-right: 2px; }
+:root[data-menubar="on"] .topbar { top: 32px; }
+/* ---------- Settings rows ----------
+   The Mac's Settings window lays each pane out as a label column and a control column; the page's
+   Settings screen copies that, so the same four panes read the same way on either computer. */
+.srow { display: grid; grid-template-columns: minmax(130px, 182px) minmax(0, 1fr); gap: 12px;
+  align-items: start; padding: 9px 0; border-top: 1px solid var(--line); }
+.srow:first-child { border-top: 0; padding-top: 0; }
+.slabel { font-size: .88em; font-weight: 600; color: var(--muted); padding-top: 7px; }
+.sfield { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sfield code { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 6px 8px; overflow-wrap: anywhere; }
+.sfield .hint { margin: 0; }
+.schk { display: flex; align-items: flex-start; gap: 9px; font-size: .92em; }
+.schk input { margin-top: 3px; }
+@media (max-width: 720px) {
+  .srow { grid-template-columns: 1fr; gap: 3px; }
+  .slabel { padding-top: 0; }
+}
+/* A .view child is a grid item, and a grid item's automatic minimum size is its min-content:
+   one wide table used to push the whole column past the window and give the page a horizontal
+   scrollbar. Zero the minimum and .tablewrap scrolls the table where it sits. */
+.view > * { min-width: 0; }
+.loading { color: var(--muted); padding: 40px; text-align: center; }
+
+/* ---------- headings ---------- */
+.title { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.title h1 { font-size: var(--h); }
+.title .sub { color: var(--muted); font-size: .88em; }
+.title .spacer { flex: 1; }
+.section-h { display: flex; align-items: center; gap: 10px; margin: 4px 0 0; font-size: .95em; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+.section-h::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+/* ---------- controls ---------- */
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tabs { display: flex; gap: 3px; background: var(--surface-2); padding: 3px; border-radius: 9px; flex-wrap: wrap; }
+.tab { border: 0; background: none; padding: 6px 12px; border-radius: 7px; cursor: pointer; font-weight: 500; color: var(--muted); font-size: .88em; display: flex; gap: 6px; align-items: center; }
+.tab.on { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+.tab b { font: 500 .82em/1 var(--num); color: inherit; opacity: .75; }
+input, select, textarea {
+  background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--r-sm);
+  padding: 8px 10px; color: var(--text); min-width: 0; font: inherit;
+}
+input:focus, select:focus, textarea:focus, .tab:focus-visible, button:focus-visible, tr[data-open]:focus-visible {
+  outline: 2px solid var(--focus); outline-offset: 1px; border-color: var(--focus);
+}
+input::placeholder { color: var(--placeholder); }
+.datef { display: flex; align-items: center; gap: 8px; background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--r-sm); padding: 0 6px 0 11px; }
+.datef > span { font-size: .74em; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.datef input { border: 0; padding: 7px 2px; background: none; }
+.search { position: relative; flex: 1 1 190px; max-width: 420px; }
+.search input { width: 100%; padding-left: 30px; }
+.search::before { content: "\2315"; position: absolute; left: 9px; top: 50%; transform: translateY(-52%); color: var(--muted); font-size: 1.1em; }
+.btn {
+  border: 1px solid var(--line-2); background: var(--surface); border-radius: var(--r-sm);
+  padding: 8px 13px; cursor: pointer; font-weight: 500; white-space: nowrap;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.btn:hover { background: var(--surface-2); }
+.btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
+.btn.primary:hover { background: var(--brand-ink); border-color: var(--brand-ink); }
+.btn.ghost { background: none; border-color: transparent; color: var(--link); }
+.btn.ghost:hover { background: var(--brand-soft); }
+.btn.danger { color: var(--bad); border-color: var(--bad-soft); }
+.btn.danger:hover { background: var(--bad-soft); }
+.btn.sm { padding: 5px 9px; font-size: .86em; }
+.wide { width: 100%; }
+.side .btn { background: var(--side-hover); border-color: var(--side-line); color: var(--side-text); }
+.side .btn:hover { background: rgba(255,255,255,.16); }
+.side .btn.primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); font-weight: 600; }
+.side .btn.primary:hover { background: var(--brand-ink); border-color: var(--brand-ink); }
+
+/* ---------- cards ---------- */
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); box-shadow: var(--shadow); }
+.card > h3, .card > .card-h { padding: 13px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; font-size: .92em; font-weight: 600; flex-wrap: wrap; }
+.card > .card-h .spacer, .card > h3 .spacer { flex: 1; }
+.card-b { padding: 14px 16px; }
+/* The one card on the shop screen that is an alarm rather than a panel: an open book. */
+.card.warn-card { border-color: var(--bad); background: var(--bad-soft); }
+.card.warn-card b { color: var(--bad); }
+.card.warn-card .hint { color: inherit; }
+.grid { display: grid; gap: var(--gap); }
+.kpis { grid-template-columns: repeat(auto-fit, minmax(min(100%, 215px), 1fr)); }
+.split { grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); }
+.cols-3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); }
+.stat { padding: 15px 16px; display: grid; gap: 3px; }
+.stat .k { font-size: .78em; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; }
+.stat .v { font-size: clamp(21px, 1.5vw + 13px, 30px); font-weight: 600; letter-spacing: -.025em; font-variant-numeric: tabular-nums; }
+.stat .n { font-size: .82em; color: var(--muted); }
+/* The book's own totals in one line: a shop with nothing open still sees what it holds. */
+.bookband { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 28px; padding: 11px 16px; }
+.bookband span { font-size: .82em; color: var(--muted); }
+.bookband b { font-size: 1.4em; font-weight: 600; color: var(--text); margin-right: 6px; font-variant-numeric: tabular-nums; }
+.stat.warn .v { color: var(--bad); }
+.stat.good .v { color: var(--ok); }
+.stat.amt .v { font-family: var(--num); font-weight: 600; }
+/* The dashboard's three groups of figures say their name in a line of their own, so twelve tiles read
+   as three thoughts rather than one long list. The rule carries the eye across to the end of the row. */
+.band-title { display: flex; align-items: center; gap: 12px; margin: 4px 2px -6px;
+  font-size: .72em; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.band-title::after { content: ''; flex: 1; height: 1px; background: var(--line); }
+/* Today's takings are the figure the counter looks for first, so its tile is the one that is a little
+   larger and carries the shop's own colour down its edge. */
+.kpis.money { grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); }
+.stat.hero { border-left: 4px solid var(--brand); }
+.stat.hero .v { font-size: clamp(25px, 1.9vw + 14px, 36px); }
+.today-glance { margin: 7px 0 3px; font-size: .95em; font-weight: 500; color: var(--text); }
+/* A shop address is one unbroken token, and the name is longer than the number ever was: set at the
+   size a figure gets, it ran past the edge of its own card. So it keeps a figure's weight at a
+   reading size, and is allowed to break where a device has to break it. */
+.stat .addr { font-family: var(--num); font-size: 15px; font-weight: 600; letter-spacing: 0;
+  line-height: 1.35; overflow-wrap: anywhere; }
+/* A tile that is also a way in: it lifts, and shows where it leads. It is an anchor, so
+   without this the figures would all come through in link crimson and read as a warning. */
+.stat.go { position: relative; color: var(--text); text-decoration: none;
+  transition: transform .16s ease, box-shadow .16s ease, background .16s ease; }
+.stat.go:hover { background: var(--surface-hover); box-shadow: var(--shadow); transform: translateY(-2px); }
+.stat.go:active { background: var(--surface); box-shadow: none; transform: translateY(0); }
+.stat.go:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.stat.go .arrow { position: absolute; right: 15px; top: 50%; width: 6px; height: 6px; margin-top: -4px;
+  border-right: 2px solid var(--line-2); border-top: 2px solid var(--line-2); transform: rotate(45deg);
+  opacity: 0; transition: opacity .16s ease, border-color .16s ease; }
+.stat.go:hover .arrow { opacity: 1; border-color: var(--brand); }
+
+/* ---------- the shop's own hours ----------
+   One strip on the dashboard that answers "is the shop open, and how much of it is left"
+   without anybody having to ask, and the same words on the sign-in card so no one types the
+   shop password into a door that is shut. Tabular figures, so the seconds do not jog the line. */
+.card.hours { border-left: 4px solid var(--ok); }
+.card.hours.shut { border-left-color: var(--bad); background: var(--bad-soft); }
+.card.hours.shut .hint { color: inherit; }
+.hours-count { font-size: 1.06em; font-weight: 600; letter-spacing: -.01em;
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hours-note { margin-bottom: 12px; }
+
+/* ---------- the day, the time, and the look that follows them ----------
+   The counter asked for the dashboard to carry the shop's date and a running clock, and for the
+   screen itself to follow the hour: light between 08:00 and 17:00, dark after. He asked three times
+   for the iPhone's widgets and could not see the two quieter answers, then named the size: the
+   calendar is the medium type, "with all the days on it, not small" — the month's every day on one
+   face, today in a crimson roundel — beside a clock drawn at lock-screen size. In this shop's
+   colours, not somebody else's red, and every ink measured against AA. The whole date is still
+   written out underneath for anyone reading it aloud. */
+.card.today { border-left: 4px solid var(--cool); }
+.card.today.night { border-left-color: var(--warn); }
+.today-face { display: flex; align-items: center; gap: clamp(14px, 1.8vw, 26px); }
+/* Then he looked at the two of them and said: reduce the two widget and make them landscape
+   (2026-10-13, 21:00). They were two 340×275 blocks that filled the card and, in his own window,
+   stacked one over the other. Both are now short and wide — a month that reads across rather than
+   down, at roughly two of width to one of height — and small enough that the pair sits side by side
+   in the counter's window instead of pushing the clock off the screen. Every day of the month is
+   still on the face: what shrank is the row, not the month. */
+.today-cal {
+  flex: none; width: clamp(270px, 21vw, 320px);
+  background: var(--cal-face); color: var(--cal-ink);
+  border-radius: 22px; box-shadow: var(--shadow); padding: 10px 10px 7px;
+  font-variant-numeric: tabular-nums;
+}
+.cal-head { display: flex; align-items: baseline; gap: 6px; padding: 0 2px 4px; }
+.cal-mon { font-size: clamp(15px, .8vw + 9px, 18px); font-weight: 600; letter-spacing: -.015em;
+  color: var(--cal-head); }
+.cal-year { font-size: .78em; font-weight: 600; color: var(--cal-soft); }
+.cal-dows { display: grid; grid-template-columns: repeat(7, 1fr); padding-bottom: 1px; }
+.cal-dows span { text-align: center; font-size: 10.5px; font-weight: 600; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--cal-soft); }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); }
+.cal-cell { display: flex; align-items: center; justify-content: center;
+  height: clamp(17px, .8vw + 9px, 20px); font-size: clamp(14px, .45vw + 9px, 15px);
+  font-weight: 500; color: var(--cal-ink); }
+/* The days belonging to the months on either side, so the rows read as a real month. Quieter by
+   token, not by opacity: opacity would make the contrast this shop measures a lie. */
+.cal-cell.edge { color: var(--cal-soft); font-weight: 400; }
+/* Today wears one of the seven inks below, the one its date is tokened for, so the circle changes
+   colour as the days move on. The number is drawn smaller than the other numerals so the whole
+   figure sits inside the circle with room to spare, and it is always the same white — measured at
+   7:1 or better on every one of the seven inks, day and night alike. */
+.cal-cell.is-today { background: var(--cal-mark-0); color: var(--cal-mark-ink); font-weight: 600;
+  border-radius: 50%; aspect-ratio: 1; width: auto; margin: 0 auto;
+  font-size: clamp(9px, .24vw + 7.5px, 11px); line-height: 1; }
+.cal-cell.is-today.mark-0 { background: var(--cal-mark-0); }
+.cal-cell.is-today.mark-1 { background: var(--cal-mark-1); }
+.cal-cell.is-today.mark-2 { background: var(--cal-mark-2); }
+.cal-cell.is-today.mark-3 { background: var(--cal-mark-3); }
+.cal-cell.is-today.mark-4 { background: var(--cal-mark-4); }
+.cal-cell.is-today.mark-5 { background: var(--cal-mark-5); }
+.cal-cell.is-today.mark-6 { background: var(--cal-mark-6); }
+/* ---------- the weather, beside the month, the same size ----------
+   "Add the weather after the calendar widget in the same size like the calendar" (2026-10-13). The tile
+   is the calendar's twin by construction rather than by eye: the identical width clamp, the same
+   --cal-face/--cal-ink, the same 22px radius and counter shadow, and align-self: stretch so it grows to
+   the month's height and no taller. Because it borrows the calendar's tokens it cannot introduce an
+   unmeasured ink: the place name is the month name's ink, the temperature the numeral's, the quiet
+   lines --cal-soft — 5.43:1 by day, 5.80:1 by night on this very face. The glyph is the one colour
+   added, and it is --cool, the slate the day card's own border already wears — never a borrowed sky
+   blue. The condition rides on the glyph's SHAPE (sun, cloud, rain, storm), so a colour-blind machine
+   at the counter reads the same weather. The six-hour strip is pushed to the bottom with margin-top:
+   auto, which is also what makes the two faces end level. */
+.today-wx {
+  flex: none; align-self: stretch; width: clamp(270px, 21vw, 320px);
+  background: var(--cal-face); color: var(--cal-ink);
+  border-radius: 22px; box-shadow: var(--shadow); padding: 10px 10px 7px;
+  font-variant-numeric: tabular-nums;
+  display: flex; flex-direction: column;
+}
+.wx-head { display: flex; align-items: baseline; gap: 6px; padding: 0 2px 4px; }
+.wx-place { font-size: clamp(15px, .8vw + 9px, 18px); font-weight: 600; letter-spacing: -.015em;
+  color: var(--cal-head); }
+.wx-glyph { margin-left: auto; align-self: center; color: var(--cool); line-height: 0; }
+.wx-glyph svg { width: 20px; height: 20px; display: block; }
+.wx-glyph.wx-sun { color: var(--warn); }
+.wx-main { display: flex; align-items: flex-start; gap: 9px; }
+.wx-temp { font-family: var(--num); font-weight: 500; letter-spacing: -.04em; line-height: 1.02;
+  font-size: clamp(28px, 2.2vw + 12px, 40px); color: var(--cal-ink); }
+.wx-side { display: flex; flex-direction: column; gap: 2px; padding-top: 3px; min-width: 0; }
+.wx-cond { font-size: clamp(13px, .5vw + 9px, 15px); font-weight: 600; color: var(--cal-ink); }
+.wx-hilo { font-size: 11.5px; font-weight: 500; color: var(--cal-soft); }
+.wx-feels { font-size: 11.5px; color: var(--cal-soft); margin: 3px 0 0; }
+.wx-hours { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin-top: auto; padding-top: 5px; border-top: 1px solid var(--line); }
+.wx-hours span { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+.wx-hours b { font-size: 10px; font-weight: 600; letter-spacing: .04em; color: var(--cal-soft); }
+.wx-hours i { font-style: normal; font-size: clamp(12px, .4vw + 8px, 14px); font-weight: 600;
+  color: var(--cal-ink); }
+.wx-age { font-size: 10.5px; color: var(--cal-soft); margin: 4px 0 0; }
+.wx-none { font-size: 13px; color: var(--cal-soft); margin: 2px 0 0; }
+.today-when { flex: 1; min-width: 0; }
+.today-clock { font-family: var(--num); font-variant-numeric: tabular-nums; white-space: nowrap;
+  font-size: clamp(32px, 3vw + 14px, 56px); font-weight: 500; letter-spacing: -.035em;
+  line-height: 1.04; color: var(--text); margin: -3px 0 4px; }
+.today-clock i { font-style: normal; }
+/* The seconds and am/pm are the small print of a clock face: present, ticking, never competing
+   with the hour and minute. Their text still concatenates to "8:05:00 pm" for anything reading it. */
+.today-clock s { text-decoration: none; font-size: .42em; font-weight: 400; color: var(--muted);
+  letter-spacing: 0; }
+.today-clock u { text-decoration: none; font-size: .34em; font-weight: 500; color: var(--muted);
+  letter-spacing: .04em; }
+.today-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 7px; }
+.today-line .spacer { flex: 1; }
+.today-date { font-size: 1.22em; font-weight: 600; letter-spacing: -.01em; margin: 0 0 7px;
+  font-variant-numeric: tabular-nums; }
+
+/* ---------- liquid glass, on every screen the counter works ----------
+   The counter asked for Apple's liquid glass on the shop screen (2026-10-13), and the first ship of
+   it went unseen: "am not seeing the apple liquid effects". Measured, the reason is arithmetic rather
+   than taste. A panel that is 72% white lets through only 28% of what sits under it, and what sat
+   under it was the shop's crimson at .16 alpha — dark pigment, nearly grey, chroma 23 before the
+   panel and chroma 6 after. Nothing came through because there was nothing to come through.
+   So the material is built the way the compositing demands: the wash carries the shop's three colours
+   as bright tints at high alpha (a panel that keeps its lightness keeps its readability too), each
+   blob holds a flat core and then falls off, so the 20px blur has a real edge to smear under the
+   glass — that smeared edge moving past a tile is the read of liquid — and a second arrangement of
+   the same three colours crossfades over the first, so every tile on the screen changes hue slowly
+   underneath the figures. `render()` puts `.glass` on every screen the counter works on (asked again
+   2026-10-16), and that one class is the whole gate: put the word `remove` back in app.js and this
+   returns to the Dashboard alone. Three things stay solid by rule rather than by route: the two cards
+   that are alarms — an open book and a shut shop — because an alarm should be the one opaque thing on
+   the screen; the name plate, because it is read off paper; and the printed job sheet, which is its
+   own document and never sees this class. Widening it also uncovered two rules that only a glass
+   screen can need: the quiet line under a title, which is the one word with nothing over it, and a
+   screen's empty state, which becomes a panel rather than floating on the wash. There is deliberately
+   no second tier of glass inside a panel: rows, table headers and the topbar stayed flat paper when
+   this pass was last widened, and the counter sent that back. Real refraction, the bending of the
+   content behind the glass, is not something any engine here will do from CSS, so this is the
+   material rather than the lens. */
+.view.glass { position: relative; isolation: isolate; }
+.view.glass::before, .view.glass::after {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+}
+.view.glass::before {
+  background:
+    radial-gradient(46% 34% at 15% 5%, var(--wash-brand) 0 42%, transparent 74%),
+    radial-gradient(42% 30% at 86% 13%, var(--wash-cool) 0 40%, transparent 72%),
+    radial-gradient(54% 38% at 56% 94%, var(--wash-warn) 0 44%, transparent 76%);
+}
+.view.glass::after {
+  background:
+    radial-gradient(50% 36% at 76% 64%, var(--wash-brand) 0 40%, transparent 78%),
+    radial-gradient(44% 32% at 9% 68%, var(--wash-warn) 0 38%, transparent 74%),
+    radial-gradient(38% 28% at 44% 16%, var(--wash-cool) 0 36%, transparent 70%);
+  animation: glass-flow 32s ease-in-out infinite alternate;
+}
+/* The drift is an opacity crossfade between two painted arrangements rather than a moving layer: a
+   wash that slid or scaled would widen the dashboard's own scroll area and leave a bare seam at one
+   edge, and opacity is the one property the engine can animate without repainting the screen. */
+@keyframes glass-flow { from { opacity: 0; } to { opacity: .92; } }
+.view.glass .card:not(.warn-card):not(.shut), .view.glass .stat, .view.glass > .empty {
+  position: relative; background: var(--glass); border-radius: var(--r-glass);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-rim);
+  transition: background .16s ease, box-shadow .16s ease, transform .16s ease;
+  -webkit-backdrop-filter: blur(20px) saturate(130%);
+  backdrop-filter: blur(20px) saturate(130%);
+}
+.view.glass .stat { border: 1px solid var(--glass-line); }
+/* The hero tile keeps its brand edge through the glass: the ring above sets every side to the
+   one-pixel rim, so the edge that marks today's takings is put back by name. */
+.view.glass .stat.hero { border-left: 4px solid var(--brand); }
+/* The specular rim: light along the edge, brightest where it meets the top-left and picking up
+   again at the bottom-right. A one-pixel ring drawn from a gradient, with its own middle masked
+   out — both spellings of the mask, because WebKit and Blink name the composite differently. */
+.view.glass .card:not(.warn-card):not(.shut)::after, .view.glass .stat::after,
+.view.glass > .empty::after {
+  content: ""; position: absolute; inset: 0; padding: 1px; border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(150deg, var(--glass-spec), var(--glass-spec-2) 34%,
+              transparent 50%, var(--glass-spec-3) 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
+}
+/* A tile that is also a way in gives under the finger, the way a droplet flattens. */
+.view.glass .stat.go:hover { background: var(--glass-hover); }
+.view.glass .stat.go:active { background: var(--glass); transform: scale(.985); }
+/* The one word on a screen that sits on NO panel: the quiet line under its title. A panel keeps its
+   figures readable because 72% of the wash never reaches them; this line gets all of it, and the
+   shop's muted ink measured 3.16:1 over the brightest stop of the pink and 3.10:1 in the evening,
+   both under the 4.5 a counter needs to read a sentence. So the quiet grey has a second value for
+   glass screens, darkened (lightened at night) only where the wash is the whole background — paper
+   keeps its own muted, and a word inside a panel keeps its own, because there the glass does the
+   work. A screen with nothing to list is the other case: its `.empty` is a panel in its own right
+   (a top-level one, so it is the same tier as a card and not a second glass inside a glass), and so
+   its words need no special ink. */
+.view.glass > .hint, .view.glass > .band-title { color: var(--muted-on-wash); }
+/* A way in written inside that line is the same case as the line itself: no glass over it, so the
+   brand crimson it would inherit reads 4.14:1 by day and 3.50:1 at night. Both palettes lift it. */
+.view.glass > .hint a { color: var(--link-on-wash); }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .view.glass .card:not(.warn-card):not(.shut), .view.glass .stat, .view.glass > .empty {
+    background: var(--surface);
+  }
+}
+/* ---------- the shop's own Mac window, with a room behind it ----------
+   Every other machine that opens this book is a screen with nothing behind it, so its page has to
+   bring its own paper. This Mac is the one exception: its window is a native shell that puts Apple's
+   own material under the page, so the desktop — the counter, the wall, whatever is actually there —
+   is what the book sits on. The shell adds .vibrant to <html> for its own window only, and it is the
+   only thing that ever does, which is why a phone over the Wi-Fi cannot receive this look even by
+   accident and a job sheet stays the white paper it has to be.
+
+   Two changes, both about what is BEHIND the glass rather than the glass itself. The page stops
+   painting paper, so every screen that is not a glass screen becomes opaque cards standing on the
+   live room. And the wash thins to something over that room instead of covering it — the colour a
+   panel picks up is then partly the shop's own and partly the place the shop is in, which is the
+   whole point of the material. The panels keep their own alpha and their own rim, untouched: a
+   figure is readable because of the 72% it carries, not because of what is behind it, so thinning
+   the wash cannot take a number below the line it was measured on. */
+html.vibrant body { background: transparent; }
+html.vibrant .view.glass::before, html.vibrant .view.glass::after { filter: opacity(.58); }
+fieldset.hours-fields { border: 1px solid var(--line); border-radius: 8px; padding: 13px;
+  display: grid; gap: 11px; margin: 0;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); }
+fieldset.hours-fields legend { font-size: .78em; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--muted); font-weight: 600; padding: 0 6px; }
+fieldset.hours-fields .wide, fieldset.hours-fields p { grid-column: 1 / -1; }
+.days { display: flex; flex-wrap: wrap; gap: 7px; }
+.days .day { display: flex; align-items: center; gap: 6px; border: 1px solid var(--line);
+  border-radius: 7px; padding: 6px 10px; font-size: .85em; cursor: pointer; user-select: none; }
+.days .day:has(input:checked) { background: var(--brand-soft); border-color: var(--brand);
+  color: var(--on-brand-soft); font-weight: 600; }
+.days .day input { accent-color: var(--brand); margin: 0; width: auto; }
+.days .day:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* A name plate is read once, across a counter, and kept nowhere but on paper — so it is set big,
+   wide and selectable, and looks like a slip of paper rather than a value in a table. */
+.plate { font-size: 1.7em; font-weight: 700; letter-spacing: .16em; text-align: center;
+  font-variant-numeric: tabular-nums; background: var(--brand-soft); color: var(--on-brand-soft);
+  border: 1px dashed var(--brand); border-radius: 10px; padding: 11px 8px; margin: 10px 0 6px;
+  user-select: all; -webkit-user-select: all; }
+#plateOut { border-top: 1px solid var(--line); margin-top: 12px; padding-top: 4px; }
+
+/* ---------- click-to-change cells ----------
+   The shop adjusts a book all day: a date slips, a stage moves, a name was typed wrong.
+   Those values carry their own editor so the change does not need the whole form. */
+.qe { display: inline-block; background: none; border: 0; margin: -3px -5px; padding: 3px 5px; border-radius: 6px;
+  font: inherit; color: inherit; text-align: inherit; cursor: pointer; position: relative; max-width: 100%;
+  transition: background .16s ease, color .16s ease; }
+.qe::after { content: ""; position: absolute; left: 5px; right: 5px; bottom: 1px; height: 1px; background: currentColor;
+  opacity: .22; transform: scaleX(1); transform-origin: left; transition: opacity .18s ease; }
+.qe:hover, .qe:focus-visible { background: var(--brand-soft); }
+/* A dashed pill already reads as clickable; an underline crossing its border is just noise. */
+.qe:has(.pill.quiet)::after { display: none; }
+.qe:hover::after, .qe:focus-visible::after { opacity: .5; }
+.qe:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.qe.saving { background: var(--surface-2); color: var(--muted); cursor: progress; }
+.qe.saved { animation: qe-saved 1.2s ease; }
+@keyframes qe-saved { 0% { background: var(--ok-soft); box-shadow: 0 0 0 3px var(--ring); } 100% { background: none; box-shadow: none; } }
+.qe.bad { animation: qe-nudge .34s ease; background: var(--bad-soft); color: var(--bad); }
+@keyframes qe-nudge { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
+.qe-in { font: inherit; color: inherit; background: var(--surface); border: 1.5px solid var(--focus);
+  border-radius: var(--r-sm); padding: 4px 7px; min-width: 8ch; }
+.qe-in:focus { outline: none; box-shadow: 0 0 0 3px var(--ring); }
+.chips { white-space: nowrap; width: 1%; }
+/* A date column should hug its own text rather than wrap into a stack of lines. */
+td.when { white-space: nowrap; width: 1%; }
+.chips .qe + .qe { margin-left: 5px; }
+/* A priority that is not urgent should not compete with the pills that mean something. */
+.pill.quiet { background: none; border: 1px dashed var(--line-2); color: var(--muted); font-weight: 500; padding: 2px 7px; }
+.pill.stage { background: var(--cool-soft); color: var(--cool); }
+td .pill.stage { margin-top: 4px; }
+.editable-hint { margin: 0; }
+/* The book has been re-read after a change: settle back in rather than snap. */
+.view.settle { animation: settle .34s ease; }
+@keyframes settle { from { opacity: .55; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  body, .side { transition: none; }
+  .stat.go, .stat.go .arrow, .qe, .qe::after { transition: none; }
+  .view.glass .card, .view.glass .stat { transition: none; }
+  /* The wash keeps its colour and stops moving: both arrangements sit half-shown, still, so the
+     glass is still glass for a counter who asked the system not to animate. */
+  .view.glass::after { animation: none; opacity: .5; }
+  .qe.saved, .qe.bad, .view.settle { animation: none; }
+}
+
+/* ---------- tables ---------- */
+.tablewrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: .92em; }
+th { text-align: left; font-size: .76em; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); font-weight: 600; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--surface-2); position: sticky; top: 0; z-index: 2; }
+td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+tbody tr:last-child td { border-bottom: 0; }
+tr[data-open], tr[data-open-lead] { cursor: pointer; }
+tr[data-open]:hover, tr[data-open-lead]:hover { background: var(--surface-hover); }
+.num { text-align: right; font-family: var(--num); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.money { font-family: var(--num); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.due { font-family: var(--num); font-size: .9em; color: var(--muted); }
+.due.late { color: var(--bad); font-weight: 600; }
+.ref { font-family: var(--num); font-size: .86em; color: var(--muted); }
+.strong { font-weight: 600; }
+/* A figure the shop has no cost basis for is still shown, but it should not shout. */
+.muted { color: var(--muted); font-weight: 400; }
+.pill { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: .78em; font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
+/* The press is the shop's own colour; everything else stays quiet so a status reads at a glance. */
+.s-Pending { background: var(--grey-soft); color: var(--muted); }
+.s-Printing { background: var(--brand-soft); color: var(--link); }
+.s-Ready { background: var(--warn-soft); color: var(--warn); }
+.s-Delivered { background: var(--ok-soft); color: var(--ok); }
+.s-Cancelled { background: var(--surface-2); color: var(--muted); text-decoration: line-through; }
+.p-Urgent { background: var(--bad-soft); color: var(--bad); }
+.k-Quote { background: var(--cool-soft); color: var(--cool); box-shadow: inset 0 0 0 1px var(--cool-soft); }
+/* A job whose balance has been cleared. Same token pair as Delivered, so it reads as money news. */
+.k-paid { background: var(--ok-soft); color: var(--ok); }
+.i-lines { background: var(--grey-soft); color: var(--muted); font-family: var(--num); font-weight: 500; }
+.g-Prospect { background: var(--grey-soft); color: var(--muted); }
+.g-Meeting { background: var(--cool-soft); color: var(--cool); }
+.g-Proposal { background: var(--warn-soft); color: var(--warn); }
+.g-Won { background: var(--ok-soft); color: var(--ok); }
+.g-Lost { background: var(--bad-soft); color: var(--bad); }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 5px; background: var(--grey-soft); color: var(--muted); font-size: .8em; }
+.pos { color: var(--ok); } .neg { color: var(--bad); }
+.balance { font-weight: 600; }
+.empty { padding: 34px 18px; text-align: center; color: var(--muted); display: grid; gap: 8px; justify-items: center; }
+.empty b { color: var(--text); font-size: 1.05em; font-weight: 600; }
+.empty .btn { margin-top: 4px; }
+
+/* ---------- bar chart ---------- */
+.bars { display: flex; align-items: flex-end; justify-content: flex-start; gap: clamp(3px, .5vw, 9px); height: clamp(120px, 15vw, 190px); padding-top: 8px; }
+.bar { flex: 1 1 0; max-width: 96px; min-width: 10px; display: flex; flex-direction: column; justify-content: flex-end; gap: 5px; height: 100%; }
+.bar > i { background: linear-gradient(180deg, var(--bar-top), var(--bar-bot)); border-radius: 3px 3px 0 0; min-height: 2px; transition: height .3s ease; }
+.bar.zero > i { background: var(--line); }
+.bar > s { text-decoration: none; font: 500 .68em/1 var(--num); color: var(--muted); text-align: center; white-space: nowrap; }
+.bar > u { text-decoration: none; font: 600 .68em/1 var(--num); color: var(--text); text-align: center; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: .8em; color: var(--muted); margin-top: 8px; }
+.legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+.mix { display: grid; gap: 9px; }
+.mix .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; align-items: center; }
+.mix .row > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .9em; }
+.mix .row > b { font: 500 .86em/1 var(--num); }
+.mix .track { grid-column: 1 / -1; height: 6px; background: var(--surface-2); border-radius: 99px; overflow: hidden; }
+.mix .track i { display: block; height: 100%; background: var(--brand); border-radius: 99px; }
+/* Money out is the logo's grey, so in and out never look like the same thing. */
+.mix .track i.out { background: var(--grey); }
+.duo { display: grid; grid-template-columns: auto auto; gap: 3px 12px; margin-top: 11px; padding-top: 10px; border-top: 1px dashed var(--line-2); font-size: .86em; }
+.duo span { color: var(--muted); }
+.duo b { font-family: var(--num); font-weight: 600; text-align: right; }
+
+/* ---------- drawer ---------- */
+.drawer { position: fixed; inset: 0; z-index: 40; display: flex; justify-content: flex-end; }
+.drawer-scrim { position: absolute; inset: 0; background: var(--scrim); }
+.drawer-body {
+  position: relative; background: var(--surface); width: min(660px, 100%); height: 100%;
+  overflow-y: auto; box-shadow: var(--shadow-lg); padding: clamp(16px, 2vw, 26px);
+  display: grid; gap: 16px; align-content: start; animation: slide .2s ease;
+}
+@keyframes slide { from { transform: translateX(26px); opacity: 0; } }
+.drawer-h { display: flex; align-items: flex-start; gap: 12px; }
+.drawer-h h2 { font-size: 1.28em; }
+.drawer-h .spacer { flex: 1; }
+.iconbtn { border: 1px solid var(--line-2); background: var(--surface); width: 32px; height: 32px; border-radius: 8px; cursor: pointer; line-height: 1; color: var(--muted); }
+.iconbtn:hover { background: var(--surface-2); color: var(--text); }
+.kv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 175px), 1fr)); gap: 12px 16px; }
+.kv-grid div { display: grid; gap: 2px; }
+.kv-grid span { font-size: .76em; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.kv-grid b { font-weight: 500; word-break: break-word; }
+.amounts { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.amounts div { padding: 11px 13px; border-radius: var(--r-sm); background: var(--surface-2); border: 1px solid var(--line); display: grid; gap: 2px; }
+.amounts span { font-size: .74em; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.amounts b { font: 600 1.06em/1.2 var(--num); }
+.amounts.second div { background: var(--surface-hover); }
+.amounts.second b { font-size: .98em; }
+.steps { display: flex; gap: 6px; flex-wrap: wrap; }
+.step { border: 1px solid var(--line-2); background: var(--surface); border-radius: 99px; padding: 6px 13px; cursor: pointer; font-size: .86em; font-weight: 500; color: var(--muted); }
+.step:hover { border-color: var(--focus); color: var(--link); }
+.step.on { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
+.timeline { display: grid; gap: 0; }
+.timeline li { list-style: none; display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 12px; padding-bottom: 14px; position: relative; }
+.timeline li::before { content: ""; position: absolute; left: 5px; top: 14px; bottom: 0; width: 1px; background: var(--line); }
+.timeline li:last-child::before { display: none; }
+.timeline li > i { width: 9px; height: 9px; border-radius: 50%; background: var(--brand); margin-top: 5px; box-shadow: 0 0 0 3px var(--brand-soft); }
+.timeline li.note > i { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
+.timeline li.pay > i { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.timeline p { margin: 0; font-size: .9em; }
+.timeline time { font: 500 .76em/1 var(--num); color: var(--muted); }
+
+/* Client messages. Every state pill reuses a token pair that already clears AA in both
+   palettes (warn/grey/ok on its own -soft), so the queue can never introduce a fail. */
+.notify { display: grid; gap: 8px; }
+.notify .section-h.sub { font-size: .82em; margin-top: 10px; }
+.msgs { display: grid; gap: 7px; }
+.msg { border: 1px solid var(--line-2); border-radius: 10px; background: var(--paper); overflow: hidden; }
+.msg.waiting { border-color: var(--warn); }
+.msg summary { display: flex; align-items: center; gap: 8px; padding: 8px 11px; cursor: pointer; list-style: none; font-size: .9em; }
+.msg summary::-webkit-details-marker { display: none; }
+.msg summary b { font-weight: 600; }
+.msg summary time { font: 500 .74em/1 var(--num); color: var(--muted); white-space: nowrap; }
+.msg .m-chan { color: var(--muted); font-size: .86em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg .m-body { margin: 0; padding: 11px 13px; border-top: 1px solid var(--line); white-space: pre-wrap; font-size: .88em; line-height: 1.5; color: var(--text); background: var(--surface); }
+.msg .m-act { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 9px 11px; border-top: 1px solid var(--line); }
+.n-Queued { background: var(--warn-soft); color: var(--warn); }
+.n-Opened { background: var(--grey-soft); color: var(--muted); }
+.n-Sent { background: var(--ok-soft); color: var(--ok); }
+.n-Pending, .n-Sending { background: var(--warn-soft); color: var(--warn); }
+.n-Failed, .n-Cancelled { background: var(--bad-soft); color: var(--bad); }
+.delivery-error { margin: 8px 12px 0; overflow-wrap: anywhere; }
+.tosend { color: var(--link); font-weight: 600; }
+ul { margin: 0; padding: 0; }
+.stack { display: grid; gap: var(--gap); align-content: start; }
+.row-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+
+/* Survivors of the MoMo panel: the job rows still use the red "owes" pill, and the message
+   drawer still uses the link-coloured note line. */
+.pill.out { background: var(--bad-soft); color: var(--bad); }
+.sig-note { margin: 0; font-size: .86em; line-height: 1.45; color: var(--link); }
+
+/* ---------- collect at the counter ---------- */
+/* The one question the shop screens a hand-over on, so the number box is the biggest thing on
+   the screen and the verdict reads at arm's length — on the desk and on a phone alike. */
+.collect-ask { display: flex; gap: 9px; align-items: flex-end; }
+.collect-ask .field { flex: 1 1 240px; max-width: 520px; }
+.collect-q { font-size: clamp(18px, .9vw + 13px, 24px); min-height: 52px; padding: 6px 13px;
+  letter-spacing: .05em; text-transform: uppercase; }
+.collect-ask .btn { min-height: 52px; }
+.collect-verdict { display: grid; gap: 13px; }
+.collect-verdict.yes { border-color: var(--ok); }
+.collect-ref { font: 600 clamp(18px, .9vw + 13px, 24px)/1.2 var(--num); letter-spacing: .02em; }
+.collect-what { font-size: 1.16em; }
+.collect-who { margin: -7px 0 0; color: var(--muted); font-size: .92em; }
+.collect-yes { margin: 0; color: var(--ok); font-weight: 600; }
+.collect-stop { margin: 0; color: var(--bad); font-weight: 600; }
+.collect-amb { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin: 0; }
+.collect-amb span { color: var(--muted); font-size: .88em; }
+/* The hand-over is the button the whole screen exists for; it gets a thumb's full height. */
+.collect-verdict .btn.primary { min-height: 48px; padding: 12px 20px; font-size: 1.02em; }
+/* The shelf has to fit a thumb's width. Everything on it is settled by definition, so the billed
+   figure is the one column a counter never reads — it goes first when the screen narrows. */
+@media (max-width: 720px) {
+  .collect-shelf th:nth-child(3), .collect-shelf td:nth-child(3) { display: none; }
+  .collect-shelf .ref { white-space: nowrap; }
+  /* Two boxes fit a phone's width, so the third would sit under them like a leftover. The balance
+     is the figure actually read out to the client, so it takes the row to itself instead. */
+  .collect-verdict .amounts > div:last-child { grid-column: 1 / -1; }
+}
+
+/* ---------- modal ---------- */
+.modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: var(--pad); }
+.modal-scrim { position: absolute; inset: 0; background: var(--scrim); }
+.modal-card { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-lg); width: min(680px, 100%); max-height: min(88vh, 860px); overflow: auto; padding: clamp(16px, 2vw, 24px); display: grid; gap: 15px; align-content: start; }
+.modal-card header { display: flex; align-items: center; gap: 12px; }
+.modal-card header h2 { font-size: 1.18em; } .modal-card header .spacer { flex: 1; }
+.install-note { display: grid; gap: 10px; line-height: 1.55; }
+.install-note p { margin: 0; }
+.install-note .hint { color: var(--muted); }
+/* The lines editor is a table of inputs, so the job form needs more room than a plain form. */
+.modal-card:has(#jobForm) { width: min(960px, 100%); }
+.items { display: grid; gap: 7px; }
+.items-t td { padding: 5px 6px; border-bottom: 1px solid var(--line); }
+.items-t input, .items-t select { width: 100%; padding: 6px 7px; font-size: .9em; }
+.items-t td.num.it-line { font-size: .9em; }
+.items-t .iconbtn { width: 27px; height: 27px; font-size: .8em; }
+/* Money and quantity are said out loud at the counter — "twelve hundred", "two hundred and
+   fifty pieces" — so the boxes that take them are plain text read by the shop's own parser,
+   not a browser number field that erases anything it does not recognise. They sit on the
+   right in the figure face so a column of amounts lines up the way a till roll does. */
+input.money, input.qty { text-align: right; font-family: var(--num); font-variant-numeric: tabular-nums; }
+input.qty { max-width: 120px; }
+form { display: grid; gap: 13px; }
+.f-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); }
+label.field { display: grid; gap: 5px; }
+label.field > span { font-size: .78em; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+label.field.wide { grid-column: 1 / -1; }
+.picker-field { display: grid; gap: 5px; }
+.picker-field.wide { grid-column: 1 / -1; }
+.picker-field > span { font-size: .78em; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+.consent { display: flex; align-items: flex-start; gap: 9px; font-size: .83em; color: var(--text); }
+.consent.wide { grid-column: 1 / -1; }
+.consent input { width: auto; margin: 2px 0 0; accent-color: var(--brand); }
+.hintline { font-size: .8em; color: var(--muted); }
+.calc { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 12px 14px; display: grid; gap: 4px; font-size: .9em; }
+.calc .line { display: flex; justify-content: space-between; gap: 12px; }
+.calc .line b { font-family: var(--num); }
+.calc .line.total { border-top: 1px dashed var(--line-2); padding-top: 6px; margin-top: 2px; font-weight: 600; }
+#payFull { justify-self: end; margin-top: 7px; }
+.settles { margin: 0; color: var(--ok); font-weight: 600; font-size: .92em; }
+.modal-foot { display: flex; gap: 8px; align-items: center; }
+.modal-foot .spacer { flex: 1; }
+.err { color: var(--bad); font-size: .86em; min-height: 1.2em; }
+.picker { display: grid; gap: 6px; }
+
+/* ---------- toasts ---------- */
+.toasts { position: fixed; bottom: 18px; right: 18px; z-index: 60; display: grid; gap: 8px; justify-items: end; }
+.toast { background: var(--ink); color: var(--side-hi); padding: 10px 15px; border-radius: 9px; box-shadow: var(--shadow-lg); font-size: .9em; animation: pop .18s ease; max-width: 380px; }
+.toast.bad { background: var(--bad); color: #fff; }
+.toast.good { background: var(--ok); color: #fff; }
+@keyframes pop { from { transform: translateY(9px); opacity: 0; } }
+
+@media (max-width: 900px) {
+  /* minmax(0,1fr), not 1fr: a plain 1fr track refuses to go under its content's min-content,
+     which pushed every screen ~950px wide and gave the window a horizontal scrollbar. */
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .side { position: static; height: auto; flex-direction: column; }
+  .nav { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
+  .nav a { white-space: nowrap; }
+  .side-cta { flex-direction: row; overflow-x: auto; }
+  .side-cta .btn { width: auto; }
+}
+
+/* Between the phone and the desktop the rail has gone, so the day card lost the sidebar's width but
+   has not yet earned the phone's stacked column. Two month-sized tiles plus a lock-screen clock on one
+   line squeezed the clock under its own nowrap width, which is a horizontal scrollbar. So here the two
+   widgets keep the row between themselves — same size as each other — and the time and date take the
+   line underneath. Scoped above 720px on purpose: flex-wrap on the phone's column would wrap it
+   sideways into columns instead of down. */
+@media (max-width: 900px) and (min-width: 721px) {
+  .today-face { flex-wrap: wrap; }
+  .today-when { flex: 1 1 100%; }
+}
+
+/* ---------- phone ----------
+   Under 720px the rail is gone. The destinations become a fixed tab bar a thumb reaches,
+   the overflow sits in a sheet behind its last slot, and forms rise from the bottom of the
+   screen the way a phone expects them to. Structure keys off [data-shell="phone"], which
+   app.js sets from this same media query, so the DOM and the styling cannot disagree. */
+@media (max-width: 720px) {
+  :root { --pad: 12px; --gap: 11px; }
+  .shell { display: block; padding-bottom: calc(72px + env(safe-area-inset-bottom)); }
+  .side {
+    position: fixed; left: 0; right: 0; bottom: 0; top: auto; height: auto; z-index: 30;
+    flex-direction: column; gap: 0; padding: 0 0 env(safe-area-inset-bottom);
+    border-top: 1px solid var(--side-line);
+  }
+  .brand, .brand-sub, .nav { display: none; }
+
+  /* The connection line is the one thing from the rail worth keeping in sight. */
+  .phonetop { background: var(--ink-2); }
+  .phonetop .network-status {
+    margin: 0; padding: calc(5px + env(safe-area-inset-top)) var(--pad) 5px;
+    font-size: .68em; color: #b6acae;
+  }
+
+  .tabbar { display: flex; align-items: stretch; }
+  .moresheet {
+    position: absolute; left: 0; right: 0; bottom: 100%; z-index: 1;
+    max-height: min(64vh, 460px); overflow-y: auto;
+    display: grid; gap: 3px; padding: 12px var(--pad) 14px;
+    background: var(--ink); border-top: 1px solid var(--side-line);
+    box-shadow: 0 -18px 40px rgba(0, 0, 0, .38);
+  }
+  .moresheet[hidden] { display: none; }
+  .moresheet .side-cta { padding: 0; max-width: none; margin: 10px 0 4px; display: grid; gap: 6px; }
+  /* The book's strip rides in the sheet too, and takes the sheet's ink colours with it. Everything
+     you press in there gets a thumb's height, not a text link's. */
+  .moresheet .pagefoot {
+    display: grid; gap: 8px; margin-top: 12px; padding: 12px 0 0;
+    border-top: 1px solid var(--side-line); color: var(--side-dim);
+  }
+  .moresheet .pagefoot .kv b { color: var(--side-text); }
+  .moresheet .pagefoot .spacer { display: none; }
+  .moresheet .pagefoot .linkbtn {
+    color: #d9d1d2; display: inline-flex; align-items: center; min-height: 44px; font-size: .95em;
+  }
+  .moresheet .pagefoot .linkbtn:hover { color: var(--side-hi); }
+  .moresheet .pagefoot .hint { color: var(--side-mid); }
+  .moresheet .hint { color: var(--side-mid); }
+
+  /* Each destination carries the mark it uses on the desktop rail, drawn as a mask so it
+     takes the text colour and needs no second set of artwork for dark mode. */
+  [data-shell="phone"] .navlink::before {
+    content: ""; width: 21px; height: 21px; flex: none; background: currentColor;
+    -webkit-mask: var(--ic) center / contain no-repeat; mask: var(--ic) center / contain no-repeat;
+  }
+  .navlink[data-view="dashboard"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'><path d='M4.5 4.5h6v6h-6zM13.5 4.5h6v6h-6zM4.5 13.5h6v6h-6zM13.5 13.5h6v6h-6z'/></svg>"); }
+  .navlink[data-view="jobs"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M7 8V3h10v5M5 8h14v8h-3v5H8v-5H5zM8 12.5h8'/></svg>"); }
+  .navlink[data-view="collect"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M5.5 8h13l1.2 12.5H4.3zM8.5 8V6.2a3.5 3.5 0 0 1 7 0V8'/></svg>"); }
+  .navlink[data-view="accounts"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 8h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H3zM3 8V6a1 1 0 0 1 1-1h13M16.5 14h2.5'/></svg>"); }
+  .navlink[data-view="clients"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><path d='M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM5 21a7 7 0 0 1 14 0'/></svg>"); }
+  .navlink[data-view="spoiled"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M12 4l9 16H3zM12 10v4M12 17.4v.1'/></svg>"); }
+  .navlink[data-view="sync"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M20 12a8 8 0 1 1-2.4-5.7M20.5 3.5V8H16'/></svg>"); }
+  .navlink[data-view="leads"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linejoin='round'><path d='M3 5h18l-7 8v7l-4-2v-5z'/></svg>"); }
+  .navlink[data-view="expenses"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M12 4v11M8 11l4 4 4-4M4 20h16'/></svg>"); }
+  .navlink[data-view="reports"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'><path d='M5 20V11M12 20V5M19 20v-6'/></svg>"); }
+  .navlink[data-view="shop"] { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4.5 8.5L6 3.5h12l1.5 5zM5.5 8.5V20.5h13V8.5M10 20.5v-5.5h4v5.5'/></svg>"); }
+  .navlink.more { --ic: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.6' stroke-linecap='round'><path d='M5.5 12h.1M12 12h.1M18.5 12h.1'/></svg>"); }
+
+  .tabbar .navlink {
+    flex: 1 1 0; min-width: 0; min-height: 60px; border: 0; border-radius: 0; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+    background: none; color: #a99ea0; font-size: 0; font-family: inherit; font-weight: 600;
+    text-decoration: none; padding: 7px 2px 6px;
+  }
+  /* The rail's own label is two words long; the tab gets the short one app.js sets. The
+     anchor's font-size is zeroed to hide that text, so the label needs an absolute size —
+     .62em of zero is still zero. */
+  .tabbar .navlink::after { content: attr(data-short); font-size: 10.5px; letter-spacing: .01em; }
+  .tabbar .navlink span { display: none; }
+  .tabbar .navlink.on, .tabbar .navlink[aria-expanded="true"] {
+    background: var(--side-active); color: var(--side-hi); box-shadow: inset 0 3px 0 var(--brand);
+  }
+  .moresheet .navlink {
+    display: flex; align-items: center; gap: 11px; min-height: 46px; padding: 0 10px;
+    border: 0; border-radius: var(--r-sm); background: none; cursor: pointer;
+    color: #cfc5c7; font: 500 .95em/1.2 inherit; text-align: left; text-decoration: none;
+  }
+  .moresheet .navlink.on { background: var(--side-active); color: var(--side-hi); box-shadow: inset 3px 0 0 var(--brand); }
+  .moresheet .navlink span { font-size: .78em; color: var(--side-dim); margin-left: auto; }
+
+  /* One thumb, so everything you press is at least 44px tall and the filter row scrolls
+     sideways instead of stacking into a wall. An <a class="btn"> is inline by default, and
+     min-height does nothing to an inline box, so the buttons become flex boxes here. */
+  .btn { min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+  /* The compact button and the filter chip are the two places the desktop shrinks below a
+     thumb. A ledger row is already ~99px tall here, so nothing is lost by making them full. */
+  .btn.sm { min-height: 44px; }
+  input, select, textarea { min-height: 44px; font-size: 16px; }
+  /* A tick box is not a field: at 44px it drops below the line of its own label. The whole label
+     is the tap target, so the box itself only has to be readable. */
+  input[type="checkbox"], input[type="radio"] { min-height: 0; width: 20px; height: 20px; }
+  .tab { min-height: 44px; }
+  /* Click-to-change values stay text rather than becoming buttons, but a thumb still needs
+     something to hit — so the tappable box grows without moving the line it sits in. */
+  .qe { padding: 8px 7px; margin: -6px -7px; }
+  /* The stage stepper and the links inside a record — a client name, a phone number to tap
+     and dial — are primary actions on a phone, so they get full-height targets too. */
+  .step { min-height: 44px; display: inline-flex; align-items: center; }
+  /* Two icons were drawn for a mouse: a sheet's ✕ and the remove button on a job line.
+     They keep their size and get their hit box back through the negative margin. */
+  .modal-card .iconbtn, .drawer .iconbtn { width: 44px; height: 44px; }
+  .items-t .iconbtn { width: 34px; height: 34px; margin: -5px; }
+  td a, .drawer-body a:not(.btn) {
+    display: inline-flex; align-items: center; min-height: 44px; padding: 0 6px; margin: -4px -6px;
+  }
+  .toolbar { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 3px; }
+  .toolbar > * { flex: none; }
+  .toolbar .search { flex: 1 1 150px; min-width: 150px; }
+  .tabs { flex-wrap: nowrap; }
+  .title h1 { font-size: 1.3em; }
+
+  /* Two figures side by side still read at phone width; one per row buried the shop's
+     whole day below the fold. */
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpis.money { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat { padding: 12px; }
+  /* A month needs seven columns to stay legible, so on a phone it takes the whole row and the clock
+     drops underneath it — same two widgets, stacked rather than shrunk to unreadable cells. */
+  .today-face { flex-direction: column; align-items: stretch; }
+  .today-cal { width: 100%; }
+  /* The weather tile stacks the same way, and a strip of six hours at phone width has room to
+     breathe, so it stays the six cells the desktop shows rather than becoming a shorter list. */
+  .today-wx { width: 100%; }
+  .stat .v { font-size: 20px; }
+  .stat.hero .v { font-size: 23px; }
+  .band-title { margin-top: 0; }
+  .stat .n { font-size: .74em; }
+  .f-grid { grid-template-columns: minmax(0, 1fr); }
+  .f-grid .field.wide { grid-column: auto; }
+
+  /* A wide ledger stays legible: the first column pins itself so a row you have scrolled
+     under is still identifiable. */
+  table { font-size: .86em; }
+  th, td { padding: 9px 9px; }
+  th:first-child, td:first-child { position: sticky; left: 0; background: var(--surface); z-index: 1; }
+  th:first-child { background: var(--surface-2); }
+  tr[data-open]:hover td:first-child { background: var(--surface-hover); }
+
+  /* The order lines are the one table with eight columns, and a ticket is written on a phone
+     at the counter. Here it stops pretending to be a spreadsheet: each line becomes a small
+     card, its own field names printed above the boxes because there is no header row left to
+     read them from. */
+  .items-t thead { display: none; }
+  .items-t, .items-t tbody { display: block; }
+  .items-t tr.item-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 7px 8px;
+    padding: 10px 0 12px; border-bottom: 1px solid var(--line);
+  }
+  .items-t tr.item-row > td { padding: 0; border: 0; position: static; background: none; }
+  .items-t tr.item-row > td:nth-child(1), .items-t tr.item-row > td:nth-child(2) { grid-column: 1 / -1; }
+  .items-t tr.item-row > td[data-l]::before {
+    content: attr(data-l); display: block; font-size: 10.5px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 3px;
+  }
+  .items-t tr.item-row > td.it-line { display: flex; align-items: center; justify-content: flex-end; }
+  /* The remove button hangs 5px past its own box to keep a thumb-sized hit area (see above). Every
+     other table cell has 9px of padding to swallow that; here the cells have none, so the button
+     used to drag the whole order table 5px wider than the screen. */
+  .items-t tr.item-row > td:last-child { display: flex; align-items: center; justify-content: flex-end; padding-right: 5px; }
+  .items-t input.qty { max-width: none; }
+  /* A field under 16px makes a phone browser zoom the page in and lose the rest of the form
+     while you type — which is exactly what the item table used to do on this device. */
+  .items-t input, .items-t select { font-size: 16px; min-height: 44px; padding: 8px 9px; }
+
+  .modal { padding: 0; align-items: end; justify-items: stretch; }
+  .modal-card {
+    width: auto; max-width: none; max-height: 92vh; border-radius: 16px 16px 0 0;
+    padding: 16px var(--pad) calc(16px + env(safe-area-inset-bottom));
+    animation: rise .2s ease;
+  }
+  .modal-card:has(#jobForm) { width: auto; }
+  @keyframes rise { from { transform: translateY(28px); opacity: .6; } }
+  .drawer-body { width: 100%; max-width: 100vw; overflow-x: hidden; padding-bottom: calc(18px + env(safe-area-inset-bottom)); }
+  .drawer-body > * { min-width: 0; }
+  /* .chips hugs its text with width:1% + nowrap, which is right in a table column and wrong
+     as a block: it made the whole sheet wider than the phone and pushed the last stage off. */
+  .drawer-body .chips { width: auto; white-space: normal; }
+  .toasts { left: 12px; right: 12px; bottom: calc(80px + env(safe-area-inset-bottom)); justify-items: stretch; }
+  .toast { max-width: none; }
+}
+

@@ -382,7 +382,7 @@ JSON.stringify((function () {
        screen a whole heading can. These get no glass over them, so the wash is their entire
        background and they are the first text an widened wash would make unreadable. */
     bareInks: (function () {
-      var out = {};
+      var out = {}, who = {};
       Array.prototype.forEach.call(document.querySelectorAll('#view *'), function (el) {
         if (el.closest('.card, .stat') || (card && card.contains(el))) return;
         var hasWords = Array.prototype.some.call(el.childNodes, function (n) {
@@ -390,8 +390,11 @@ JSON.stringify((function () {
         if (!hasWords || el.closest('.plate')) return;
         var c = getComputedStyle(el).color;
         out[c] = (out[c] || 0) + 1;
+        /* Named, so a failing ratio says which word it was rather than only how red it is. */
+        if (!who[c]) who[c] = el.tagName.toLowerCase() +
+          (el.className ? '.' + String(el.className).trim().replace(/\s+/g, '.') : '');
       });
-      return out;
+      return {inks: out, who: who};
     })(),
     /* What the pass deliberately left solid: an alarm card and the name plate. */
     warnAlpha: (function () { var w = document.querySelector('#view .card.warn-card, #view .shut');
@@ -583,11 +586,14 @@ check("and so does the quiet text", measured_ratio(m, m.get("quiet") or "#000000
       "%.2f:1" % measured_ratio(m, m.get("quiet") or "#000000"))
 check("and as drawn, the glass is a coloured material and not a grey one",
       measured_chroma(m) >= 18, "panel chroma %d" % measured_chroma(m))
-dbare = m.get("bareInks") or {}
+dbare = (m.get("bareInks") or {}).get("inks") or {}
+dwho = (m.get("bareInks") or {}).get("who") or {}
 worst_dbare = min([bare_ratio(m, c) for c in dbare], default=None)
+dbare_at = min(dbare, key=lambda c: bare_ratio(m, c)) if dbare else None
 check("and the words on no panel read over the wash as drawn (%d of them)" % sum(dbare.values()),
       worst_dbare is not None and worst_dbare >= 4.5,
-      "worst %.2f:1" % worst_dbare if worst_dbare is not None else "none found")
+      "worst %.2f:1 (%s)" % (worst_dbare, dwho.get(dbare_at, "?"))
+      if worst_dbare is not None else "none found")
 
 MODE = "dark"
 said, reports = run_probe("dashboard", ["say|" + MEASURE, "shot|glass-dark"], "dark dashboard")
@@ -599,11 +605,14 @@ check("and the figures still clear AA on it", measured_ratio(d, d.get("ink") or 
       "%.2f:1" % measured_ratio(d, d.get("ink") or "#ffffff"))
 check("with the evening wash showing through it", measured_chroma(d) >= 18,
       "panel chroma %d" % measured_chroma(d))
-nbare = d.get("bareInks") or {}
+nbare = (d.get("bareInks") or {}).get("inks") or {}
+nwho = (d.get("bareInks") or {}).get("who") or {}
 worst_nbare = min([bare_ratio(d, c) for c in nbare], default=None)
+nbare_at = min(nbare, key=lambda c: bare_ratio(d, c)) if nbare else None
 check("and the words on no panel read at night too (%d of them)" % sum(nbare.values()),
       worst_nbare is not None and worst_nbare >= 4.5,
-      "worst %.2f:1" % worst_nbare if worst_nbare is not None else "none found")
+      "worst %.2f:1 (%s)" % (worst_nbare, nwho.get(nbare_at, "?"))
+      if worst_nbare is not None else "none found")
 
 MODE = "light"
 said, reports = run_probe("dashboard", ["say|" + MEASURE, "shot|glass-on-a-phone"], "phone",
@@ -633,13 +642,16 @@ for route in ROUTES:
     on_panel = measured_ratio(r, r.get("ink") or r.get("panelInk") or "#000000")
     check("%s: and a figure on a panel still clears AA as drawn" % route, on_panel >= 4.5,
           "%.2f:1" % on_panel)
-    bare = r.get("bareInks") or {}
+    bare = (r.get("bareInks") or {}).get("inks") or {}
+    bwho = (r.get("bareInks") or {}).get("who") or {}
     worst_bare = min([bare_ratio(r, c) for c in bare], default=None)
+    bare_at = min(bare, key=lambda c: bare_ratio(r, c)) if bare else None
     # A screen that puts every word on a panel has no bare text to fail: nothing on it depends on
     # the wash for its legibility, and that is the outcome the pass is trying for.
     check("%s: the words on no panel are still readable over the wash (%d of them)"
           % (route, sum(bare.values())), worst_bare is None or worst_bare >= 4.5,
-          "worst %.2f:1" % worst_bare if worst_bare is not None else "none to check")
+          "worst %.2f:1 (%s)" % (worst_bare, bwho.get(bare_at, "?"))
+          if worst_bare is not None else "none to check")
     if r.get("warnAlpha") is not None:
         expect("%s: an alarm card stays the one opaque thing on it" % route, r["warnAlpha"], 1)
     if r.get("plateAlpha") is not None:

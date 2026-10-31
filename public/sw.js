@@ -1,14 +1,12 @@
 'use strict';
 
-/* Bumped again for the screen a fresh window opens on: startHash() in app.js answered its default
-   "auto" as though it were a screen name, so a counter with nothing stored went to #/auto — a hash no
-   view reads — and never saw the dashboard or where they left off. A device still holding v18 has the
-   menu bar but opens blind. Nothing new is added to APP_SHELL
-   below — /api/counter is an API route, which the worker already lets past to the shop.
-   The new worker prefills the shell from the shop, so this lands while the Mac is answering — and if
-   it is asked for during an outage the install simply fails, leaving the device on the copy it
-   already has rather than on nothing. */
-const CACHE_NAME = 'crispprint-shell-v19';
+/* Bumped again for the weekly software answer: Settings ▸ Updates is now drawn from
+   facts.updates, which only an engine carrying the weekly check fills in, so a device still holding
+   v19 would render "undefined" rows over a build that knows nothing about the cadence. The shell
+   list itself is unchanged — /api/counter and /api/update-check are API routes, which the worker
+   already lets past to the shop, and neither is prefilled: an update answer belongs to the computer
+   that got it, not to a phone that read it once on the bus. */
+const CACHE_NAME = 'crispprint-shell-v22';
 const APP_SHELL = [
   '/',
   '/index.html',
