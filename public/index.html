@@ -45,6 +45,14 @@
   var macApp = apple && !!(window.webkit && window.webkit.messageHandlers) &&
                !/Safari\//.test(navigator.userAgent || '');
   document.documentElement.dataset.pageSettings = macApp ? "shell" : "page";
+  /* The style sheet carries the same rule, but a machine that just took the update may still hold
+     the previous sheet in its browser's cache for one load. This hides the row from the first frame
+     regardless, because the window's menu bar is the only Settings a Mac app has. */
+  if (macApp) {
+    var hide = document.createElement('style');
+    hide.textContent = '.nav a[data-view="settings"]{display:none}';
+    document.head.appendChild(hide);
+  }
 })();
 </script>
 </head>

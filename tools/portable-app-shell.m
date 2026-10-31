@@ -515,6 +515,10 @@ static int runEngineOnly(void) {
     // The background chosen in Settings ▸ Appearance is told to the page before it paints, so a
     // relaunch opens already wearing it and never flashes the shop's own paper first.
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+    // A proof window starts from a browser that remembers nothing. Otherwise it opens holding the
+    // shell an earlier proof left in this origin's cache, and reports the page from before the build
+    // it is meant to describe.
+    if (kProbeTo || kSettingsProbeTo) config.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
     NSString *background = chosenBackground();
     if (![background isEqualToString:@"plain"]) {
         WKUserContentController *controller = [[WKUserContentController alloc] init];
@@ -665,6 +669,8 @@ static int runEngineOnly(void) {
     dispatch_group_enter(both);
     [_web evaluateJavaScript:@"JSON.stringify({title: document.title,"
                              @" screens: document.querySelectorAll('.navlink').length,"
+                             @" settingsRow: document.querySelectorAll('.navlink[data-view=settings]').length,"
+                             @" pageSettings: document.documentElement.dataset.pageSettings || '',"
                              @" status: (document.getElementById('networkStatus') || {}).innerText || '',"
                              @" wide: Math.round(innerWidth), high: Math.round(innerHeight)})"
            completionHandler:^(id result, NSError *error) {

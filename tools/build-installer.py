@@ -2219,9 +2219,13 @@ def prove_window(key, built, port, prefix=()):
     try:
         page = re.search(r'"title": ?"([^"]*)".*?"screens": ?(\d+)', said or "")
         note("%s: double-clicking the app opens a window on the shop" % folder,
-             bool(page) and "Chrisphics Hub" in page.group(1) and int(page.group(2)) >= 8,
+             bool(page) and "Chrisphics Hub" in page.group(1) and int(page.group(2)) == 11,
              "%s, %s screens in the rail" % (page.group(1)[:24], page.group(2)) if page
              else (said or "the window never reported in").strip()[:70])
+        mac = re.search(r'"settingsRow": ?(\d+).*?"pageSettings": ?"([^"]*)"', said or "")
+        note("  and its rail leaves Settings to the menu bar, where it already is",
+             bool(mac) and mac.group(1) == "0" and mac.group(2) == "shell",
+             "row %s, flag %s" % mac.groups() if mac else "the window said nothing about Settings")
         painted = re.search(r"(\d+) distinct colours, light from (\d+) to (\d+)", said or "")
         note("  and the window painted, rather than a black rectangle",
              bool(painted) and int(painted.group(1)) > 100
