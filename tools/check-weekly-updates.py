@@ -151,6 +151,19 @@ import server  # noqa: E402
 REPO_VERSION = text(os.path.join(REPO, "VERSION")).strip()
 THIS_BUILD = server.counter_version()
 
+
+# The build the repository offers sits one step past whatever this copy calls itself, so the
+# check stays true on the day the shop's own number moves.
+def stepped(text):
+    parts = [int(p) for p in str(text).strip().split(".") if p.strip().isdigit()] or [1, 0]
+    while len(parts) < 2:
+        parts.append(0)
+    parts[-1] += 1
+    return ".".join(str(p) for p in parts)
+
+
+NEWER = stepped(REPO_VERSION)
+
 # --------------------------------------------------------------------------- 1. the week, in the source
 print("\n== what the shipped files say the rule is")
 engine = text(SERVER_PY)
@@ -406,16 +419,16 @@ sync_before = sqlite3.connect("file:%s?mode=ro" % BOOK, uri=True).execute(
     "SELECT count(*) FROM sync_requests").fetchone()[0]
 hash_before_writes = hashlib.sha256(open(BOOK, "rb").read()).hexdigest()
 
-SERVED["text"] = "1.10"
+SERVED["text"] = NEWER
 code, body = call("POST", "/api/update-check", {"anything": "a browser sends no body"})
 pressed = json.loads(body) if code == 200 else {}
 expect("the button on the screen asks now, and gets an answer", code, 200)
-expect("read as newer, because ten is ten and not one", pressed.get("verdict"), "newer")
-expect("with the number the repository holds", pressed.get("remote"), "1.10")
+expect("read as a newer build waiting, one step past this one", pressed.get("verdict"), "newer")
+expect("with the number the repository holds", pressed.get("remote"), NEWER)
 check("and the engine kept it in the file, not the book",
-      json.load(open(ANSWER, encoding="utf-8")).get("remote") == "1.10", ANSWER)
+      json.load(open(ANSWER, encoding="utf-8")).get("remote") == NEWER, ANSWER)
 again = json.loads(call("GET", "/api/counter")[1])["updates"]
-expect("so every other counter reads the same answer", again.get("remote"), "1.10")
+expect("so every other counter reads the same answer", again.get("remote"), NEWER)
 expect("with the stamp of that ask", again.get("asked_at"), pressed.get("asked_at"))
 
 for verb, want in (("GET", 404), ("PUT", 404), ("DELETE", 404), ("PATCH", 501)):
@@ -540,17 +553,6 @@ spec = importlib.util.spec_from_file_location(
     "publish_update", os.path.join(REPO, "tools", "publish-update.py"))
 publish_update = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(publish_update)
-
-# The build the repository offers sits one step past whatever this copy calls itself, so the
-# check stays true on the day the shop's own number moves.
-def stepped(text):
-    parts = [int(p) for p in str(text).strip().split(".") if p.strip().isdigit()] or [1, 0]
-    while len(parts) < 2:
-        parts.append(0)
-    parts[-1] += 1
-    return ".".join(str(p) for p in parts)
-
-NEWER = stepped(REPO_VERSION)
 
 # A small tree that calls itself NEWER — the build that is new from this one's point of view.
 newsrc = os.path.join(work, "newsrc")

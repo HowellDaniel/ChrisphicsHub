@@ -5135,8 +5135,12 @@ function paintTheme() {
      else. Only Settings ▸ Profile touches the book, because the shop's name and number ARE the book.
    - A control the engine would refuse is not offered. Profile shows the refusal instead, in the
      engine's own words, so the screen never promises a save it cannot make. */
+/* The app's own window answers for a sheet, and every Mac window — the shop's app, its portable
+   copy, or a browser on a Mac — has a real menu bar the page does not draw. Both handlers are
+   checked because the main window carries "external" and only the job sheet carries "sheetPrint". */
 const IN_MAC_SHELL = !!(window.webkit && window.webkit.messageHandlers &&
-                        window.webkit.messageHandlers.sheetPrint);
+                        (window.webkit.messageHandlers.sheetPrint ||
+                         window.webkit.messageHandlers.external));
 
 /* The same names the Mac's own Settings window writes into the machine's preferences, so one word
    describes the choice on either kind of computer. */
@@ -5593,10 +5597,13 @@ let menuOpen = -1;
 function paintMenuBar() {
   const bar = $('#menubar');
   if (!bar) return;
-  /* The Mac's window has a real menu bar above it; a phone has a tab bar and no room; only a
-     computer opened straight in a browser window needs the page to carry one. PHONE is the same
-     turnstile the tab bar uses, so the two can never both be away or both be there. */
-  const showing = !IN_MAC_SHELL && !PHONE.matches;
+  /* Only a computer with no menu bar of its own needs the page to carry one: a Windows PC or a
+     Linux box opened in a browser. Every Mac has the system's menu bar above the window — the
+     shop's app, its portable copy, or Safari — so the strip is never drawn there. PHONE is the
+     same turnstile the tab bar uses, so the two can never both be away or both be there. */
+  const APPLE_OS = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '') ||
+                   /Mac OS X|iPhone|iPad|iPod/.test(navigator.userAgent || '');
+  const showing = !IN_MAC_SHELL && !APPLE_OS && !PHONE.matches;
   bar.hidden = !showing;
   /* The sticky title bar sits under the strip only while the strip exists — hence the flag rather
      than a plain height, which would leave a dead gap in the Mac's own window. */

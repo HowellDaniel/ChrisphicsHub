@@ -73,15 +73,18 @@ Clearing a field and saving drops it back to the default `server.py` (or its env
 **Check for update** is now the engine's own weekly ask, and the pane reads its answer; see
 [Notes](#notes).
 
-**The same menus where there is no Mac.** A Windows PC opened by `Chrisphics Hub.cmd`, or any browser
-pointed at the shop's address, has no native menu bar and no `⌘,` to answer it — so the page draws the
-strip itself: **File, Edit, View, Data, Shop** across the top, each row printing the key that runs it
-under `Alt` (`Alt+N` books a job, `Alt+S` opens these settings), and **Settings** the same four tabs as
-the Mac's window. A phone gives the strip back — there is no room for it at 390 points — and inside the
-Mac's own window the page stands back from both the bar and the look, because the native menu and
-`Settings ▸ Appearance` already hold them. What the tabs offer differs in exactly one place: a counter
-that is not the shop's own Mac finds Profile shut and is told why, in the engine's own words, since the
-book only takes profile writes from the shop computer. Everything else the tabs hold — the screen to
+**The same menus where there is no Mac.** A Windows PC opened by `Chrisphics Hub.cmd`, or a Linux
+browser pointed at the shop's address, has no native menu bar and no `⌘,` to answer it — so the page
+draws the strip itself: **File, Edit, View, Data, Shop** across the top, each row printing the key that
+runs it under `Alt` (`Alt+N` books a job, `Alt+S` opens these settings), and **Settings** the same four
+tabs as the Mac's window. Every Mac draws none of it — not the shop's app, not a portable copy, not
+Safari pointed at the same address — because the system's menu bar is already above the window; on
+2026-10-31 the owner settled that the strip "was not for the mac users". A phone gives it back too —
+there is no room for it at 390 points — and inside the Mac's own window the page stands back from both
+the bar and the look, because the native menu and `Settings ▸ Appearance` already hold them. What the
+tabs offer differs in exactly one place: a counter that is not the shop's own Mac finds Profile shut
+and is told why, in the engine's own words, since the book only takes profile writes from the shop
+computer. Everything else the tabs hold — the screen to
 open on, the size of the words, the paper, keeping that machine awake — is stored in that browser alone
 and never travels to the server, so a PC cannot change the look on the Mac's window or on her machine.
 `tools/check-counter-settings.py` proves all of it, including that every printed key and every menu row

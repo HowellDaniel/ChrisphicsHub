@@ -3,7 +3,10 @@
 
 The owner asked, on 2026-10-29, to "Enable the menu bar, and the tabs that the mac has". A Windows
 counter has no app window: the launcher opens a browser at this page, and a browser window brings no
-menu bar, no Settings tabs and no ⌘ keys. So the page now carries all three itself.
+menu bar, no Settings tabs and no ⌘ keys. So the page now carries all three itself. On 2026-10-31 he
+settled where the strip belongs: "These things was not for the mac users it was for windows users, so
+remove them from the mac". So a Windows browser draws the strip, and every Mac — the shop's app, its
+portable copy, or a Mac's browser — draws none, with the Mac's own menu bar above the window.
 
 Two things had to stay true while it grew, and both are proved here rather than argued:
 
@@ -42,6 +45,15 @@ LIVE = os.path.expanduser("~/Library/Application Support/Chrisphics Hub/chrisphi
 PORT = 8897
 PROXY_PORT = 8898
 BASE = "http://127.0.0.1:%d" % PORT
+
+# What a Windows counter's browser says about itself, worn before the page's first frame so the
+# screen decides the way it would on that machine. Injected with WKPROBE_SCRIPT by the probe.
+WINDOWS_USER_AGENT = (
+    "Object.defineProperty(navigator, 'platform', { get: function () { return 'Win32'; } });\n"
+    "Object.defineProperty(navigator, 'userAgent', { get: function () {\n"
+    "  return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0 Safari/537.36';\n"
+    "} });\n")
 PROXY = "http://127.0.0.1:%d" % PROXY_PORT
 shopcheck.require_free(PORT, PROXY_PORT)
 
@@ -308,7 +320,7 @@ def say(tag, expr):
     return "say|'%s='+(%s)" % (tag, expr)
 
 
-def probe(commands, size=None, fresh=False, handlers=None, route="/", base=BASE):
+def probe(commands, size=None, fresh=False, handlers=None, route="/", base=BASE, script=None):
     args = [PROBE, base, work]
     if size:
         args.append("size|%dx%d" % size)
@@ -320,6 +332,11 @@ def probe(commands, size=None, fresh=False, handlers=None, route="/", base=BASE)
         env["WKPROBE_FRESH_DATA"] = "1"
     if handlers:
         env["WKPROBE_HANDLERS"] = handlers
+    if script:
+        path = os.path.join(work, "probe-script.js")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(script)
+        env["WKPROBE_SCRIPT"] = path
     out = subprocess.run(args, capture_output=True, text=True, timeout=240, env=env)
     said = out.stdout or ""
     for line in said.splitlines() + (out.stderr or "").splitlines():
@@ -359,11 +376,13 @@ if not check("a throwaway shop server is answering on 127.0.0.1:%d" % PORT, read
     print("\nthe throwaway shop server did not start — no browser checks ran")
     sys.exit(1)
 
-# --- a computer opened by the launcher: the bar is the page's job
-# fresh, because WebKit keeps the service worker's shell copy after a process ends: without the wipe
-# this leg would read the app.js some earlier run cached, not the one on disk, and a fix that had
-# landed would look like it had not. The pair further down that proves a preference keeps is the only
-# part of this run allowed to carry storage between its two windows.
+# --- a Windows computer opened in a browser: the bar is the page's job. The owner's rule of
+# 2026-10-31 is that the strip belongs to a computer with no menu bar of its own, so this leg wears
+# Windows before the page's first frame. Fresh, because WebKit keeps the service worker's shell copy
+# after a process ends: without the wipe this leg would read the app.js some earlier run cached, not
+# the one on disk, and a fix that had landed would look like it had not. The pair further down that
+# proves a preference keeps is the only part of this run allowed to carry storage between its two
+# windows.
 browser = probe([
     "poll|!!document.documentElement.dataset.menubar",
     say("BAR", "JSON.stringify({hidden:document.getElementById('menubar').hidden,"
@@ -383,11 +402,11 @@ browser = probe([
     "poll|/Open a job first/.test(document.getElementById('toasts').textContent)",
     say("PRESS", "JSON.stringify({said:(document.querySelector('#toasts .toast')||{}).textContent,"
                  "drop:document.querySelector('#menubar .menudrop').hidden})"),
-], fresh=True)
+], fresh=True, script=WINDOWS_USER_AGENT)
 bar = ask(browser, "BAR")
-expect("the page draws a menu bar where the Mac's window would have one",
+expect("a Windows computer's page draws the menu strip its window does not have",
        (bar.get("hidden"), bar.get("flag")), (False, "on"))
-expect("with the Mac's five menus, in order", bar.get("labels"), "File,Edit,View,Data,Shop")
+expect("with the shop's five menus, in order", bar.get("labels"), "File,Edit,View,Data,Shop")
 check("and tells the counter where the keys live", "Alt" in (bar.get("hint") or ""), bar.get("hint"))
 check("the window opens on a screen the shop has, never on a hash of its own making",
       bar.get("real") is True, bar.get("at"))
@@ -400,6 +419,20 @@ pressed = ask(browser, "PRESS")
 check("a row pressed in the bar does that row's one thing and shuts the menu",
       "Open a job first" in (pressed.get("said") or "") and pressed.get("drop") is True,
       pressed.get("said"))
+
+# --- a Mac's browser: the system's own menu bar is above the window, so the page draws none
+macbrowser = probe([
+    "poll|document.documentElement.dataset.menubar==='off'",
+    say("MACBROWSER", "JSON.stringify({hidden:document.getElementById('menubar').hidden,"
+                      "flag:document.documentElement.dataset.menubar,"
+                      "buttons:document.querySelectorAll('#menubar .menubtn').length,"
+                      "top:getComputedStyle(document.querySelector('.topbar')).top})"),
+], fresh=True)
+macbar = ask(macbrowser, "MACBROWSER")
+expect("a Mac's browser keeps the strip off the page altogether",
+       (macbar.get("hidden"), macbar.get("flag")), (True, "off"))
+expect("with no buttons painted behind it and no gap under the title bar",
+       (macbar.get("buttons"), macbar.get("top")), (0, "0px"))
 
 # --- Settings: four tabs, and each one says something true about this computer
 tabs = probe([

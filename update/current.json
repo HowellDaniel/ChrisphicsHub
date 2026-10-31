@@ -1,15 +1,15 @@
 {
- "base": "main/update/chrisphics-hub-1.9",
+ "base": "main/update/chrisphics-hub-1.10",
  "files": [
   {
    "name": "VERSION",
-   "sha256": "afc6e13a0622e1444a83d4eeafdfab6021e1ea26a4f16e8d8f2448f81b4dfa30",
-   "size": 4
+   "sha256": "abbc1dfa005442cde25131e583640f0259dfabc4fd0b8c43690f6e5ebb872609",
+   "size": 5
   },
   {
    "name": "public/app.js",
-   "sha256": "df096bfe9b3515d877360c5bc92dbecb9d2a8781024c73569c024eee0e7496e6",
-   "size": 349480
+   "sha256": "3a390526a635e916d6553f3d3b8cf7471e56ddbfad70c8b38da9eb9612e65f15",
+   "size": 350121
   },
   {
    "name": "public/img/apple-touch-icon.png",
@@ -88,7 +88,7 @@
   },
   {
    "name": "public/sw.js",
-   "sha256": "d443cd35cf28ea59df9d8d9024955f7bd0e62c2d2c8633f024954001c339d978",
+   "sha256": "bd5c82a0da3d5e4d7a48df572e58f64fb8ebee59cbcb1098b307771a8502a8c4",
    "size": 3521
   },
   {
@@ -102,8 +102,8 @@
    "size": 434949
   }
  ],
- "folder": "chrisphics-hub-1.9",
- "notes": "Weekly update check with a checked download, an install the cashier presses, and a shop that closes and reopens on the newer build. The book is never part of the package.",
- "size": 2254843,
- "version": "1.9"
+ "folder": "chrisphics-hub-1.10",
+ "notes": "",
+ "size": 2255485,
+ "version": "1.10"
 }
