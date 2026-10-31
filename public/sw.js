@@ -6,7 +6,7 @@
    list itself is unchanged — /api/counter and /api/update-check are API routes, which the worker
    already lets past to the shop, and neither is prefilled: an update answer belongs to the computer
    that got it, not to a phone that read it once on the bus. */
-const CACHE_NAME = 'crispprint-shell-v23';
+const CACHE_NAME = 'crispprint-shell-v24';
 const APP_SHELL = [
   '/',
   '/index.html',

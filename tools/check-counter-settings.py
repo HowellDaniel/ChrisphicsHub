@@ -8,6 +8,13 @@ settled where the strip belongs: "These things was not for the mac users it was 
 remove them from the mac". So a Windows browser draws the strip, and every Mac — the shop's app, its
 portable copy, or a Mac's browser — draws none, with the Mac's own menu bar above the window.
 
+Later that day he settled Settings the same way: "Remove this and all it's property from the installed
+app on the other mac machines including this machine too because it's already at the top menu bar, and
+leave the windows own like that". A Mac app window's menu bar carries a native Settings panel with the
+same four panes, so inside the app the page's rail row, its screen, its tabs and Alt+S are gone; an old
+Settings bookmark lands on the Dashboard. A Mac's browser keeps the row, because Safari's menu bar has
+no Settings of the shop's; a Windows or Linux browser keeps all of it, as before.
+
 Two things had to stay true while it grew, and both are proved here rather than argued:
 
   - Nothing a counter chooses at their own screen reaches through into the engine. The engine answering
@@ -391,6 +398,8 @@ browser = probe([
                "function(b){return b.textContent;}).join(','),"
                "hint:(document.querySelector('#menubar .menuhint')||{}).textContent||'',"
                "at:location.hash,"
+               "pageSettings:document.documentElement.dataset.pageSettings,"
+               "rail:document.querySelectorAll('#nav a[data-view=settings]').length,"
                "real:SCREENS.some(function(s){return '#/'+s[0]===location.hash;})})"),
     "eval|document.querySelector('#menubar .menubtn').click()",
     "poll|!document.querySelector('#menubar .menudrop').hidden",
@@ -410,6 +419,8 @@ expect("with the shop's five menus, in order", bar.get("labels"), "File,Edit,Vie
 check("and tells the counter where the keys live", "Alt" in (bar.get("hint") or ""), bar.get("hint"))
 check("the window opens on a screen the shop has, never on a hash of its own making",
       bar.get("real") is True, bar.get("at"))
+expect("and a Windows counter keeps the rail's Settings, because its menu bar has none",
+       (bar.get("pageSettings"), bar.get("rail")), ("page", 1))
 filemenu = ask(browser, "FILE")
 check("File opens, and its rows carry their keys",
       filemenu.get("shown") is True and filemenu.get("rows", 0) >= 8
@@ -426,6 +437,8 @@ macbrowser = probe([
     say("MACBROWSER", "JSON.stringify({hidden:document.getElementById('menubar').hidden,"
                       "flag:document.documentElement.dataset.menubar,"
                       "buttons:document.querySelectorAll('#menubar .menubtn').length,"
+                      "pageSettings:document.documentElement.dataset.pageSettings,"
+                      "rail:document.querySelectorAll('#nav a[data-view=settings]').length,"
                       "top:getComputedStyle(document.querySelector('.topbar')).top})"),
 ], fresh=True)
 macbar = ask(macbrowser, "MACBROWSER")
@@ -433,6 +446,8 @@ expect("a Mac's browser keeps the strip off the page altogether",
        (macbar.get("hidden"), macbar.get("flag")), (True, "off"))
 expect("with no buttons painted behind it and no gap under the title bar",
        (macbar.get("buttons"), macbar.get("top")), (0, "0px"))
+expect("and keeps the rail's Settings, because Safari's menu bar has none of the shop's",
+       (macbar.get("pageSettings"), macbar.get("rail")), ("page", 1))
 
 # --- Settings: four tabs, and each one says something true about this computer
 tabs = probe([
@@ -563,32 +578,44 @@ expect("a phone keeps the tab bar", phone.get("tabbar"), True)
 expect("and gives up the menu bar it has no room for", (phone.get("hidden"), phone.get("flag")),
        (True, "off"))
 
-# --- the Mac's own window: the native shell owns the menu, the look and the keys
+# --- the Mac's own window: the menu bar's native Settings panel is the only Settings there
 inmac = probe([
-    "poll|document.getElementById('menubar').hidden===true",
+    "poll|document.documentElement.dataset.pageSettings==='shell'",
     say("MAC", "JSON.stringify({hidden:document.getElementById('menubar').hidden,"
-               "flag:document.documentElement.dataset.menubar})"),
+               "flag:document.documentElement.dataset.menubar,"
+               "rail:document.querySelectorAll('#nav a[data-view=settings]').length,"
+               "said:document.getElementById('nav').textContent.indexOf('Settings')>=0,"
+               "screens:document.querySelectorAll('#nav a[data-view]').length})"),
     "eval|location.hash='#/settings?pane=appearance'",
-    "poll|!!document.querySelector('[data-pref=bg]')",
-    say("HELD", "JSON.stringify({bg:document.querySelector('[data-pref=bg]').disabled,"
-                "text:document.querySelector('[data-pref=text]').disabled})"),
-    "eval|document.documentElement.dataset.bg='linen'",
-    "eval|location.hash='#/dashboard'",
-    "poll|!document.querySelector('#view .loading')",
-    say("KEPT", "JSON.stringify(document.documentElement.dataset.bg)"),
-    "eval|location.hash='#/settings'",
-    "poll|!!document.querySelector('[data-pref=awake]')",
-    say("AWAKE", "JSON.stringify(document.querySelector('[data-pref=awake]').disabled)"),
+    "poll|location.hash==='#/dashboard'",
+    say("GONE", "JSON.stringify({hash:location.hash,"
+                "tabs:document.querySelectorAll('#view .tab').length,"
+                "srows:document.querySelectorAll('#view .srow').length,"
+                "h1:document.querySelector('#topbar h1').textContent})"),
+    "eval|document.dispatchEvent(new KeyboardEvent('keydown',{key:'s',altKey:true,bubbles:true}))",
+    say("KEY", "JSON.stringify({hash:location.hash,"
+               "tabs:document.querySelectorAll('#view .tab').length})"),
+    "eval|window.chrisphics.act('settings')",
+    say("ACT", "JSON.stringify(location.hash)"),
+    "eval|location.hash='#/jobs'",
+    "poll|location.hash==='#/jobs'",
+    say("PAPER", "JSON.stringify(document.documentElement.dataset.bg||'')"),
 ], handlers="sheetPrint", fresh=True)
 shell = ask(inmac, "MAC")
 expect("inside the Mac's window the page stands back from the menu bar",
        (shell.get("hidden"), shell.get("flag")), (True, "off"))
-held = ask(inmac, "HELD")
-expect("and from the look its own Settings panel already holds",
-       (held.get("bg"), held.get("text")), (True, True))
-expect("the paper the Mac's Appearance pane chose is left on the screen", ask(inmac, "KEPT"),
-       "linen")
-expect("as is the keep-awake box, which the app answers natively", ask(inmac, "AWAKE"), True)
+expect("and its rail offers no Settings row, because the menu bar owns it",
+       (shell.get("rail"), shell.get("said")), (0, False))
+expect("leaving the shop's own eleven screens on the rail", shell.get("screens"), 11)
+gone = ask(inmac, "GONE")
+expect("a Settings hash — an old bookmark — opens the Dashboard instead",
+       (gone.get("hash"), gone.get("tabs")), ("#/dashboard", 0))
+check("with no Settings tabs or rows painted anywhere",
+      gone.get("srows") == 0 and gone.get("h1") == "Dashboard", gone.get("h1"))
+expect("Alt+S does nothing there",
+       (ask(inmac, "KEY").get("hash"), ask(inmac, "KEY").get("tabs")), ("#/dashboard", 0))
+expect("and neither does a launch action that names Settings", ask(inmac, "ACT"), "#/dashboard")
+expect("while the Mac's Appearance pane alone owns the paper", ask(inmac, "PAPER"), "")
 
 # --- a computer the shop cannot vouch for is shown a shut Profile, not a refused save
 proxy = boot(PROXY_PORT, extra=["--trust-proxy"], logfile=proxy_log, folder=other_book)
@@ -632,7 +659,11 @@ check("and the new facts route is never served out of that cache",
 index = open(INDEX_HTML, encoding="utf-8").read()
 check("the hours in the pre-paint script are still the shop's",
       "(h < 8 || h >= 17)" in index, "left byte-for-byte alone for check-daylight-theme.py")
-check("the rail offers Settings", 'data-view="settings"' in index, line_saying(index, 'data-view="settings"'))
+check("the rail carries the Settings row for a computer whose menu bar has none",
+      'data-view="settings"' in index, line_saying(index, 'data-view="settings"'))
+check("and a Mac app window is marked before its first paint, with a style that hides the row",
+      'dataset.pageSettings' in index and 'data-page-settings="shell"' in styles,
+      line_saying(styles, 'data-page-settings="shell"'))
 check("and the bar is in the page before the script runs", 'id="menubar"' in index)
 
 # ------------------------------------------------------------------------- the book, whole

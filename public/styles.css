@@ -315,6 +315,10 @@ code { font-family: var(--num); font-size: .88em; }
 .nav a.on { background: var(--side-active); color: var(--side-hi); box-shadow: inset 3px 0 0 var(--brand); }
 .nav a span { font: 500 .78em/1 var(--num); color: var(--side-dim); }
 .nav a.on span { color: var(--side-text); }
+/* A Mac app window's Settings is in its own menu bar, so the rail does not offer it a second time.
+   The flag is set before the first paint; app.js takes the row out of the page as well. A Windows
+   or Linux browser keeps the row, because its menu bar has no Settings of the shop's. */
+:root[data-page-settings="shell"] .nav a[data-view="settings"] { display: none; }
 .side-cta { display: flex; flex-direction: column; gap: 7px; padding: 0 var(--pad); }
 /* What the book holds, where it lives, and the quiet ways out of it. These belong under the
    screens rather than in the rail: the rail is the shop's commands, this strip is the book's

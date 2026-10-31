@@ -76,19 +76,27 @@ Clearing a field and saving drops it back to the default `server.py` (or its env
 **The same menus where there is no Mac.** A Windows PC opened by `Chrisphics Hub.cmd`, or a Linux
 browser pointed at the shop's address, has no native menu bar and no `⌘,` to answer it — so the page
 draws the strip itself: **File, Edit, View, Data, Shop** across the top, each row printing the key that
-runs it under `Alt` (`Alt+N` books a job, `Alt+S` opens these settings), and **Settings** the same four
-tabs as the Mac's window. Every Mac draws none of it — not the shop's app, not a portable copy, not
-Safari pointed at the same address — because the system's menu bar is already above the window; on
+runs it under `Alt` (`Alt+N` books a job, `Alt+S` opens settings), and **Settings** the same four
+tabs as the Mac's window. Every Mac draws none of the strip — not the shop's app, not a portable copy,
+not Safari pointed at the same address — because the system's menu bar is already above the window; on
 2026-10-31 the owner settled that the strip "was not for the mac users". A phone gives it back too —
-there is no room for it at 390 points — and inside the Mac's own window the page stands back from both
-the bar and the look, because the native menu and `Settings ▸ Appearance` already hold them. What the
-tabs offer differs in exactly one place: a counter that is not the shop's own Mac finds Profile shut
-and is told why, in the engine's own words, since the book only takes profile writes from the shop
-computer. Everything else the tabs hold — the screen to
-open on, the size of the words, the paper, keeping that machine awake — is stored in that browser alone
-and never travels to the server, so a PC cannot change the look on the Mac's window or on her machine.
+there is no room for it at 390 points.
+
+**Settings is the menu bar's on a Mac.** A Mac app window's `Chrisphics Hub ▸ Settings…` already opens
+the native panel with the same four panes, so on 2026-10-31 the owner had the page's own Settings taken
+out of the installed app: "Remove this and all it's property from the installed app on the other mac
+machines including this machine too because it's already at the top menu bar, and leave the windows own
+like that". Inside the Mac's window there is no Settings row in the rail, no Settings screen, no tabs
+and no `Alt+S`, and an old `#/settings` bookmark, launch action or saved start screen opens the
+Dashboard instead. A Windows or Linux browser keeps every one of them, and a Mac's browser keeps them
+too, because Safari's menu bar has no Settings of the shop's. A counter that is not the shop's own Mac
+finds Profile shut and is told why, in the engine's own words, since the book only takes profile writes
+from the shop computer. What the page's tabs hold — the screen to open on, the size of the words, the
+paper, keeping that machine awake — is stored in that browser alone and never travels to the server, so
+a PC cannot change the look on the Mac's window or on her machine.
 `tools/check-counter-settings.py` proves all of it, including that every printed key and every menu row
-are the same list, that a row does the one thing it says, and that none of it writes the shop's book.
+are the same list, that a row does the one thing it says, that a Mac app window offers no page Settings
+at all while a Windows browser and a Mac's browser still do, and that none of it writes the shop's book.
 
 **In a browser instead.** Double-click **`Chrisphics Hub.command`**. A Terminal window opens and
 your browser goes to <http://127.0.0.1:8712/>. It reads and writes the same data file as the

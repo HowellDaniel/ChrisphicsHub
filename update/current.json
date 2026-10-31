@@ -1,15 +1,15 @@
 {
- "base": "main/update/chrisphics-hub-1.10",
+ "base": "main/update/chrisphics-hub-1.11",
  "files": [
   {
    "name": "VERSION",
-   "sha256": "abbc1dfa005442cde25131e583640f0259dfabc4fd0b8c43690f6e5ebb872609",
+   "sha256": "582f149887973349c8799a31ea4e7d78b7bb10810cd657410ffe9209b0027e4b",
    "size": 5
   },
   {
    "name": "public/app.js",
-   "sha256": "3a390526a635e916d6553f3d3b8cf7471e56ddbfad70c8b38da9eb9612e65f15",
-   "size": 350121
+   "sha256": "d998f7a06fef97d24af56c814a51ace7ac12c3d09f8b57f11aedb4561767bc39",
+   "size": 352080
   },
   {
    "name": "public/img/apple-touch-icon.png",
@@ -73,8 +73,8 @@
   },
   {
    "name": "public/index.html",
-   "sha256": "d8e62580bb0f90e3ed35599d101020320ba2bc4a28d8c282d2e650a63e26ed85",
-   "size": 6285
+   "sha256": "7b7b1aa3640b3414eff42a14371584674347dde03ac6e552b494501fa1f5546d",
+   "size": 6807
   },
   {
    "name": "public/manifest.webmanifest",
@@ -83,12 +83,12 @@
   },
   {
    "name": "public/styles.css",
-   "sha256": "1a83f4dad3d1ee6d18ce9d9ba2db680aa53931a5f1a6f3ff8848e1fc5f510f36",
-   "size": 79840
+   "sha256": "6862ab140385cb3c007fcd2b7c77ae07ab4af0fb4979bc50572bde24cbc2a4ae",
+   "size": 80211
   },
   {
    "name": "public/sw.js",
-   "sha256": "bd5c82a0da3d5e4d7a48df572e58f64fb8ebee59cbcb1098b307771a8502a8c4",
+   "sha256": "deecc67cd24cc41546e8115034910e1cb4ccf98ca7b34d0a536369b2e14ba930",
    "size": 3521
   },
   {
@@ -102,8 +102,8 @@
    "size": 434949
   }
  ],
- "folder": "chrisphics-hub-1.10",
- "notes": "",
- "size": 2255485,
- "version": "1.10"
+ "folder": "chrisphics-hub-1.11",
+ "notes": "The page's Settings leaves the Mac's app window, whose menu bar already carries it. Windows and a Mac's browser keep every part of it.",
+ "size": 2258337,
+ "version": "1.11"
 }

@@ -1315,6 +1315,13 @@ function go(view, params, id) {
 }
 async function render() {
   S.route = parseHash();
+  /* The Mac app's Settings lives in its own menu bar; the page's screen is for a computer whose
+     menu bar has none. A bookmark, a launch shortcut or a screen saved before this build lands on
+     the Dashboard rather than on a screen that is no longer there. */
+  if (SHELL_OWNS_SETTINGS && S.route.view === 'settings') {
+    history.replaceState(null, '', '#/dashboard');
+    S.route = parseHash();
+  }
   /* Where the shop was standing, kept so "Open this screen first ▸ Where I left off" means the
      same thing here as it does in the Mac's own window. Only the screen is remembered, never the
      filter or the row: a bookmark that reopens yesterday's search is a small trap of its own. */
@@ -4678,7 +4685,7 @@ const ACTIONS = {
     if (menuOpen === at) closeMenus(); else openMenuAt(at);
   },
   'menu-item'(el) { closeMenus(); runMenuItem(el.dataset.do); },
-  'settings'() { go('settings'); },
+  'settings'() { if (!SHELL_OWNS_SETTINGS) go('settings'); },
   'install-app'() { installApp().catch(fail); },
   async 'shop-password'(el) {
     try { passwordForm((await api('/api/shop')).login); } catch (err) { fail(err); }
@@ -5142,6 +5149,16 @@ const IN_MAC_SHELL = !!(window.webkit && window.webkit.messageHandlers &&
                         (window.webkit.messageHandlers.sheetPrint ||
                          window.webkit.messageHandlers.external));
 
+/* A Mac app window has Settings in its own menu bar — a native window with General, Appearance,
+   Profile and Updates — so the page's Settings screen, its rail row and its Alt+S belong only to a
+   computer whose menu bar has no such item: a Windows or Linux unit opened in a browser. The owner
+   settled that on 2026-10-31: "Remove this and all it's property from the installed app on the
+   other mac machines ... because it's already at the top menu bar, and leave the windows own."
+   index.html asks the same question before the first paint, so the row is never drawn at all. */
+const SHELL_OWNS_SETTINGS = IN_MAC_SHELL;
+document.documentElement.dataset.pageSettings = SHELL_OWNS_SETTINGS ? 'shell' : 'page';
+if (SHELL_OWNS_SETTINGS) $$('.navlink[data-view="settings"]').forEach((a) => a.remove());
+
 /* The same names the Mac's own Settings window writes into the machine's preferences, so one word
    describes the choice on either kind of computer. */
 const PREF_NAMES = {
@@ -5227,10 +5244,14 @@ function applyCounterLook() {
    default, so treating it as a screen would put every fresh window at a hash no view answers (#/auto)
    and never read the last screen back. A name only counts if the rail has that screen. */
 function startHash() {
+  /* A Mac app window must never be sent to the page's Settings screen: its menu bar owns Settings,
+     and the page no longer has the screen there. A choice saved before this build falls back to
+     "Where I left off" like any other screen this window does not have. */
+  const screens = SCREENS.filter((screen) => !(SHELL_OWNS_SETTINGS && screen[0] === 'settings'));
   const chosen = pref('start', 'auto');
-  if (SCREENS.some((screen) => screen[0] === chosen)) return '#/' + chosen;
+  if (screens.some((screen) => screen[0] === chosen)) return '#/' + chosen;
   const last = pref('last', '').replace(/^#\/?/, '');
-  return SCREENS.some((screen) => screen[0] === last) ? '#/' + last : '#/dashboard';
+  return screens.some((screen) => screen[0] === last) ? '#/' + last : '#/dashboard';
 }
 
 /* Keeping the screen awake. A Mac holds the shop open with an assertion of its own; a browser can
@@ -5326,6 +5347,10 @@ function printJobSheet() {
    hand can never be taught two different things. */
 function runMenuItem(what) {
   if (!what) return;
+  /* Inside the Mac's window the menu bar's own Settings panel is the only Settings, so nothing that
+     names the page's screen — the row, Alt+S, an old key press — does anything there. A Windows
+     counter still has every one of them. */
+  if (SHELL_OWNS_SETTINGS && (what === 'settings' || what.indexOf('settings') === 0)) return;
   if (what.indexOf('view:') === 0) return go(what.slice(5));
   if (what.indexOf('edit:') === 0) return browserEdit(what.slice(5));
   if (what.indexOf('settings:') === 0) return go('settings', { pane: what.slice(9) });

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Chrisphics Hub — CRISPprint Ghana Printing Records &amp; Accounts</title>
+<meta name="theme-color" content="#1c1517">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Chrisphics">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/img/apple-touch-icon.png">
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231c1517'/><g fill='%239a9aa0'><polygon points='16,2.9 21.6,8.5 16,14.1 10.4,8.5'/><polygon points='16,17.9 21.6,23.5 16,29.1 10.4,23.5'/></g><g fill='%23c93a3f'><polygon points='8.5,10.4 14.1,16 8.5,21.6 2.9,16'/><polygon points='23.5,10.4 29.1,16 23.5,21.6 17.9,16'/></g></svg>">
+<script>
+/* Decide the theme before the first paint, or the screen flashes the wrong one on load. */
+(function () {
+  /* The two hours app.js calls DAY_START and DAY_END, written out again because this runs while
+     app.js does not exist yet: a screen that paints light at 8pm and corrects itself a second later
+     is exactly the flash this script was put here to prevent. tools/check-daylight-theme.py fails
+     if these numbers and the ones in app.js ever drift apart. There is nothing else to work out:
+     the shop's clock is the only look there is, and nothing is stored to read. */
+  var h = new Date().getHours();
+  document.documentElement.dataset.theme = (h < 8 || h >= 17) ? "dark" : "light";
+  /* The paper and the size of the words this computer asked for, set before the first paint for the
+     same reason the theme is: a screen that shows plain paper for a second and then puts the shop's
+     wallpaper on is the flash this block exists to prevent. Nothing is written when the computer has
+     never asked — which is also how the Mac's own app window keeps its native Settings ▸ Appearance
+     in charge: it injects its own answer here, and this script has nothing of its own to say. */
+  try {
+    var bg = localStorage.getItem('crispprint-background');
+    if (bg) document.documentElement.dataset.bg = bg;
+    var size = localStorage.getItem('crispprint-text-size');
+    if (size) document.documentElement.style.setProperty('--text-scale', size);
+  } catch (e) { /* a private window keeps no paper of its own */ }
+  /* Settings lives on the Mac app's own menu bar, so the rail's row must not show even for the
+     instant before app.js runs. app.js asks the same question and takes the row out altogether;
+     this only decides what the very first frame paints. */
+  var macApp = !!(window.webkit && window.webkit.messageHandlers &&
+                  (window.webkit.messageHandlers.sheetPrint ||
+                   window.webkit.messageHandlers.external));
+  document.documentElement.dataset.pageSettings = macApp ? "shell" : "page";
+})();
+</script>
+</head>
+<body>
+<div class="shell">
+  <aside class="side" id="side">
+    <div class="brand">
+      <img class="brand-mark" src="/img/brand.png" width="1000" height="298"
+           alt="CRISPprint Ghana">
+    </div>
+    <p class="brand-sub">Records &amp; account book</p>
+    <p class="network-status" id="networkStatus" role="status" aria-live="polite">Connected to the book</p>
+
+    <nav class="nav" id="nav">
+      <a class="navlink" href="#/dashboard" data-view="dashboard">Dashboard</a>
+      <a class="navlink" href="#/jobs" data-view="jobs">Print jobs</a>
+      <a class="navlink" href="#/collect" data-view="collect">Collect</a>
+      <a class="navlink" href="#/spoiled" data-view="spoiled">Spoiled work</a>
+      <a class="navlink" href="#/sync" data-view="sync">Pending sync</a>
+      <a class="navlink" href="#/clients" data-view="clients">Clients</a>
+      <a class="navlink" href="#/leads" data-view="leads">Enquiries</a>
+      <a class="navlink" href="#/accounts" data-view="accounts">Accounts</a>
+      <a class="navlink" href="#/expenses" data-view="expenses">Expenses</a>
+      <a class="navlink" href="#/reports" data-view="reports">Reports</a>
+      <a class="navlink" href="#/shop" data-view="shop">Shop &amp; devices</a>
+      <a class="navlink" href="#/settings" data-view="settings">Settings</a>
+    </nav>
+
+    <div class="side-cta">
+      <button class="btn primary wide" data-action="new-job">+ New job</button>
+      <button class="btn wide" data-action="install-app">Install app</button>
+      <button class="btn wide" data-action="new-quote">+ New quote</button>
+      <button class="btn wide" data-action="new-client">+ New client</button>
+      <button class="btn wide" data-action="receive-payment">Receive payment</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- The Mac's app window brings its own menu bar; a computer opened by the launcher in a browser
+         window has none, so the shop's File, Edit, View, Data and Shop menus are drawn here instead.
+         app.js leaves it hidden inside the Mac's own window and on a phone. -->
+    <div class="menubar" id="menubar" role="menubar" aria-label="Shop menus" hidden></div>
+    <header class="topbar" id="topbar"></header>
+    <div class="view" id="view"><p class="loading">Loading the book…</p></div>
+
+    <footer class="pagefoot" id="pagefoot">
+      <div class="kv"><span>In the book</span><b id="footCounts">–</b></div>
+      <div class="kv"><span>Last copy</span><b id="footBackup">–</b></div>
+      <p class="hint">Saves to <code id="footDb">data/chrisphics.db</code> on this Mac. Keep that file.</p>
+      <span class="spacer"></span>
+      <button class="linkbtn" data-action="backup">Download data backup</button>
+      <button class="linkbtn" data-action="sign-out" id="signOut" hidden>Sign out of this device</button>
+    </footer>
+  </main>
+</div>
+
+<div class="drawer" id="drawer" hidden>
+  <div class="drawer-scrim" data-action="close-drawer"></div>
+  <section class="drawer-body" id="drawerBody" role="dialog" aria-modal="false"></section>
+</div>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-scrim" data-action="close-modal"></div>
+  <section class="modal-card" id="modalCard" role="dialog" aria-modal="true"></section>
+</div>
+
+<div class="toasts" id="toasts"></div>
+<script src="/app.js"></script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('/sw.js').catch(function (error) {
+      console.error('Offline app support could not start:', error);
+    });
+  });
+}
+</script>
+</body>
+</html>
