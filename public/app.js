@@ -5150,12 +5150,14 @@ const IN_MAC_SHELL = !!(window.webkit && window.webkit.messageHandlers &&
                          window.webkit.messageHandlers.external));
 
 /* Whether this is a Mac app window at all — the shop's .app or a portable copy handed to another
-   Mac. Every WKWebView carries an object at window.webkit.messageHandlers even when no handler is
-   bound, which is exactly how the portable shell differs from Safari: Safari adds "Version/…
-   Safari/…" to the same Apple user agent, and every other browser has no webkit.messageHandlers. */
+   Mac. Both are WKWebViews, and a WKWebView presents Apple's user agent with AppleWebKit and no
+   "Safari/…" tail. The shell cannot be told by its message handlers: the shop's .app binds some and
+   a portable copy binds none, so handlers say nothing about a window whose menu bar is still the
+   system's. Every browser here is told apart by the same agent — Safari, Chrome and Edge add
+   "Safari/…", and Firefox is not AppleWebKit at all. */
 const APPLE_OS = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '') ||
                  /Mac OS X|iPhone|iPad|iPod/.test(navigator.userAgent || '');
-const IN_MAC_APP = APPLE_OS && !!(window.webkit && window.webkit.messageHandlers) &&
+const IN_MAC_APP = APPLE_OS && /AppleWebKit\//.test(navigator.userAgent || '') &&
                    !/Safari\//.test(navigator.userAgent || '');
 
 /* A Mac app window has Settings in its own menu bar — a native window with General, Appearance,

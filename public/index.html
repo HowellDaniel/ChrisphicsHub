@@ -36,14 +36,13 @@
   } catch (e) { /* a private window keeps no paper of its own */ }
   /* Settings lives on the Mac app's own menu bar, so the rail's row must not show even for the
      instant before app.js runs. app.js asks the same question and takes the row out altogether;
-     this only decides what the very first frame paints. Every Mac app window is a WKWebView: the
-     shop's .app binds handlers and a portable copy binds none, but both carry an object at
-     window.webkit.messageHandlers. Safari adds "Version/… Safari/…" to the same Apple user agent,
-     and it is a browser, so a Mac's Safari keeps the row like every other browser. */
+     this only decides what the very first frame paints. A Mac app window is a WKWebView: Apple's
+     user agent with AppleWebKit and no "Safari/…" tail. Handlers cannot tell it, because a portable
+     copy binds none; browsers are told apart by that tail, and Firefox is not AppleWebKit. */
+  var ua = navigator.userAgent || '';
   var apple = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '') ||
-              /Mac OS X|iPhone|iPad|iPod/.test(navigator.userAgent || '');
-  var macApp = apple && !!(window.webkit && window.webkit.messageHandlers) &&
-               !/Safari\//.test(navigator.userAgent || '');
+              /Mac OS X|iPhone|iPad|iPod/.test(ua);
+  var macApp = apple && /AppleWebKit\//.test(ua) && !/Safari\//.test(ua);
   document.documentElement.dataset.pageSettings = macApp ? "shell" : "page";
   /* The style sheet carries the same rule, but a machine that just took the update may still hold
      the previous sheet in its browser's cache for one load. This hides the row from the first frame

@@ -671,6 +671,7 @@ static int runEngineOnly(void) {
                              @" screens: document.querySelectorAll('.navlink').length,"
                              @" settingsRow: document.querySelectorAll('.navlink[data-view=settings]').length,"
                              @" pageSettings: document.documentElement.dataset.pageSettings || '',"
+                             @" agent: navigator.userAgent,"
                              @" status: (document.getElementById('networkStatus') || {}).innerText || '',"
                              @" wide: Math.round(innerWidth), high: Math.round(innerHeight)})"
            completionHandler:^(id result, NSError *error) {

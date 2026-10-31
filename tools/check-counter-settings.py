@@ -635,9 +635,9 @@ expect("Alt+S does nothing there",
 expect("and neither does a launch action that names Settings", ask(inmac, "ACT"), "#/dashboard")
 expect("while the Mac's Appearance pane alone owns the paper", ask(inmac, "PAPER"), "")
 
-# --- a portable copy handed to another Mac: its shell binds no native handlers at all, so the
-# only thing that tells it apart from Safari is the user agent. It is still a Mac app window, and
-# the owner's 2026-10-31 rule covers "the installed app on the other mac machines" as well.
+# --- a portable copy handed to another Mac: its shell binds no native handlers at all, so a handler
+# cannot be what names it. It is still a Mac app window by its agent — AppleWebKit, no Safari tail —
+# and the owner's 2026-10-31 rule covers "the installed app on the other mac machines" as well.
 portable = probe([
     "poll|document.documentElement.dataset.pageSettings==='shell'",
     say("PORT", "JSON.stringify({flag:document.documentElement.dataset.pageSettings,"
@@ -654,7 +654,7 @@ portable = probe([
                 "tabs:document.querySelectorAll('#view .tab').length})"),
 ], fresh=True)
 copy = ask(portable, "PORT")
-expect("a portable Mac app window — one with no native handlers — is marked before its first paint",
+expect("a portable Mac app window — the same Apple agent, with no Safari tail — is marked before its first paint",
        copy.get("flag"), "shell")
 expect("and its rail offers no Settings row either",
        (copy.get("rail"), copy.get("said"), copy.get("screens")), (0, False, 11))
@@ -711,9 +711,10 @@ check("the rail carries the Settings row for a computer whose menu bar has none"
 check("and a Mac app window is marked before its first paint, with a style that hides the row",
       'dataset.pageSettings' in index and 'data-page-settings="shell"' in styles,
       line_saying(styles, 'data-page-settings="shell"'))
-check("and both the page and that first frame rule Safari out, so a Mac's browser keeps the row",
-      "/Safari\\//" in index and "/Safari\\//" in app,
-      line_saying(index, "Safari\\/"))
+check("and both the page and that first frame name a Mac app by AppleWebKit, without a Safari tail",
+      "/AppleWebKit\\//" in index and "/AppleWebKit\\//" in app
+      and "/Safari\\//" in index and "/Safari\\//" in app,
+      line_saying(index, "AppleWebKit\\/"))
 check("and the bar is in the page before the script runs", 'id="menubar"' in index)
 
 # ------------------------------------------------------------------------- the book, whole
