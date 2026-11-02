@@ -472,12 +472,19 @@ input::placeholder { color: var(--placeholder); }
 .band-title { display: flex; align-items: center; gap: 12px; margin: 4px 2px -6px;
   font-size: .72em; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .band-title::after { content: ''; flex: 1; height: 1px; background: var(--line); }
-/* The month the money band headlines is picked, not inferred, so the chooser sits just above it and
-   names itself. A plain inline control — it changes which month is shown, nothing in the book. */
-.month-pick { display: flex; align-items: center; gap: 8px; justify-content: flex-end;
-  margin: 2px 2px 6px; font-size: .8em; color: var(--muted); }
-.month-pick label { letter-spacing: .02em; }
-.month-pick select { font-size: .95em; padding: 4px 8px; }
+/* The month the money band headlines is picked, not inferred, and the choice belongs on the band's
+   own line — a control of its own above a heading reads as a stray row. The heading's rule (the
+   ::after) keeps its place between the name and the chooser, so the line is: name, rule, control.
+   A plain inline control — it changes which month is shown, nothing in the book. */
+.band-title > .month-pick { order: 1; display: flex; align-items: center; gap: 7px;
+  text-transform: none; letter-spacing: 0; font-weight: 500; font-size: 12.5px; color: inherit; }
+.month-pick select { font: inherit; padding: 3px 7px; color: inherit; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 7px; }
+/* What the dashboard has no table for, in one line instead of three full-size empty cards. */
+.clearline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 16px;
+  font-size: .82em; color: var(--muted); }
+.clearline b { font-size: 1.15em; font-weight: 600; color: var(--text); letter-spacing: .02em; }
+.clearline .dot { color: var(--placeholder); }
 /* Today's takings are the figure the counter looks for first, so its tile is the one that is a little
    larger and carries the shop's own colour down its edge. */
 .kpis.money { grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); }
@@ -697,10 +704,9 @@ input::placeholder { color: var(--placeholder); }
    keeps its own muted, and a word inside a panel keeps its own, because there the glass does the
    work. A screen with nothing to list is the other case: its `.empty` is a panel in its own right
    (a top-level one, so it is the same tier as a card and not a second glass inside a glass), and so
-   its words need no special ink. The month chooser is a third such word: it names itself above the
-   Money band, on the wash and not on a panel, so it takes the same lifted grey. */
-.view.glass > .hint, .view.glass > .band-title,
-.view.glass > .month-pick { color: var(--muted-on-wash); }
+   its words need no special ink. The month chooser rides the Money band's own line now, so its name
+   takes that line's lifted grey by inheritance and its control sits on a solid pill of its own. */
+.view.glass > .hint, .view.glass > .band-title { color: var(--muted-on-wash); }
 /* A way in written inside that line is the same case as the line itself: no glass over it, so the
    brand crimson it would inherit reads 4.14:1 by day and 3.50:1 at night. Both palettes lift it. */
 .view.glass > .hint a { color: var(--link-on-wash); }
@@ -1156,7 +1162,10 @@ label.field.wide { grid-column: 1 / -1; }
   .today-wx { width: 100%; }
   .stat .v { font-size: 20px; }
   .stat.hero .v { font-size: 23px; }
-  .band-title { margin-top: 0; }
+  /* A band's name and its month chooser share one line. At phone width that line has to be able to
+     break, or the chooser would be pushed off the screen. */
+  .band-title { margin-top: 0; flex-wrap: wrap; }
+  .band-title::after { flex: 1 1 40px; }
   .stat .n { font-size: .74em; }
   .f-grid { grid-template-columns: minmax(0, 1fr); }
   .f-grid .field.wide { grid-column: auto; }

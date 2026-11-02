@@ -1922,6 +1922,11 @@ async function viewDashboard(r) {
   const moneyMonth = d.money_month || day10(d.today).slice(0, 7);
   const onCurrentMonth = moneyMonth === day10(d.today).slice(0, 7);
   const monthTag = onCurrentMonth ? 'this month' : (d.money_month_label || moneyMonth);
+  /* When the screen shows a month that is not the calendar month, it says why. A cashier who never
+     touched the chooser is not the one who picked it: the engine carried the figure back because
+     this month has sold nothing yet. */
+  const monthNote = onCurrentMonth ? monthName(day10(d.today))
+    : (pick ? 'the month you picked' : 'nothing sold yet in ' + monthName(day10(d.today)));
   /* The open-work cards are honest zeros in a shop whose work is finished, and a row of zeros
      reads as an empty program. So the book's own totals — and the last finished jobs, with
      their clients and money — are put on the screen beside them. */
@@ -1953,7 +1958,7 @@ async function viewDashboard(r) {
     '<td class=num><a class="btn sm" href="#/jobs/' + j.id + '">Open</a></td></tr>').join('');
   /* With no quote out, the dead "no open quotes" table is the emptiest thing on the screen; the
      shop's finished work is far more useful in its place. */
-  const firstSplit = d.quotes.length
+  const ledger = d.quotes.length
     ? cardTable('Quotes waiting on an answer', '<a href="#/jobs?kind=Quote" class="btn sm ghost">All quotes</a>',
       d.quotes.map((q) => '<tr data-open="jobs/' + q.id + '"><td class="strong">' +
         qe('jobs/' + q.id + '/title', q.title, esc(q.title)) +
@@ -1969,12 +1974,82 @@ async function viewDashboard(r) {
       : cardTable('Quotes waiting on an answer', '<a href="#/jobs?kind=Quote" class="btn sm ghost">All quotes</a>',
         '<tr><td colspan="4" class="hint">No open quotes. Anything asked for has been booked or nothing is waiting.</td></tr>',
         ['Quote', 'Worth', 'Price holds', '']);
-
+  const moneyBars = '<div class="card"><h3>Money in — last 15 days</h3>' +
+    '<div class="card-b"><div class="bars">' + bars + '</div>' +
+    '<div class="legend"><span><i style="background:var(--brand)"></i>cash, MoMo and transfers received</span></div>' +
+    '<div class="duo"><span>Received</span><b class="pos">' + money(in15) + '</b>' +
+    '<span>Paid out</span><b class="neg">' + money(out15) + '</b>' +
+    '<span>Net</span><b class="' + (in15 - out15 < 0 ? 'neg' : '') + '">' + money(in15 - out15) + '</b></div>' +
+    '</div></div>';
+  const moneyOut = '<div class="card"><h3>Where the money went — ' + esc(monthTag) + '<span class="spacer"></span>' +
+    '<a href="#/expenses" class="btn sm ghost">Expenses</a></h3><div class="card-b mix">' +
+    (d.spend.length ? d.spend.map((c) => '<div class="row"><span>' + esc(c.category) + '</span><b>' + compact(c.amount) +
+      ' · ' + c.n + '</b><div class="track"><i class="out" style="width:' + Math.round((c.amount / maxSpend) * 100) + '%"></i></div></div>').join('')
+      : '<p class="hint">No costs recorded this month — that makes the profit figure look too good.</p>') +
+    '<div class="duo"><span>Out of the till — ' + esc(monthTag) + '</span><b class="neg">' + money(k.spent_month) + '</b></div>' +
+    '</div></div>';
+  const mixCard = '<div class="card"><h3>What we print most — last 3 months</h3><div class="card-b mix">' +
+    (d.mix.length ? d.mix.map((m) => '<div class="row"><span>' + esc(m.category) + '</span><b>' + compact(m.billed) +
+      ' · ' + m.jobs + '</b><div class="track"><i style="width:' + Math.round((m.billed / maxMix) * 100) + '%"></i></div></div>').join('')
+      : '<p class="hint">No jobs booked in this window.</p>') +
+    '</div></div>';
+  /* A list with nothing in it is the emptiest card on the screen, and three of them in a row make a
+     clear shop look broken. So an empty list gives up its table and becomes one line of an all-clear
+     strip; only a list with rows keeps a card of its own. */
+  const chasePanels = [];
+  const clear = [];
+  if (d.follow_ups.length) {
+    chasePanels.push(cardTable('Who to call back', '<a href="#/leads" class="btn sm ghost">All enquiries</a>',
+      d.follow_ups.map((l) => '<tr data-open-lead="' + l.id + '"><td class="strong">' + esc(l.name) +
+        '<div class="ref">' + esc(l.phone || 'no phone') + ' · ' + esc(l.source) + '</div>' +
+        qe('leads/' + l.id + '/stage', l.stage, '<span class="pill stage">' + esc(l.stage) + '</span>') + '</td>' +
+        '<td>' + qe('leads/' + l.id + '/interest', l.interest,
+          l.interest ? esc(l.interest) : '<span class="due">nothing written</span>') + '</td>' +
+        '<td class="num">' + qe('leads/' + l.id + '/value', l.value,
+          l.value ? money(l.value) : '<span class="due">not priced</span>') + '</td>' +
+        '<td class="when">' + qe('leads/' + l.id + '/follow_up', day10(l.follow_up), followLabel(l)) + '</td></tr>').join(''),
+      ['Who asked', 'What they want', 'Worth', 'Chase']));
+  } else clear.push('no enquiry waits to be chased');
+  if (d.overdue.length) {
+    chasePanels.push(cardTable('Late work', '<a href="#/jobs?overdue=1" class="btn sm ghost">All overdue</a>',
+      jobRows(d.overdue), ['Job', 'Total', 'Balance', 'Status', 'Due']));
+  } else clear.push('nothing is past its due date');
+  if (d.debtors.length) {
+    chasePanels.push(cardTable('Top debtors', '<a href="#/accounts" class="btn sm ghost">Accounts</a>',
+      d.debtors.map((c) => '<tr data-open="clients/' + c.id + '"><td class="strong">' + esc(c.name) +
+        '<div class="ref">' + esc(c.phone || 'no phone') + '</div></td><td class="num">' + c.jobs + '</td>' +
+        '<td class="num neg balance">' + money(c.owed) + '</td><td><button class="btn sm" data-pay-client="' + c.id +
+        '" data-pay-name="' + esc(c.name) + '">Receive</button></td></tr>').join(''),
+      ['Client', 'Jobs', 'Owes', '']));
+  } else clear.push('every client has paid up');
+  /* The newest bookings and the newest finished work are the same rows in a shop whose whole book
+     has gone out, and the same table twice reads as a broken screen. The list of recent bookings
+     earns its card only while something on it has not gone out — that is the one thing the finished
+     ledger does not say. */
+  const notGoneOut = d.recent.filter((j) => j.kind !== 'Job' ||
+    (j.status !== 'Delivered' && j.status !== 'Cancelled'));
+  const freshCard = !finishedRows || notGoneOut.length
+    ? cardTable('Recently booked', '<a href="#/jobs" class="btn sm ghost">All jobs</a>',
+      jobRows(d.recent), ['Job', 'Total', 'Balance', 'Status', 'Due'])
+    : '';
+  /* Two panels to a row on a wide screen, one under the other on a phone. Money is shown beside
+     money and work beside work, so a row is one thought; a panel with nothing to pair with takes
+     the whole width rather than leaving a gap. */
+  const rows = [];
+  const fill = (list) => {
+    for (let i = 0; i < list.length; i += 2) {
+      rows.push('<div class="grid split">' + list[i] + (list[i + 1] || '') + '</div>');
+    }
+  };
+  fill([moneyBars, moneyOut]);
+  fill([mixCard].concat(chasePanels));
+  fill(freshCard ? [ledger, freshCard] : [ledger]);
   topbar('Dashboard', '', filtersBar('dashboard', []));
   /* The day and the shop's hours answer different questions and both are short, so they share one
      row instead of pushing every figure down the screen. Under them the figures are grouped in the
      order a counter thinks in — money, the floor, then what is priced and what went out — and each
-     group says its name so none of the twelve needs a second look to be placed. */
+     group says its name so none of the twelve needs a second look to be placed. The month the money
+     group covers is picked on that group's own line, so the choice is never a row of its own. */
   $('#view').innerHTML =
     '<div class="grid split dash-top">' +
     todayCard(d.kpi) +
@@ -1987,18 +2062,17 @@ async function viewDashboard(r) {
     '<span><b>' + k.clients + '</b>clients</span>' +
     '<span><b>' + money(k.billed_month) + '</b>billed ' + monthTag + '</span>' +
     '</div>' +
-    '<div class="month-pick" role="group" aria-label="Which month the money figures below cover">' +
-    '<label for="dash-month">Money shown for</label>' +
-    '<select id="dash-month" title="Choose the month these money figures cover">' +
+    '<p class="band-title">Money' +
+    '<span class="month-pick"><label for="dash-month">shown for</label>' +
+    '<select id="dash-month" title="Which month the money figures cover">' +
     (d.months_available || []).map((m) => '<option value="' + esc(m.month) + '"' +
       (m.month === moneyMonth ? ' selected' : '') + '>' + esc(m.label) + '</option>').join('') +
-    '</select></div>' +
-    '<p class="band-title">Money</p>' +
+    '</select></span></p>' +
     '<div class="grid kpis money">' +
     stat('Collected today', money(k.collected_today), k.collected_today > 0 ? 'payments entered' : 'nothing entered yet', 'amt good hero',
       '#/accounts', 'Click to see money in and out') +
     stat('This week', money(k.collected_week), 'last 7 days', 'amt', '#/accounts', 'Click to see the accounts book') +
-    stat(onCurrentMonth ? 'Month to date' : d.money_month_label, money(k.collected_month), onCurrentMonth ? monthName(day10(d.today)) : 'the month you picked', 'amt', '#/reports', 'Click for this month in reports') +
+    stat(onCurrentMonth ? 'Month to date' : d.money_month_label, money(k.collected_month), monthNote, 'amt', '#/reports', 'Click for this month in reports') +
     /* 'less money kept on accounts' would be the precise wording here, but this screen has nothing to
        prove it with: the dashboard's own rows look identical whichever server answered, and the shop's
        running server can be a build behind the page. The Accounts screen, which can tell, says it there. */
@@ -2022,60 +2096,20 @@ async function viewDashboard(r) {
     stat('Enquiries to chase', k.open_leads, k.open_leads
       ? (k.leads_due ? k.leads_due + ' due today' : money(k.pipeline_value) + ' of work out there')
       : 'nothing to chase', k.leads_due ? 'warn' : '', '#/leads', 'Click to work the pipeline') +
-    stat('Spent ' + monthTag, money(k.spent_month), 'paper, ink, rent and the rest', 'amt', '#/expenses', 'Click to see money out') +
-    stat('Profit ' + monthTag, money(k.profit_month), 'of ' + money(k.billed_month) + ' billed',
+    stat('Spent ' + monthTag, money(k.spent_month), 'the shop\'s own bills, not a job\'s cost', 'amt', '#/expenses', 'Click to see money out') +
+    /* Two kinds of "cost" sit in this one band and a reader will subtract whichever is nearer. What
+       a month's profit actually equals is the money billed less what the booked jobs cost to make —
+       the shop's bills are a separate ledger and never reconcile against either. So the cost comes
+       out and the subtraction is shown whole: the three figures on this tile always do the arithmetic
+       a cashier would otherwise try with the tile beside it. */
+    stat('Profit ' + monthTag, money(k.profit_month), money(k.billed_month) + ' billed less ' +
+      money((k.billed_month || 0) - (k.profit_month || 0)) + ' of job cost',
       'amt ' + (k.profit_month < 0 ? 'warn' : 'good'), '#/reports', 'Click for the full picture') +
     '</div>' +
-    '<div class="grid split">' +
-    '<div class="card"><h3>Money in — last 15 days</h3>' +
-    '<div class="card-b"><div class="bars">' + bars + '</div>' +
-    '<div class="legend"><span><i style="background:var(--brand)"></i>cash, MoMo and transfers received</span></div>' +
-    '<div class="duo"><span>Received</span><b class="pos">' + money(in15) + '</b>' +
-    '<span>Paid out</span><b class="neg">' + money(out15) + '</b>' +
-    '<span>Net</span><b class="' + (in15 - out15 < 0 ? 'neg' : '') + '">' + money(in15 - out15) + '</b></div>' +
-    '</div></div>' +
-    '<div class="card"><h3>What we print most — last 3 months</h3><div class="card-b mix">' +
-    (d.mix.length ? d.mix.map((m) => '<div class="row"><span>' + esc(m.category) + '</span><b>' + compact(m.billed) +
-      ' · ' + m.jobs + '</b><div class="track"><i style="width:' + Math.round((m.billed / maxMix) * 100) + '%"></i></div></div>').join('')
-      : '<p class="hint">No jobs booked in this window.</p>') +
-    '</div></div>' +
-    '</div>' +
-    '<div class="grid split">' +
-    firstSplit +
-    cardTable('Enquiries to chase', '<a href="#/leads" class="btn sm ghost">All enquiries</a>',
-      d.follow_ups.length ? d.follow_ups.map((l) => '<tr data-open-lead="' + l.id + '"><td class="strong">' + esc(l.name) +
-        '<div class="ref">' + esc(l.phone || 'no phone') + ' · ' + esc(l.source) + '</div>' +
-        qe('leads/' + l.id + '/stage', l.stage, '<span class="pill stage">' + esc(l.stage) + '</span>') + '</td>' +
-        '<td>' + qe('leads/' + l.id + '/interest', l.interest,
-          l.interest ? esc(l.interest) : '<span class="due">nothing written</span>') + '</td>' +
-        '<td class="num">' + qe('leads/' + l.id + '/value', l.value,
-          l.value ? money(l.value) : '<span class="due">not priced</span>') + '</td>' +
-        '<td class="when">' + qe('leads/' + l.id + '/follow_up', day10(l.follow_up), followLabel(l)) + '</td></tr>').join('')
-        : '<tr><td colspan="4" class="hint">Nothing is waiting to be chased up.</td></tr>',
-      ['Who asked', 'What they want', 'Worth', 'Chase']) +
-    '</div>' +
-    '<div class="grid split">' +
-    cardTable('Late work', '<a href="#/jobs?overdue=1" class="btn sm ghost">All overdue</a>',
-      d.overdue.length ? jobRows(d.overdue) : '<tr><td colspan="5" class="hint">Nothing is past its due date.</td></tr>',
-      ['Job', 'Total', 'Balance', 'Status', 'Due']) +
-    cardTable('Top debtors', '<a href="#/accounts" class="btn sm ghost">Accounts</a>',
-      d.debtors.length ? d.debtors.map((c) => '<tr data-open="clients/' + c.id + '"><td class="strong">' + esc(c.name) +
-        '<div class="ref">' + esc(c.phone || 'no phone') + '</div></td><td class="num">' + c.jobs + '</td>' +
-        '<td class="num neg balance">' + money(c.owed) + '</td><td><button class="btn sm" data-pay-client="' + c.id +
-        '" data-pay-name="' + esc(c.name) + '">Receive</button></td></tr>').join('')
-        : '<tr><td colspan="4" class="hint">Every client has paid up. Well done.</td></tr>',
-      ['Client', 'Jobs', 'Owes', '']) +
-    '</div>' +
-    '<div class="grid split">' +
-    '<div class="card"><h3>Where the money went — ' + esc(monthTag) + '<span class="spacer"></span>' +
-    '<a href="#/expenses" class="btn sm ghost">Expenses</a></h3><div class="card-b mix">' +
-    (d.spend.length ? d.spend.map((c) => '<div class="row"><span>' + esc(c.category) + '</span><b>' + compact(c.amount) +
-      ' · ' + c.n + '</b><div class="track"><i class="out" style="width:' + Math.round((c.amount / maxSpend) * 100) + '%"></i></div></div>').join('')
-      : '<p class="hint">No costs recorded this month — that makes the profit figure look too good.</p>') +
-    '</div></div>' +
-    cardTable('Recently booked', '<a href="#/jobs" class="btn sm ghost">All jobs</a>',
-      jobRows(d.recent), ['Job', 'Total', 'Balance', 'Status', 'Due']) +
-    '</div>' +
+    (clear.length ? '<div class="card clearline" role="status"><b>All clear</b>' +
+      clear.map((c) => '<span>' + esc(c) + '</span>').join('<span class="dot" aria-hidden="true">·</span>') +
+      '</div>' : '') +
+    rows.join('') +
     '<p class="hint editable-hint">Anything underlined you can click: move a due date, change a status, ' +
     'reprice an enquiry — it saves as soon as you press Enter.</p>';
   /* Choosing a month is a navigation, not a data change: the hash carries it, the router re-runs,

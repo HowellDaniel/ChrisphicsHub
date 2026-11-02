@@ -1,14 +1,14 @@
 'use strict';
 
-/* Bumped again for the weekly software answer: Settings ▸ Updates is now drawn from
-   facts.updates, which only an engine carrying the weekly check fills in, so a device still holding
-   v19 would render "undefined" rows over a build that knows nothing about the cadence. The shell
-   list itself is unchanged — /api/counter and /api/update-check are API routes, which the worker
-   already lets past to the shop, and neither is prefilled: an update answer belongs to the computer
-   that got it, not to a phone that read it once on the bus. v25 carries the Mac app windows that
-   own Settings, so a counter holding v24's page must not keep drawing the rail's row until the
-   background refresh happens to land. */
-const CACHE_NAME = 'crispprint-shell-v26';
+/* Bumped again for the same reason as before: the page changed after v27 was already out the door.
+   A counter that opened the shop during that window cached v27's Money card, which printed a month's
+   spend beside a month's profit as though one were the other subtracted from the remaining figure —
+   a tally that does not add, on the screen the cashier reads the takings off. v28 served that card
+   but still labelled profit "of ₵ billed", which invites the same wrong subtraction against the Spent
+   tile beside it; v29 names the job cost the figure actually comes out of. The worker is cache-first,
+   so no counter lets go of a shell by itself — the number is the only way a shipped machine learns
+   the page again. The shell list itself is unchanged; every route it fills is still served. */
+const CACHE_NAME = 'crispprint-shell-v29';
 const APP_SHELL = [
   '/',
   '/index.html',

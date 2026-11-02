@@ -1125,9 +1125,12 @@ else:
     # against the actual service, not the fixture: the page must send the ask a second time a minute
     # later instead of sitting on "No weather" for twenty. The poll has an 8s deadline; a page that
     # never asks again fails here rather than passing quietly.
+    # A service that answers 503 has not answered: the tile is still blank, which is the very state
+    # the retry chases. An earlier version of this wait stopped on any "answered" log line, so while
+    # open-meteo was refusing, the leg reported one ask and failed on a page that was behaving.
     said, reports = run_probe("probe=13:00:00&mode=clear&wx=live",
                               [SETTLED, "eval|window.__shift(61000)",
-                               "poll|window.__liveTries>1||window.__liveLog.indexOf('answered')===0",
+                               "poll|window.__liveTries>1||/^answered http 2\\d\\d$/.test(window.__liveLog)",
                                "poll|window.__liveLog!=='asked'", "say|" + WEATHER],
                                "the real service, asked twice")
     twice = reports[0] if reports else {}
