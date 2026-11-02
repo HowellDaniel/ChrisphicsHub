@@ -1835,23 +1835,19 @@ function loadWeather() {
       wxDown = true;
     });
 }
-function todayCard(k, when) {
+function todayCard(when) {
   const now = new Date();
   const evening = themeIsDark(now);
   const applied = document.documentElement.dataset.theme === 'dark';
   calStamp = stampOf(now);
-  const booked = Number((k || {}).jobs_today || 0);
-  const taken = Number((k || {}).collected_today || 0);
-  /* The clock on this card is the real clock and the glance line is the book's last day. When the
-     two are different days the card says so outright — a counter who opens the shop on Monday and
-     reads ₵2,843.00 under the word 'Friday' is not being shown Monday's takings, and the sentence
-     that admits which day the tally belongs to is what makes the figure usable. */
+  /* The clock, calendar, weather and shop hours on this card are the shop as it stands right now, and
+     they stay live. Its glance line is the one place the day card printed the book, and the owner had
+     those figures cleared off this screen on 2 November 2026. The line keeps to one the old figure
+     fitted on: a longer sentence pushes the card's own height about and the calendar and weather
+     tiles stop lying level with each other, which the daylight check measures by the pixel. */
   const live = !when || when.live;
-  const glance = booked || taken
-    ? plural(booked, 'job') + ' booked ' + (live ? 'today' : 'on ' + when.day) + ' · ' + money(taken) + ' taken'
-    : (live ? 'Nothing booked yet today — the first entry starts the day.'
-            : 'Nothing booked yet today — the book still reads ' + when.day + ', ' +
-              plural(booked, 'job') + ' and ' + money(taken) + '.');
+  const glance = 'Figures cleared — ' +
+    (live ? 'the shop has traded today' : 'the book last moved ' + when.day);
   return '<div class="card today' + (applied ? ' night' : '') + '" id="todayCard">' +
     '<div class="card-b today-face">' +
     '<div class="today-cal" id="todayCal" role="img" aria-label="' + esc(calAria(now)) + '">' +
@@ -2070,7 +2066,7 @@ async function viewDashboard(r) {
      group covers is picked on that group's own line, so the choice is never a row of its own. */
   $('#view').innerHTML =
     '<div class="grid split dash-top">' +
-    todayCard(d.kpi, { live: onToday, day: dayTag }) +
+    todayCard({ live: onToday, day: dayTag }) +
     hoursCard(d.hours) +
     '</div>' +
     '<div class="card bookband" role="status" aria-label="What the book holds">' +
@@ -2087,16 +2083,14 @@ async function viewDashboard(r) {
       (m.month === moneyMonth ? ' selected' : '') + '>' + esc(m.label) + '</option>').join('') +
     '</select></span></p>' +
     '<div class="grid kpis money">' +
-    stat('Collected ' + dayTag, money(k.collected_today),
-      (k.jobs_today ? plural(k.jobs_today, 'job') + ' booked' : 'nothing booked') +
-      (onToday ? ' so far' : ' that day'), 'amt good hero',
+    /* Both amounts cleared off this screen on the owner's word, 2 November 2026. Nothing in the book
+       moved: /api/dashboard still answers Friday's takings and the week's, and Accounts still shows
+       every payment. Only the Dashboard stops printing them, so the month, spent and profit cards
+       keep tallying as they did. */
+    stat('Collected ' + dayTag, money(0), 'cleared from this screen', 'amt',
       '#/accounts', 'Money in and out, counted from ' + (d.money_day_label || dayTag)) +
-    stat(weekTag, money(k.collected_week),
-      /* The window the engine actually counted, in its own words: the page never works out the seven
-         days, it reads them off the answer, so the note cannot drift from the figure above it. */
-      (onToday ? 'last 7 days'
-       : fdate(d.week_start) + ' – ' + fdate(moneyDay)) + ' · ' + plural(k.jobs_week, 'job'),
-      'amt', '#/accounts', 'Click to see the accounts book') +
+    stat(weekTag, money(0), 'cleared from this screen', 'amt', '#/accounts',
+      'Click to see the accounts book') +
     stat(onCurrentMonth ? 'Month to date' : d.money_month_label, money(k.collected_month), monthNote, 'amt', '#/reports', 'Click for this month in reports') +
     /* 'less money kept on accounts' would be the precise wording here, but this screen has nothing to
        prove it with: the dashboard's own rows look identical whichever server answered, and the shop's

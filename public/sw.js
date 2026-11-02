@@ -8,7 +8,7 @@
    off; a machine that keeps v29 keeps the old lie. The worker is cache-first, so no counter lets go
    of a shell by itself — the number is the only way a shipped machine learns the page again. The shell
    list itself is unchanged; every route it fills is still served. */
-const CACHE_NAME = 'crispprint-shell-v30';
+const CACHE_NAME = 'crispprint-shell-v31';
 const APP_SHELL = [
   '/',
   '/index.html',

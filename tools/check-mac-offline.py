@@ -498,10 +498,19 @@ try:
                       "poll|(document.body.innerText||'').indexOf('\\u20B5')>=0",
                       read(shows(DARK_TITLE), shows("Held on this device", "mark"))],
                      tag="the dashboard with the Mac off")
-    was = amount((dark.get("kpi") or {}).get("Collected today"))
-    now = amount((dark_dash.get("kpi") or {}).get("Collected today"))
-    check("today's takings moved by exactly the money this device took",
-          was is not None and now == round(was + DARKPAY, 2), "%s → %s" % (was, now))
+    # The owner blanked the Dashboard's day tile on 2 November 2026, so money taken in the dark can no
+    # longer be proved by watching 'Collected today' climb. It is proved by the month tile, which he
+    # did not clear and which carries the same deposit, and by the order line on the jobs screen just
+    # above. The blank tile is then proved on its own, so a build that quietly puts the day's figure
+    # back is caught here as well as by check-cleared-tiles.
+    was = amount((dark.get("kpi") or {}).get("Month to date"))
+    now = amount((dark_dash.get("kpi") or {}).get("Month to date"))
+    check("the month's takings moved by exactly the money this device took",
+          was is not None and now == round(was + DARKPAY, 2),
+          "%s → %s   [tiles: %s]" % (was, now, ",".join(sorted((dark_dash.get("kpi") or {})))))
+    check("while the day's own tile stays blank, cleared on the owner's word",
+          amount((dark_dash.get("kpi") or {}).get("Collected today")) == 0.0,
+          (dark_dash.get("kpi") or {}).get("Collected today"))
     check("this month's spending by exactly the figure typed at the dark counter",
           amount((dark_dash.get("kpi") or {}).get("Spent this month")) == DARK,
           (dark_dash.get("kpi") or {}).get("Spent this month"))
