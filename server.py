@@ -6661,13 +6661,7 @@ class Handler(BaseHTTPRequestHandler):
             # Cheap on purpose: every counter on the Wi-Fi asks this a few times a minute, and a
             # question about whether the book moved must not read the book. This process's writes
             # are counted as they are made; a second engine's commits appear in data_version.
-            try:
-                seen = one("PRAGMA data_version")
-                other = int(seen["data_version"]) if seen else 0
-            except (sqlite3.Error, TypeError, ValueError):
-                other = 0
-            return 200, {"rev": "%d.%d" % (_book_writes["count"], other),
-                         "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            return 200, {"rev": book_revision(), "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
         if method == "GET" and head == "counter":
             # What the Settings screen is told about the machine answering it. Read-only, because a
@@ -6874,6 +6868,39 @@ class Handler(BaseHTTPRequestHandler):
                 return 200, backup_report()
             return 405, {"error": "Use GET for the copies, PUT to settle how often they happen,"
                                   " POST to make one now"}
+        if head == "offsite":
+            # The depository: the private repository the shop's book is posted to, and read back by
+            # whichever machine has been out of the Wi-Fi. Reading the card is open like any other
+            # screen — it carries no token. Naming the repository, and asking for a trip to it right
+            # now, are done at the machine whose book they change, which is why both are gated on
+            # somebody sitting in front of it.
+            if method == "GET":
+                return 200, offsite_view()
+            if not self.is_shop_computer():
+                return 403, {"error": "The off-site copy is settled and asked for at the computer"
+                                      " whose book it is — where somebody can see it happen"}
+            if method == "PUT":
+                try:
+                    return 200, set_offsite_settings(self.body(), self.client_ip())
+                except (RuntimeError, ValueError) as error:
+                    return 400, {"error": str(error)}
+            if method == "POST":
+                body = self.body()
+                how = "take" if text(body.get("action"), 20) == "take" else "send"
+                try:
+                    ok, note = (offsite_take(self.client_ip()) if how == "take"
+                                else offsite_send(self.client_ip()))
+                except (RuntimeError, ValueError) as error:
+                    return 400, {"error": str(error)}
+                if ok:
+                    set_state("offsite_last_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+                    set_state("offsite_last_ok", "1")
+                    set_state("offsite_last_note", note[:200])
+                answer = offsite_view()
+                answer.update({"ok": ok, "note": note, "did": how})
+                return 200, answer
+            return 405, {"error": "Use GET for the depository card, PUT to settle it, POST to make"
+                                  " it happen now"}
         if head == "backup-restore":
             if method != "POST":
                 return 405, {"error": "POST the name of the copy to put it back"}
@@ -7385,8 +7412,12 @@ def mail_copy(source):
 # the private flag is read back from the provider before a single byte of the ledger is sent, and a
 # repository that is not private is refused.
 OFFSITE_API = (os.environ.get("CHRISPHICS_OFFSITE_API") or "https://api.github.com").rstrip("/")
-OFFSITE_REPO = (os.environ.get("CHRISPHICS_OFFSITE_REPO") or "").strip()
-OFFSITE_NAME = (os.environ.get("CHRISPHICS_OFFSITE_PATH") or "chrisphics-book.db").strip("/")
+# Which repository holds the shop's off-site copy can come two ways: from the environment, which is
+# how a hosted box and every check here are aimed, or from the mode-600 file beside the book, which is
+# how the shop's own Mac remembers what he typed there. The environment answers first, both ways.
+OFFSITE_REPO_ENV = (os.environ.get("CHRISPHICS_OFFSITE_REPO") or "").strip()
+OFFSITE_PATH_ENV = (os.environ.get("CHRISPHICS_OFFSITE_PATH") or "").strip("/")
+OFFSITE_DEFAULT_PATH = "chrisphics-book.db"
 OFFSITE_TOKEN_ENV = os.environ.get("CHRISPHICS_OFFSITE_TOKEN") or ""
 # The token is kept beside the book at mode 600, never inside it: the book is copied every night to
 # a mirror folder and posted as mail, and a token that rode along with the ledger would be a token
@@ -7402,17 +7433,33 @@ def short_path(path):
     return (path or "").replace(os.path.expanduser("~"), "~")
 
 
+def offsite_stored():
+    """What this machine was told about its off-site copy, as kept beside the book. A missing or
+    unreadable file reads as nothing set rather than as a fault: the shop keeps trading either way."""
+    try:
+        with open(OFFSITE_SECRETS_PATH, "r", encoding="utf-8") as handle:
+            stored = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return stored if isinstance(stored, dict) else {}
+
+
+def offsite_repo():
+    return OFFSITE_REPO_ENV or (offsite_stored().get("repo") or "").strip()
+
+
+def offsite_path():
+    return (OFFSITE_PATH_ENV or str(offsite_stored().get("path") or "").strip("/")
+            or OFFSITE_DEFAULT_PATH)
+
+
 def offsite_token():
     """The fine-grained personal access token — from the environment for a hosted box, or from the
     mode-600 file beside the book for this Mac. Whichever way it came, it is never written into the
     book and never handed back out to a screen."""
     if OFFSITE_TOKEN_ENV:
         return OFFSITE_TOKEN_ENV
-    try:
-        with open(OFFSITE_SECRETS_PATH, "r", encoding="utf-8") as handle:
-            stored = json.load(handle)
-    except (OSError, ValueError):
-        return ""
+    stored = offsite_stored()
     return (stored.get("token") or "") if isinstance(stored, dict) else ""
 
 
@@ -7431,18 +7478,21 @@ def offsite_settings():
     told what is missing rather than watched to fail. Only an empty repository name means the shop
     never asked for an off-site home; a name with no token is a leg that is broken, and is reported
     as one."""
-    if not OFFSITE_REPO_PATTERN.match(OFFSITE_REPO or ""):
-        return None, "no off-site repository is named (CHRISPHICS_OFFSITE_REPO reads owner/name)"
-    if not OFFSITE_NAME:
+    repo = offsite_repo()
+    if not OFFSITE_REPO_PATTERN.match(repo or ""):
+        return None, ("no off-site repository is named — say it on the Shop & devices screen, or set"
+                      " CHRISPHICS_OFFSITE_REPO as owner/name")
+    if not offsite_path():
         return None, "the off-site copy needs a file name inside the repository"
     if not offsite_is_httpsish():
         return None, ("the off-site address %s would carry the token in plain text; it must be"
                       " HTTPS, or loopback for a check" % OFFSITE_API)
     token = offsite_token()
     if not token:
-        return None, ("the repository is named but no token is saved — set CHRISPHICS_OFFSITE_TOKEN"
-                      " or write it to %s" % short_path(OFFSITE_SECRETS_PATH))
-    return {"api": OFFSITE_API, "repo": OFFSITE_REPO, "path": OFFSITE_NAME, "token": token}, ""
+        return None, ("the repository is named but no token is saved — write it on the Shop & devices"
+                      " screen, set CHRISPHICS_OFFSITE_TOKEN, or put it in %s"
+                      % short_path(OFFSITE_SECRETS_PATH))
+    return {"api": OFFSITE_API, "repo": repo, "path": offsite_path(), "token": token}, ""
 
 
 def _offsite_error_text(error):
@@ -7519,7 +7569,7 @@ def push_offsite(source):
     when the shop named no repository, (False, why) when it could not go, (True, where) when the
     provider took it. A refused leg reads on the copy card and stops there — the book still sits on
     this Mac's disk, and the shop keeps trading."""
-    if not OFFSITE_REPO:
+    if not offsite_repo():
         return None
     settings, why = offsite_settings()
     if not settings:
@@ -7551,6 +7601,12 @@ def push_offsite(source):
         return False, str(error)
     if not isinstance(taken, dict):
         return False, "the repository gave no receipt for the copy"
+    # The sha on the receipt is the fingerprint of the copy this machine just wrote. Keeping it is what
+    # lets the clock know, on the next look, that the file in the repository is its own — and so that
+    # a book which has not moved costs the repository neither a download nor a commit.
+    held = (taken.get("content") or {}).get("sha") if isinstance(taken.get("content"), dict) else ""
+    if held:
+        set_state("offsite_sha", held)
     return True, "%s · %s" % (full_name, settings["path"])
 
 
@@ -7569,7 +7625,7 @@ def restore_offsite():
     disk would otherwise open to a dashboard showing a shop with no jobs and no debt. Returns None
     when nothing was asked for, (True, note) when records came back, (False, why) when they
     did not. A refusal here never stops the shop starting."""
-    if not OFFSITE_REPO:
+    if not offsite_repo():
         return None
     settings, why = offsite_settings()
     if not settings:
@@ -7629,6 +7685,419 @@ def restore_offsite():
     set_state("offsite_restore_note", note)
     note_security("offsite_restore", detail=note[:200])
     return True, note
+
+
+# --------------------------------------------------------------- the depository, kept in step by itself
+#
+# One book holds the shop's records, and the computer that writes that book is the one that posts it.
+# Every few minutes — and only when the records have moved — a whole copy of it goes to the private
+# repository. A machine that walked out of the Wi-Fi, a laptop taken to a client or a counter working
+# on mobile data, reads that copy back and merges what it finds row by row, so everything the shop
+# recorded while it was gone arrives without either computer asking for the other's address. This is
+# not a new way to write records: the merge is the one that has always joined one Mac's book to
+# another's, it only ever adds, and a copy already taken is recognised and changes nothing.
+OFFSITE_MINUTES_DEFAULT = 30
+OFFSITE_MINUTES_MIN = 5
+OFFSITE_MINUTES_MAX = 1440
+OFFSITE_LABEL = "the shop's off-site copy"
+_offsite_wakeup = threading.Event()
+
+
+def book_revision():
+    """A number that moves whenever this book is written: this process's own writes, and the file's
+    data version for anything committed elsewhere. The counters watch it to know when to repaint, and
+    the depository clock compares it to know when there is anything new to post."""
+    try:
+        seen = one("PRAGMA data_version")
+        other = int(seen["data_version"]) if seen else 0
+    except (sqlite3.Error, TypeError, ValueError):
+        other = 0
+    return "%d.%d" % (_book_writes["count"], other)
+
+
+def offsite_auto():
+    return state_value("offsite_auto", "1") == "1"
+
+
+def offsite_minutes():
+    """How often the depository is kept in step, in minutes. A check may name a fraction of one in the
+    environment — the same way it names a shorter look at the copies — so that the clock it is proving
+    is the real one, only quicker."""
+    named = (os.environ.get("CHRISPHICS_OFFSITE_MINUTES") or "").strip()
+    if named:
+        try:
+            return max(0.0, float(named))
+        except ValueError:
+            pass
+    try:
+        minutes = int(state_value("offsite_every_minutes") or OFFSITE_MINUTES_DEFAULT)
+    except (TypeError, ValueError):
+        minutes = OFFSITE_MINUTES_DEFAULT
+    return min(max(minutes, OFFSITE_MINUTES_MIN), OFFSITE_MINUTES_MAX)
+
+
+def offsite_role():
+    """What this computer is to the shop's records. `shop` — its book is the one the shop writes, so
+    what it posts is the shop's account book, and the Wi-Fi reaching it on the shop's own door is what
+    proves that. Anything else — a laptop holding a copy of the book, a counter whose engine was
+    started because the shop could not be found — is `own`: a machine working on its own file, whose
+    need is to read back whatever the shop has since recorded. A phone whose browser is looking
+    straight at the shop's book is neither: it asks the shop's own engine, which answers as `shop`.
+    A check names which machine it stands for with CHRISPHICS_OFFSITE_ROLE, because two throwaway
+    engines on one Mac's loopback cannot be told apart any other way."""
+    told = (os.environ.get("CHRISPHICS_OFFSITE_ROLE") or "").strip().lower()
+    if told in ("shop", "own"):
+        return told
+    looped = SERVE["host"] in ("127.0.0.1", "localhost", "::1")
+    return "own" if (looped or SERVE["port"] != SHOP_DOOR) else "shop"
+
+
+def offsite_since(key):
+    """Seconds since the named moment, or None when it never happened — which is always 'now'."""
+    at = state_value(key)
+    if not at:
+        return None
+    try:
+        return (dt.datetime.now() - dt.datetime.strptime(at, "%Y-%m-%d %H:%M:%S")).total_seconds()
+    except ValueError:
+        return None
+
+
+def offsite_held(settings):
+    """(the sha of the copy the repository holds, its size). One metadata call rather than the book:
+    the clock asks this often, and knowing whether the copy moved does not need what is in it."""
+    url = "%s/repos/%s/contents/%s" % (settings["api"], settings["repo"],
+                                       quote(settings["path"], safe="/"))
+    info = _offsite_json(settings, "GET", url)
+    if not isinstance(info, dict):
+        return "", 0
+    return (info.get("sha") or ""), int(info.get("size") or 0)
+
+
+def blob_sha(data):
+    """The name a repository gives a file's bytes — the same figure it answers in its metadata, so a
+    copy just read can be recognised without asking again what is in there."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def offsite_take(address=""):
+    """Fetch the copy kept off-site and bring everything it holds into this machine's book. The merge
+    adds and updates; it never replaces a book, and it refuses a file that is not this shop's book.
+    Returns (True, note) or (False, why) — a refusal here is one line on a card, not a fault in the
+    shop's server."""
+    settings, why = offsite_settings()
+    if not settings:
+        return False, why
+    try:
+        private, full_name = offsite_is_private(settings)
+    except RuntimeError as error:
+        return False, str(error)
+    if not private:
+        return False, "%s is not a private repository, so nothing is taken from it" % full_name
+    url = "%s/repos/%s/contents/%s" % (settings["api"], settings["repo"],
+                                       quote(settings["path"], safe="/"))
+    try:
+        raw = _offsite_call(settings, "GET", url, accept="application/vnd.github.raw")
+    except RuntimeError as error:
+        return False, str(error)
+    if raw is None:
+        return False, "no copy of the book is in %s yet" % full_name
+    if len(raw) < 8 or raw[:16] != b"SQLite format 3\x00":
+        return False, "what the repository holds is not a SQLite book"
+    handle, staging = tempfile.mkstemp(prefix="chrisphics-offsite-take-", suffix=".db")
+    try:
+        with os.fdopen(handle, "wb") as fh:
+            fh.write(raw)
+        try:
+            answer = bring_over_book(staging, OFFSITE_LABEL, address)
+        except (RuntimeError, ValueError, sqlite3.Error) as error:
+            return False, "%s: %s" % (type(error).__name__, str(error)[:180])
+    finally:
+        for extra in ("", "-wal", "-shm"):
+            try:
+                os.remove(staging + extra)
+            except OSError:
+                pass
+    records = answer.get("records") or {}
+    if answer.get("already_brought_in"):
+        note = "nothing new — that copy was already taken up"
+    else:
+        added = sum((records.get("added") or {}).values())
+        moved = sum((records.get("updated") or {}).values())
+        note = "%d record%s in, %d brought up to date" % (added, "" if added == 1 else "s", moved)
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    set_state("offsite_take_at", now)
+    set_state("offsite_take_note", note)
+    # This is now the copy this machine's book answers to. Until the repository holds a file with a
+    # different name, the next look has nothing to bring.
+    set_state("offsite_sha", blob_sha(raw))
+    return True, note
+
+
+def offsite_snapshot():
+    """The book as it stands this minute, in one temporary file: what a post sends. Deliberately not a
+    copy in the shop's copies folder — the depository is asked for far more often than the night is,
+    and a folder holding a file every half hour would bury the copies a person might put back."""
+    handle, path = tempfile.mkstemp(prefix="chrisphics-offsite-send-", suffix=".db")
+    os.close(handle)
+    with _lock:
+        dest = sqlite3.connect(path)
+        with dest:
+            _db.backup(dest)
+        dest.execute("PRAGMA journal_mode=DELETE")
+        dest.close()
+    return path
+
+
+# Columns the engine writes about its own running, not about the shop's business: this machine's mail
+# retry queue and the clock stamp that moves with every attempt. Reading them into the figure made a
+# shop that had taken no money all afternoon look like a book that had changed, and the queue's own
+# paperwork cost the repository a commit. Everything else in those tables is a record and counts.
+OFFSITE_LOCAL_COLUMNS = {
+    "notifications": ("delivery_state", "delivery_attempts", "delivery_next_at",
+                      "delivery_error", "updated_at"),
+}
+
+
+def offsite_fingerprint(path):
+    """The one figure that answers whether the book out in the depository is this book: the records a
+    bring-over carries from one book to another, read plainly. A post is compared against it, so a shop
+    that has not traded since its last post costs the repository neither a download nor a commit, and
+    two machines whose records match give the same figure even though their files differ in byte after
+    byte. Nothing else belongs in the figure, deliberately: the engine stamps its own clocks into the
+    book all day — this leg's times, the alert reader's last look — and a gate that read those would
+    find a new book every turn and post a commit for its own paperwork. What is not a record still gets
+    out, because the night's copy is posted whatever this figure says."""
+    try:
+        reader = sqlite3.connect(path)
+    except sqlite3.Error:
+        return ""
+    try:
+        digest = hashlib.sha256()
+        for table in sorted(BROUGHT_TABLES):
+            skip = OFFSITE_LOCAL_COLUMNS.get(table, ())
+            try:
+                names = [r[1] for r in reader.execute('PRAGMA table_info("%s")' % table)]
+                keep = [n for n in names if n not in skip]
+                rows = reader.execute('SELECT %s FROM "%s" ORDER BY rowid'
+                                      % (", ".join('"%s"' % n for n in keep), table)).fetchall()
+            except sqlite3.Error:
+                rows = []
+            for row in rows:
+                digest.update(("%s|%r\n" % (table, row)).encode("utf-8", "replace"))
+        return digest.hexdigest()
+    finally:
+        reader.close()
+
+
+def offsite_send(address=""):
+    """Post this machine's book to the depository. Taking what is there first, unless the copy in the
+    repository is the one this machine put there: a machine that sent without looking would write its
+    own records over a file holding another machine's, and the shop's book is not the only one with
+    something worth keeping. Returns (True, note) or (False, why)."""
+    settings, why = offsite_settings()
+    if not settings:
+        return False, why
+    held_sha, _size = offsite_held(settings)
+    if held_sha and held_sha != state_value("offsite_sha"):
+        took, took_note = offsite_take(address)
+        if not took:
+            return False, "%s — so nothing was posted over it" % took_note
+    path = offsite_snapshot()
+    try:
+        fingerprint = offsite_fingerprint(path)
+        if fingerprint and fingerprint == state_value("offsite_sent_digest"):
+            # The records out there are these records. A shop that restarted, or a screen that pressed
+            # the button twice, does not get a second commit for the same ledger.
+            return True, "the book out there is this one already"
+        with open(path, "rb") as fh:
+            blob = fh.read()
+        posted = push_offsite(path)
+    finally:
+        for extra in ("", "-wal", "-shm"):
+            try:
+                os.remove(path + extra)
+            except OSError:
+                pass
+    if posted is None:
+        return False, "no off-site repository is named"
+    if not posted[0]:
+        return False, posted[1]
+    # The repository holds exactly these bytes now, so the next look knows the copy out there is this
+    # machine's own and asks nothing further of it until the book moves.
+    set_state("offsite_sha", blob_sha(blob))
+    now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    set_state("offsite_send_at", now)
+    set_state("offsite_send_note", "posted · %s" % posted[1])
+    set_state("offsite_sent_digest", fingerprint)
+    return True, "posted the book to %s" % posted[1]
+
+
+def offsite_beat():
+    """One turn of the clock. A shop whose records have not moved since its last post costs the
+    repository neither a download nor a commit, and a machine working on its own book asks only what
+    it has missed — which, when the copy out there is the one it last took up, is a look at a number
+    rather than a fetch of a book. Doing nothing is the normal answer and leaves no trace. The switch
+    on the card is answered here first, before the repository is looked at at all: a machine whose
+    counter said 'only when somebody asks' has no business asking on its own, over a network that may
+    not be the shop's own and may be paid for by the minute."""
+    if not offsite_auto():
+        return ""
+    settings, _why = offsite_settings()
+    if not settings:
+        return ""
+    since = offsite_since("offsite_last_at")
+    if since is not None and since < offsite_minutes() * 60:
+        return ""
+    if offsite_role() == "shop":
+        ok, note = offsite_send()
+    else:
+        held_sha, _size = offsite_held(settings)
+        if held_sha and held_sha == state_value("offsite_sha"):
+            set_state("offsite_last_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            return ""
+        ok, note = offsite_take()
+    set_state("offsite_last_at", dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    set_state("offsite_last_ok", "1" if ok else "0")
+    set_state("offsite_last_note", note[:200])
+    if not ok:
+        note_security("offsite_beat_failed", detail=note[:200])
+    return note
+
+
+def watch_offsite(check=None):
+    """The depository keeps itself in step while the server runs, on the same shape of clock as the
+    copies: look every two minutes, and act when the settled number of minutes has passed. A leg that
+    cannot run is written as a word on the card and tried again on the next look — the shop keeps
+    trading whatever the repository says."""
+    if check is None:
+        try:
+            check = max(5, int(os.environ.get("CHRISPHICS_OFFSITE_CHECK", "120")))
+        except ValueError:
+            check = 120
+
+    def loop():
+        while True:
+            try:
+                offsite_beat()
+            except Exception as error:  # noqa: BLE001 - a depository that cannot run is news, not a fault
+                sys.stderr.write("The off-site copy could not be kept in step: %s: %s\n"
+                                 % (type(error).__name__, error))
+                set_state("offsite_error", "%s: %s" % (type(error).__name__, str(error)[:180]))
+            _offsite_wakeup.wait(check)
+            _offsite_wakeup.clear()
+    threading.Thread(target=loop, daemon=True, name="book-depository").start()
+
+
+def offsite_view():
+    """What a screen may be told about the depository. The token is in none of it — a card that
+    repeated a repository token back would put it in every screen's memory and every log."""
+    settings, why = offsite_settings()
+    return {"repo": offsite_repo(), "file": offsite_path(), "api": OFFSITE_API,
+            "set": bool(offsite_repo()), "token_saved": bool(offsite_token()),
+            "ready": bool(settings), "why": why, "role": offsite_role(),
+            "auto": offsite_auto(), "every_minutes": offsite_minutes(),
+            "take_at": state_value("offsite_take_at"), "take_note": state_value("offsite_take_note"),
+            "send_at": state_value("offsite_send_at"), "send_note": state_value("offsite_send_note"),
+            "last_at": state_value("offsite_last_at"), "last_note": state_value("offsite_last_note"),
+            "last_ok": state_value("offsite_last_ok") == "1",
+            "error": state_value("offsite_error"),
+            "restore_at": state_value("offsite_restore_at"),
+            "restore_note": state_value("offsite_restore_note"),
+            "nightly_at": state_value("last_offsite_at"),
+            "nightly_note": state_value("last_backup_offsite")}
+
+
+def set_offsite_settings(patch, where=""):
+    """Name the repository the shop keeps its copies in, and the token that may write there. Both go
+    into the mode-600 file beside the book and into nothing else: the book is copied every night,
+    mirrored to another folder and posted as mail, and a token that rode along with the ledger would
+    be a token handed to whoever held that copy. A blank token means keep the one already saved — the
+    screen has no way to read it back, so it must never be asked to retype it."""
+    if not isinstance(patch, dict):
+        raise ValueError("Nothing to change was sent")
+    writes = [k for k in ("repo", "file", "token") if k in patch]
+    if writes and (OFFSITE_REPO_ENV or OFFSITE_PATH_ENV or OFFSITE_TOKEN_ENV):
+        # A hosted box and every check here are aimed by the environment, and that answers first. A
+        # person typing a repository into such a machine would see nothing change, so it is said plain.
+        raise ValueError("This machine takes its off-site copy from its service settings"
+                         " (CHRISPHICS_OFFSITE_REPO), not from this screen")
+    repo = None
+    if "repo" in patch:
+        repo = text(patch.get("repo"), 120).strip().strip("/")
+        if repo and not OFFSITE_REPO_PATTERN.match(repo):
+            raise ValueError("A repository reads as owner/name, like chriphicshub/shop-book")
+    name = None
+    if "file" in patch:
+        name = text(patch.get("file"), 160).strip().strip("/")
+        if name and ("/" in name or ".." in name):
+            raise ValueError("The copy is one file, so its name cannot reach outside the repository")
+    minutes = None
+    if patch.get("every_minutes") not in (None, ""):
+        try:
+            minutes = int(patch["every_minutes"])
+        except (TypeError, ValueError):
+            raise ValueError("How often has to be a whole number of minutes")
+        if not OFFSITE_MINUTES_MIN <= minutes <= OFFSITE_MINUTES_MAX:
+            raise ValueError("The depository can be kept in step every %d to %d minutes"
+                             % (OFFSITE_MINUTES_MIN, OFFSITE_MINUTES_MAX))
+    stored = dict(offsite_stored())
+    was = (offsite_repo(), offsite_path())
+    changed = []
+    if repo is not None:
+        if repo:
+            if stored.get("repo") != repo:
+                changed.append("the repository")
+            stored["repo"] = repo
+        elif stored.pop("repo", ""):
+            changed.append("the repository")
+            stored.pop("path", None)
+            stored.pop("token", None)
+    if name is not None:
+        if name and name != OFFSITE_DEFAULT_PATH:
+            stored["path"] = name
+        else:
+            stored.pop("path", None)
+    if "token" in patch:
+        token = text(patch.get("token"), 200).strip()
+        if token:
+            if token != stored.get("token"):
+                changed.append("the token")
+            stored["token"] = token
+        elif patch.get("forget_token") and stored.pop("token", None):
+            changed.append("the token")
+    if "auto" in patch:
+        set_state("offsite_auto", "1" if patch["auto"] else "0")
+        changed.append("the switch")
+    if minutes is not None:
+        set_state("offsite_every_minutes", minutes)
+        changed.append("how often")
+    handle, temp = tempfile.mkstemp(prefix="offsite-secrets-", dir=SUPPORT)
+    os.close(handle)
+    try:
+        with open(temp, "w", encoding="utf-8") as fh:
+            json.dump(stored, fh, ensure_ascii=False)
+        os.chmod(temp, 0o600)
+        os.replace(temp, OFFSITE_SECRETS_PATH)
+    except OSError as error:
+        try:
+            os.remove(temp)
+        except OSError:
+            pass
+        raise RuntimeError("the off-site copy could not be settled on this Mac (%s)"
+                           % type(error).__name__) from None
+    if (offsite_repo(), offsite_path()) != was:
+        # A different door is a different room. The copy recognised as this machine's own, and the
+        # figure a post is compared against, both belong to the repository that was named before — so
+        # they are cleared, and the next trip takes what is there before it sends anything over it.
+        set_state("offsite_sha", "")
+        set_state("offsite_sent_digest", "")
+    # The word that was typed is never in what gets logged — not the token, and not a piece of it.
+    note_security("offsite_set", address=where,
+                  detail="%s settled for %s" % (", ".join(changed) or "nothing",
+                                                offsite_repo() or "no repository"))
+    _offsite_wakeup.set()
+    return offsite_view()
 
 
 def run_backup(kind="backup"):
@@ -7913,7 +8382,7 @@ def backup_report():
             "mail": mail, "mail_set": bool(mail),
             "mail_ready": bool(mail) and not mail_problem, "mail_problem": mail_problem,
             "mail_note": state_value("last_backup_mail"),
-            "offsite": OFFSITE_REPO, "offsite_set": bool(OFFSITE_REPO),
+            "offsite": offsite_repo(), "offsite_set": bool(offsite_repo()),
             "offsite_api": OFFSITE_API,
             "offsite_note": state_value("last_backup_offsite"),
             "offsite_at": state_value("last_offsite_at"),
@@ -8478,7 +8947,17 @@ def serve(port, open_browser, seed_first, host="127.0.0.1", tls_cert=None, tls_k
     watch_messages()
     watch_notifications()
     watch_backups()
+    watch_offsite()
     watch_updates()
+    card = offsite_view()
+    if card["set"]:
+        # Which end of the depository this computer is, said once while it comes up. A shop settled to
+        # post its book, then reopened onto a machine that only reads it back, is exactly the thing a
+        # person needs to see in the log before wondering why no new copy appeared.
+        print("Depository: %s · %s · this computer %s%s"
+              % (card["repo"], card["file"],
+                 "posts the book there" if card["role"] == "shop" else "takes the book back from it",
+                 "" if card["ready"] else " — not working yet: %s" % card["why"]))
     httpd = ShopHTTPServer((host, port), Handler)
     context = None
     if tls_cert:

@@ -2464,6 +2464,8 @@ async function viewShop() {
   try { guard = await api('/api/security'); } catch (e) { /* a device that is not signed in */ }
   let mail = null;
   try { mail = await api('/api/email-accounts'); } catch (e) { /* a device not asked to show them */ }
+  let depo = null;
+  try { depo = await api('/api/offsite'); } catch (e) { /* a book that has no depository to answer */ }
   const login = shop.login, copy = shop.backup;
   const address = shop.address;
   const bare = (a) => a.replace(/^https?:\/\//, '').replace(/\/$/, '');
@@ -2567,6 +2569,7 @@ async function viewShop() {
     '</div></div>' +
     firstMachineCard(shop, shopMac) +
     copiesCard(copy, shopMac) +
+    depositoryCard(depo, shopMac) +
     emailAccountsCard(mail, shopMac) +
     securityCard(guard, shopMac);
   wireShopForms();
@@ -2796,6 +2799,97 @@ function copiesCard(copy, shopMac) {
       ' computer, and only from inside the look — because it replaces every record at once, and the' +
       ' book it replaces is copied first so it can always be undone.</p>' : '') +
     '<div id="copyLook"></div>' +
+    '</div></div>';
+}
+
+/* The depository is the shop's second network. The first is its Wi-Fi, and only machines standing
+   inside it can reach the book; the second is a private repository that any machine with any
+   connection at all can reach, mobile data included. So a counter who has lost the shop keeps
+   working on the book in front of them, posts that whole book to the repository, and the shop
+   machine reads it back the moment it has a connection again — and the same leg runs the other way.
+   Reading the card is open to every screen, like any other: it carries no token, and the token is
+   never sent out again once it is kept, so the only thing a card can say about it is whether this
+   machine has one. */
+function depositoryCard(depo, shopMac) {
+  if (!depo) return '';
+  const every = Number(depo.every_minutes || 30);
+  const cadence = every === 60 ? 'hour'
+    : every >= 1440 ? (every > 1440 && every % 1440 === 0
+        ? plural(Math.round(every / 1440), 'day') : 'day')
+    : plural(every, 'minute');
+  return '<div class="card"><h3>The book kept off the Wi-Fi<span class="spacer"></span>' +
+    (shopMac
+      ? '<button class="btn sm ghost" data-action="offsite-send">Post it now</button>' +
+        '<button class="btn sm ghost" data-action="offsite-take">Read it back</button>'
+      : '') + '</h3><div class="card-b">' +
+    (depo.set
+      ? '<p class="hint">Repository <b>' + esc(depo.repo) + '</b>, book kept as <b>' +
+        esc(depo.file) + '</b>. A private repository, so the only machines that can open it are the' +
+        ' ones holding a letter that lets them write there.</p>'
+      : '<p class="hint">Nothing is named yet, so this book has no keeping outside this machine.' +
+        ' A counter who loses the shop’s Wi-Fi holds their entries on their own disk until a day' +
+        ' they stand beside the shop again.</p>') +
+    (depo.set && depo.token_saved
+      ? '<p class="hint">This machine holds the letter that writes there. It is never shown on a'
+        + ' screen and never written into the book — the book is copied to folders and posted as' +
+        ' mail, and a letter riding along with it would ride too.</p>'
+      : '') +
+    (depo.ready ? '' : '<p class="err">' + esc(depo.why) + '</p>') +
+    (depo.error ? '<p class="err">The last trip went wrong: ' + esc(depo.error) + '</p>' : '') +
+    (depo.auto
+      ? '<p class="hint">By itself, every ' + cadence + ' — and only when the records actually'
+        + ' moved. A shop that has taken no money since its last post sends nothing.</p>'
+      : '<p class="hint">It is kept in step only when somebody asks for it from this card.</p>') +
+    (depo.send_at
+      ? '<p class="hint">Last post: <b>' + esc(depo.send_at) + '</b>' +
+        (depo.send_note ? ' — ' + esc(depo.send_note) : '') + '.</p>' : '') +
+    (depo.take_at
+      ? '<p class="hint">Last read back: <b>' + esc(depo.take_at) + '</b>' +
+        (depo.take_note ? ' — ' + esc(depo.take_note) : '') + '.</p>' : '') +
+    (depo.nightly_at
+      ? '<p class="hint">The night’s copy went to it too: <b>' + esc(depo.nightly_at) + '</b>' +
+        (depo.nightly_note ? ' — ' + esc(depo.nightly_note) : '') + '.</p>' : '') +
+    (depo.restore_at
+      ? '<p class="hint">Records brought back onto this machine when it last started: <b>' +
+        esc(depo.restore_at) + '</b>' + (depo.restore_note ? ' — ' + esc(depo.restore_note) : '') +
+        '.</p>' : '') +
+    '<p class="hint">' + (depo.role === 'shop'
+        ? 'This machine holds the shop’s own book, so what it posts is the account book and what it'
+          + ' reads back is what a counter wrote while it could not be reached.'
+        : 'This machine works on its own copy of the book, so it posts its own records and reads'
+          + ' back whatever the shop has since written. Reading the shop’s Wi-Fi book straight,'
+          + ' without going near the depository, is still the quickest way to work — this is the leg'
+          + ' for the days that Wi-Fi is not there.') + '</p>' +
+    '<p class="hint">A read-back adds and brings up to date; it never replaces this book with' +
+    ' another. A payment already in the book is not entered twice, and a job one machine has changed' +
+    ' is taken only from whichever machine changed it more recently — so the shop is never walked' +
+    ' backwards by an older copy of its own work.</p>' +
+    (shopMac
+      ? '<form id="depositoryForm" class="stack">' +
+        '<label class="field wide"><span>The private repository, as owner/name</span>' +
+        '<input name="repo" type="text" maxlength="120" autocomplete="off" spellcheck="false"' +
+        ' placeholder="your-name/shop-book" value="' + esc(depo.repo || '') + '"></label>' +
+        '<label class="field wide"><span>The letter that may write there' +
+        (depo.token_saved ? ' (blank keeps the one already here)' : '') + '</span>' +
+        '<input name="token" type="password" maxlength="200" autocomplete="new-password"' +
+        ' spellcheck="false" placeholder="' + (depo.token_saved
+          ? 'kept on this machine — type only to replace it'
+          : 'a fine-grained token scoped to that repository alone') + '"></label>' +
+        '<label class="consent wide"><input type="checkbox" name="auto"' +
+        (depo.auto ? ' checked' : '') + '><span>Keep it in step while this machine is running</span></label>' +
+        '<label class="field"><span>Every (minutes)</span><input name="every_minutes" type="number"' +
+        ' min="5" max="1440" step="5" value="' + every + '"></label>' +
+        '<p class="hint">Make that repository private before naming it here — the file is a whole' +
+        ' account book, so every client, phone number and payment in the shop would sit in it open' +
+        ' to anyone who found the address. The engine refuses to post to a repository it cannot' +
+        ' prove private, and refuses to read a book back from one too.</p>' +
+        '<p class="hint">A token is scoped to the one repository it was minted for, and it lives in' +
+        ' a file beside the book that only this Mac’s own account can read. Nothing in the app' +
+        ' creates the repository or the token — that is done in the account, by hand.</p>' +
+        '<div class="err" id="depositoryErr"></div>' +
+        '<button class="btn primary">Save the depository</button></form>'
+      : '<p class="hint">Which repository the book is kept in, and the letter that writes there, are' +
+        ' settled on the machine whose book it is — where somebody can see it happen.</p>') +
     '</div></div>';
 }
 
@@ -3072,8 +3166,29 @@ function wireShopForms() {
       } catch (err) { document.getElementById('copiesErr').textContent = err.message; }
     });
   }
-  const named = document.getElementById('nameComputerForm');  if (named) {
-    named.addEventListener('submit', async (e) => {
+  const depository = document.getElementById('depositoryForm');
+  if (depository) {
+    depository.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      document.getElementById('depositoryErr').textContent = '';
+      try {
+        const sent = {repo: f.repo.value.trim(), token: f.token.value.trim(),
+                      auto: !!f.auto.checked, every_minutes: f.every_minutes.value};
+        // A token typed into this form is sent once and then wiped from the field, because the
+        // screen cannot read it back and must never look as though it holds what it just handed over.
+        await api('/api/offsite', {method: 'PUT', body: JSON.stringify(sent)});
+        f.token.value = '';
+        toast(sent.repo
+                ? 'The book will be kept in ' + sent.repo + ' from now on'
+                : 'No repository is named, so the book stays on this machine alone',
+              sent.repo ? 'good' : 'warn');
+        await render();
+      } catch (err) { document.getElementById('depositoryErr').textContent = err.message; }
+    });
+  }
+  const named = document.getElementById('nameComputerForm');
+  if (named) {    named.addEventListener('submit', async (e) => {
       e.preventDefault();
       const f = e.target;
       document.getElementById('nameComputerErr').textContent = '';
@@ -4776,6 +4891,25 @@ async function moveStage(id, status) {
   toast(owed > 0 ? 'Marked as ' + status + ' — client message ready to send'
                  : 'Marked as ' + status, 'good');
 }
+/* One trip to the depository, asked for by hand. The engine answers with the whole card plus whether
+   the leg ran and what it did, so a refusal shows as one line of news rather than a fault: a
+   repository that cannot be reached, or holds no book yet, is a fact about the network that day —
+   not a bug in the shop's server. */
+async function offsiteTrip(how, el) {
+  if (el) el.disabled = true;
+  toast(how === 'take' ? 'Reading the book back out of the depository…'
+                       : 'Posting this machine’s book to the depository…', 'good');
+  try {
+    const answer = await api('/api/offsite', { method: 'POST',
+      body: JSON.stringify({ action: how }) });
+    await render();
+    toast((how === 'take' ? 'Read back: ' : 'Posted: ') + (answer.note || 'nothing changed'),
+          answer.ok ? 'good' : 'bad');
+  } catch (err) {
+    if (el) el.disabled = false;
+    fail(err);
+  }
+}
 const ACTIONS = {
   /* The page's own menu bar: one button opens one menu, one row does one thing. Everything a row
      can ask for is already a name the Mac's menu bar asks for too, so the two can never drift. */
@@ -4808,6 +4942,17 @@ const ACTIONS = {
       toast('The book was copied and counted against itself', 'good');
       await render();
     } catch (err) { fail(err); }
+  },
+  /* The two legs of the depository, asked for by hand. A post takes this machine's book as it stands
+     and writes it to the private repository; a read brings that file into this machine's book without
+     replacing anything it already holds. Both go through the engine serving this screen, so what they
+     change is the book this machine is standing on — and the button is greyed while the trip runs,
+     because a second press would be a second trip through the same network. */
+  async 'offsite-send'(el) {
+    await offsiteTrip('send', el);
+  },
+  async 'offsite-take'(el) {
+    await offsiteTrip('take', el);
   },
   /* A copy is a whole book in one file, and the only honest way to decide about it is to read it out.
      This GET writes nothing, so it is offered from any machine — and what it says back is what decides

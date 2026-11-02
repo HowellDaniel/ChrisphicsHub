@@ -48,11 +48,45 @@ SUPPORT = os.path.join(work, "support")
 BACKUPS = os.path.join(work, "Backups")
 os.makedirs(SUPPORT)
 os.makedirs(BACKUPS)
+# Two more machines, for the leg that needs more than one: the shop's own computer, and a laptop that
+# walked out of the Wi-Fi. Each has its own book, its own support folder and its own copies folder, so
+# nothing one of them writes can be what the other one is answering from.
+SHOP_BOOK = os.path.join(work, "shop-machine.db")
+SHOP_SUPPORT = os.path.join(work, "shop-support")
+SHOP_BACKUPS = os.path.join(work, "shop-Backups")
+LAPTOP_BOOK = os.path.join(work, "laptop-machine.db")
+LAPTOP_SUPPORT = os.path.join(work, "laptop-support")
+LAPTOP_BACKUPS = os.path.join(work, "laptop-Backups")
+SHOP_PORT, LAPTOP_PORT = 8897, 8898
+for folder in (SHOP_SUPPORT, SHOP_BACKUPS, LAPTOP_SUPPORT, LAPTOP_BACKUPS):
+    os.makedirs(folder)
+# A fifth machine, for the way the shop's own Mac settles this: nothing in the environment, the
+# repository and the token typed at the screen and kept in the mode-600 file beside its book.
+SCREEN_BOOK = os.path.join(work, "screen-machine.db")
+SCREEN_SUPPORT = os.path.join(work, "screen-support")
+SCREEN_BACKUPS = os.path.join(work, "screen-Backups")
+SCREEN_PORT = 8899
+os.makedirs(SCREEN_SUPPORT)
+os.makedirs(SCREEN_BACKUPS)
+# A sixth shape of the same machine: the book reached the way a phone on the shop's Wi-Fi reaches it,
+# through a proxy that names the visitor. The card is still readable — it carries nothing worth
+# stealing — but the repository and the trips are not, because nobody is standing at that Mac.
+PHONE_PORT = 8900
+SWITCH_PORT = 8901
+VISITOR = {"X-Forwarded-For": "192.168.100.88"}
+APPJS = os.path.join(REPO, "public", "app.js")
 
 REPOS = {PRIVATE: {"private": True, "files": {}}, PUBLIC: {"private": False, "files": {}}}
 AUDIT = []          # every call the stand-in took, so a refusal can be proven by what is absent
 CONTENTS = re.compile(r"^/repos/([^/]+/[^/]+)/contents/(.+)$")
 NAMED = re.compile(r"^/repos/([^/]+/[^/]+)$")
+
+
+def gitsha(blob):
+    """The name a git repository gives a file's bytes — what its metadata answers as `sha`, and what
+    an update has to carry. A stand-in that made this number up would let the shop's half pass here
+    and fail against the real thing."""
+    return hashlib.sha1(b"blob %d\0" % len(blob) + blob).hexdigest()
 
 
 def heard(method, path, auth="none", message=""):
@@ -97,7 +131,7 @@ class Door(BaseHTTPRequestHandler):
             if "raw" in (self.headers.get("Accept") or ""):
                 return self._reply(200, blob, raw=True)
             return self._reply(200, {"name": name, "path": name, "size": len(blob),
-                                     "sha": hashlib.sha1(blob).hexdigest(), "encoding": "base64",
+                                     "sha": gitsha(blob), "encoding": "base64",
                                      "content": base64.b64encode(blob).decode("ascii")})
         self._reply(404, {"message": "Not Found"})
 
@@ -121,12 +155,12 @@ class Door(BaseHTTPRequestHandler):
         except ValueError:
             return self._reply(422, {"message": "content is not base64."})
         held = files.get(name)
-        if held is not None and payload.get("sha") != hashlib.sha1(held).hexdigest():
+        if held is not None and payload.get("sha") != gitsha(held):
             # The real route refuses an update that does not carry the sha of what is there, so a
             # build that always created and never updated would be caught on this line.
             return self._reply(409, {"message": "Conflict: requested sha did not match HEAD."})
         files[name] = blob
-        self._reply(200, {"content": {"name": name, "sha": hashlib.sha1(blob).hexdigest()},
+        self._reply(200, {"content": {"name": name, "sha": gitsha(blob)},
                           "commit": {"sha": "c" * 40, "message": message}})
 
     def log_message(self, *_args):
@@ -149,12 +183,14 @@ def check(label, ok, detail=""):
         fails.append(label)
 
 
-def ask(method, path, payload=None):
+def ask(method, path, payload=None, port=PORT, headers=None):
     data = None if payload is None else json.dumps(payload).encode()
-    request = urllib.request.Request("http://127.0.0.1:%d%s" % (PORT, path), data=data,
-                                     method=method, headers={"Content-Type": "application/json"})
+    heads = {"Content-Type": "application/json"}
+    heads.update(headers or {})
+    request = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), data=data,
+                                     method=method, headers=heads)
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with urllib.request.urlopen(request, timeout=20) as response:
             body = response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as err:
         body = err.read().decode("utf-8", "replace")
@@ -164,40 +200,60 @@ def ask(method, path, payload=None):
         return {"error": body[:140]}
 
 
-def boot(tag, repo="", token=TEST_TOKEN, name=BOOK_NAME, api=None):
-    """Start the book the way the hosted box starts it, on a throwaway file and with the off-site
-    leg aimed at the stand-in instead of api.github.com."""
+def free(port):
+    """Is this number clear? Something answering here means another process holds it, and a check run
+    against that process would be proving its behaviour, not the shop's. A port left in TIME_WAIT by
+    the boot that just ended is not that — so this asks whether anything listens, not whether it
+    binds."""
     probe = socket.socket()
     probe.settimeout(0.6)
     try:
-        # Something answering here means another process holds the shop's number, and a check run
-        # against it would be proving that process's behaviour. A port left in TIME_WAIT by the boot
-        # that just ended is not that — so this asks whether anything listens, not whether it binds.
-        probe.connect(("127.0.0.1", PORT))
-        raise SystemExit("port %d is already answered by something else — a check that runs against"
-                         " a port someone else is holding proves nothing" % PORT)
+        probe.connect(("127.0.0.1", port))
+        return False
     except (ConnectionRefusedError, OSError):
-        pass
+        return True
     finally:
         probe.close()
-    env = dict(os.environ, CHRISPHICS_DB=BOOK, CHRISPHICS_SUPPORT=SUPPORT,
-               CHRISPHICS_BACKUP_DIR=BACKUPS, PYTHONUNBUFFERED="1", CHRISPHICS_BACKUP_CHECK="600",
+
+
+def boot(tag, repo="", token=TEST_TOKEN, name=BOOK_NAME, api=None, book=BOOK, support=SUPPORT,
+         backups=BACKUPS, port=PORT, role="", minutes="", extra=()):
+    """Start the book the way the hosted box starts it, on a throwaway file and with the off-site
+    leg aimed at the stand-in instead of api.github.com."""
+    if not free(port):
+        raise SystemExit("port %d is already answered by something else — a check that runs against"
+                         " a port someone else is holding proves nothing" % port)
+    env = dict(os.environ, CHRISPHICS_DB=book, CHRISPHICS_SUPPORT=support,
+               CHRISPHICS_BACKUP_DIR=backups, PYTHONUNBUFFERED="1", CHRISPHICS_BACKUP_CHECK="600",
                CHRISPHICS_OFFSITE_API=api or API, CHRISPHICS_OFFSITE_REPO=repo,
-               CHRISPHICS_OFFSITE_TOKEN=token, CHRISPHICS_OFFSITE_PATH=name)
+               CHRISPHICS_OFFSITE_TOKEN=token, CHRISPHICS_OFFSITE_PATH=name,
+               CHRISPHICS_OFFSITE_ROLE=role, CHRISPHICS_OFFSITE_MINUTES=minutes,
+               CHRISPHICS_OFFSITE_CHECK="5")
     handle = open(os.path.join(work, "server-%s.log" % tag), "wb")
     handles[tag] = handle
     procs[tag] = subprocess.Popen(["/usr/bin/python3", os.path.join(REPO, "server.py"),
-                                  "--port", str(PORT), "--no-browser"],
+                                  "--port", str(port), "--no-browser"] + list(extra),
                                  cwd=REPO, env=env, stdout=handle, stderr=handle)
     for _ in range(80):
         try:
-            with urllib.request.urlopen("http://127.0.0.1:%d/healthz" % PORT, timeout=3) as ok:
+            with urllib.request.urlopen("http://127.0.0.1:%d/healthz" % port, timeout=3) as ok:
                 if ok.status == 200:
                     return
         except Exception:
             pass
         time.sleep(0.1)
-    raise SystemExit("the throwaway book on port %d never answered; see server-%s.log" % (tag, tag))
+    raise SystemExit("the throwaway book on port %d never answered; see server-%s.log" % (port, tag))
+
+
+def wait_for(said, seconds=90):
+    """Give the clock its turn. The depository moves on its own schedule, so a check that demands the
+    answer the moment after the write would be proving nothing about the schedule at all."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if said():
+            return True
+        time.sleep(1)
+    return bool(said())
 
 
 def stop(tag):
@@ -238,16 +294,18 @@ def bytes_of(path):
         return fh.read()
 
 
-def count_rows(table):
-    if not os.path.exists(BOOK):
+def count_rows(table, book=BOOK):
+    """How many records one machine's own file holds — the only honest way to say whether a copy taken
+    out of the depository actually arrived."""
+    if not os.path.exists(book):
         return -1
-    book = sqlite3.connect("file:%s?mode=ro" % BOOK, uri=True)
+    reader = sqlite3.connect("file:%s?mode=ro" % book, uri=True)
     try:
-        return book.execute("SELECT count(*) FROM %s" % table).fetchone()[0]
+        return reader.execute("SELECT count(*) FROM %s" % table).fetchone()[0]
     except sqlite3.Error:
         return -1
     finally:
-        book.close()
+        reader.close()
 
 
 def writes_to(where):
@@ -388,6 +446,209 @@ check("and the book still starts, with its own copy card live",
       ask("GET", "/api/backups").get("offsite_set") is True, "the health route answered")
 stop("halffalse")
 
+# --------------------------------- the shop writes, and a machine that was away catches up
+print("\n--- two machines, one book out in the depository, no wire between them")
+REPOS[PRIVATE]["files"] = {}
+boot("shopdesk", repo=PRIVATE, book=SHOP_BOOK, support=SHOP_SUPPORT, backups=SHOP_BACKUPS,
+     port=SHOP_PORT, role="shop", minutes="0")
+boot("laptop", repo=PRIVATE, book=LAPTOP_BOOK, support=LAPTOP_SUPPORT, backups=LAPTOP_BACKUPS,
+     port=LAPTOP_PORT, role="own", minutes="0")
+check("both open on their own empty books, and neither was told where the other one is",
+      count_rows("clients", SHOP_BOOK) == 0 and count_rows("clients", LAPTOP_BOOK) == 0,
+      "%d client(s) at the shop, %d on the laptop"
+      % (count_rows("clients", SHOP_BOOK), count_rows("clients", LAPTOP_BOOK)))
+walk_in = ask("POST", "/api/clients", {"name": "Depository Walk-in", "phone": "055 100 2003"},
+              port=SHOP_PORT)
+walk_job = ask("POST", "/api/jobs", {"client_id": walk_in["id"], "kind": "Job",
+                                     "title": "Depository walk-in banners", "quantity": 6,
+                                     "unit": "pcs", "unit_price": 40, "category": "Banners"},
+              port=SHOP_PORT)
+check("the shop's own book holds the entry that was just typed at it",
+      bool(walk_job.get("id")) and count_rows("jobs", SHOP_BOOK) == 1,
+      "ref %s" % walk_job.get("ref"))
+check("the shop machine posted it to the depository by itself, with nobody pressing anything",
+      wait_for(lambda: b"Depository Walk-in" in (REPOS[PRIVATE]["files"].get(BOOK_NAME) or b"")),
+      "%d commit(s) to the repository" % len(writes_to(PRIVATE)))
+check("and the machine that was away took it in out of the depository, with no network between them",
+      wait_for(lambda: count_rows("clients", LAPTOP_BOOK) >= 1),
+      "%d client(s) on the laptop" % count_rows("clients", LAPTOP_BOOK))
+ask("POST", "/api/clients", {"name": "Depository Second", "phone": "055 400 5006"}, port=SHOP_PORT)
+check("a later entry arrives too, so the leg is a clock and not a one-off",
+      wait_for(lambda: count_rows("clients", LAPTOP_BOOK) >= 2),
+      "%d client(s) on the laptop, %d at the shop"
+      % (count_rows("clients", LAPTOP_BOOK), count_rows("clients", SHOP_BOOK)))
+check("the shop has posted the second entry before the quiet window opens",
+      wait_for(lambda: b"Depository Second" in (REPOS[PRIVATE]["files"].get(BOOK_NAME) or b"")),
+      "%d commit(s) so far" % len(writes_to(PRIVATE)))
+commits = len(writes_to(PRIVATE))
+time.sleep(16)     # three turns of the fast clock, on a shop that has typed nothing
+check("a shop that has not traded since its last post costs the repository no new commit",
+      len(writes_to(PRIVATE)) == commits,
+      "%d commit(s) before the quiet, %d after" % (commits, len(writes_to(PRIVATE))))
+before = count_rows("clients", LAPTOP_BOOK)
+again = ask("POST", "/api/offsite", {"action": "take"}, port=LAPTOP_PORT)
+check("asking again when nothing moved says so, and adds nothing",
+      again.get("ok") is True and "already taken up" in again.get("note", "")
+      and count_rows("clients", LAPTOP_BOOK) == before, again.get("note", "")[:58])
+away = ask("POST", "/api/clients", {"name": "Away At Home", "phone": "055 700 8009"},
+           port=LAPTOP_PORT)
+ask("POST", "/api/jobs", {"client_id": away["id"], "kind": "Job",
+                          "title": "Away machine flyers", "quantity": 200, "unit": "pcs",
+                          "unit_price": 12, "category": "Flyers"}, port=LAPTOP_PORT)
+sent = ask("POST", "/api/offsite", {"action": "send"}, port=LAPTOP_PORT)
+check("an away machine may post, and it takes what is already out there before overwriting it",
+      sent.get("ok") is True and sent.get("did") == "send" and "posted" in sent.get("note", ""),
+      sent.get("note", "")[:58])
+check("the shop then holds the record made away from it — once, not twice",
+      wait_for(lambda: count_rows("clients", SHOP_BOOK) == 3),
+      "%d client(s) in the shop's book" % count_rows("clients", SHOP_BOOK))
+check("and the job typed on the laptop came back through the depository too",
+      wait_for(lambda: count_rows("jobs", SHOP_BOOK) == 2),
+      "%d job(s) in the shop's book" % count_rows("jobs", SHOP_BOOK))
+held_blob = REPOS[PRIVATE]["files"].get(BOOK_NAME) or b""
+check("what the depository holds is the ledger, and never the word that opens it",
+      len(held_blob) > 0 and TEST_TOKEN.encode() not in held_blob,
+      "%d KB of book out there" % (len(held_blob) // 1024))
+card = ask("GET", "/api/offsite", None, port=SHOP_PORT)
+check("the card a screen reads has no token in it, only the fact that one is saved",
+      "token" not in card and card.get("token_saved") is True and TEST_TOKEN not in json.dumps(card),
+      ", ".join(sorted(key for key in card if "token" in key)) or "no token field")
+check("and neither machine wrote the token into its own book",
+      TEST_TOKEN.encode() not in bytes_of(SHOP_BOOK) and TEST_TOKEN.encode() not in bytes_of(LAPTOP_BOOK))
+stop("shopdesk")
+stop("laptop")
+
+# ------------------------------------------- settling it the way the shop's own Mac does
+print("\n--- naming the depository at the screen, into the file beside the book")
+REPOS[PRIVATE]["files"] = {}
+boot("screen", repo="", token="", name="", book=SCREEN_BOOK, support=SCREEN_SUPPORT,
+     backups=SCREEN_BACKUPS, port=SCREEN_PORT)
+unset = ask("GET", "/api/offsite", None, port=SCREEN_PORT)
+check("with nothing typed yet the card says the plain truth, and names the screen to go to",
+      unset.get("set") is False and "no off-site repository is named" in unset.get("why", "")
+      and "Shop & devices" in unset.get("why", ""), unset.get("why", "")[:58])
+wrong = ask("PUT", "/api/offsite", {"repo": "two names deep and a space"}, port=SCREEN_PORT)
+check("a repository that does not read as owner/name is refused before anything is written",
+      "owner/name" in wrong.get("error", "")
+      and not os.path.exists(os.path.join(SCREEN_SUPPORT, "offsite-secrets.json")),
+      wrong.get("error", "")[:58])
+settled = ask("PUT", "/api/offsite", {"repo": PRIVATE, "token": TEST_TOKEN}, port=SCREEN_PORT)
+secrets = os.path.join(SCREEN_SUPPORT, "offsite-secrets.json")
+mode = oct(os.stat(secrets).st_mode & 0o777) if os.path.exists(secrets) else "no file at all"
+check("the shop's own Mac settles the repository and the word at its own screen",
+      settled.get("ready") is True and settled.get("repo") == PRIVATE, str(settled.get("repo")))
+check("both go into the mode-600 file beside the book, and the token never lands in the book",
+      mode == "0o600" and TEST_TOKEN.encode() not in bytes_of(SCREEN_BOOK), mode)
+check("the card says a word is saved without ever repeating it",
+      settled.get("token_saved") is True and "token" not in settled
+      and TEST_TOKEN not in json.dumps(settled),
+      ", ".join(sorted(key for key in settled if "token" in key)) or "no token field")
+kept = ask("PUT", "/api/offsite", {"repo": PRIVATE, "token": ""}, port=SCREEN_PORT)
+check("a blank word keeps the one already saved, since no screen can read it back to retype it",
+      kept.get("token_saved") is True and kept.get("ready") is True, str(kept.get("ready")))
+screen_client = ask("POST", "/api/clients", {"name": "Screen Settled Client",
+                                             "phone": "055 600 7008"}, port=SCREEN_PORT)
+ask("POST", "/api/jobs", {"client_id": screen_client["id"], "kind": "Job",
+                          "title": "Settled at the screen", "quantity": 3, "unit": "pcs",
+                          "unit_price": 90, "category": "Banners"}, port=SCREEN_PORT)
+copies_before = len(os.listdir(SCREEN_BACKUPS))
+writes_before = len(writes_to(PRIVATE))
+first = ask("POST", "/api/offsite", {"action": "send"}, port=SCREEN_PORT)
+check("asking the depository for a trip posts this machine's book",
+      first.get("ok") is True and "posted" in first.get("note", ""), first.get("note", "")[:58])
+check("a post is a snapshot, not a copy in the shop's copies folder, which half-hourly posts would bury",
+      len(os.listdir(SCREEN_BACKUPS)) == copies_before,
+      "%d file(s) in the copies folder" % len(os.listdir(SCREEN_BACKUPS)))
+check("and the record typed at that screen is the one now held out there",
+      b"Screen Settled Client" in (REPOS[PRIVATE]["files"].get(BOOK_NAME) or b""))
+second_send = ask("POST", "/api/offsite", {"action": "send"}, port=SCREEN_PORT)
+check("a second ask for the same ledger makes no second commit",
+      second_send.get("ok") is True and "already" in second_send.get("note", "")
+      and len(writes_to(PRIVATE)) == writes_before + 1,
+      "%d commit(s) for %d asks" % (len(writes_to(PRIVATE)), writes_before + 2))
+ask("PUT", "/api/offsite", {"repo": PUBLIC, "token": TEST_TOKEN}, port=SCREEN_PORT)
+public_run = ask("POST", "/api/offsite", {"action": "send"}, port=SCREEN_PORT)
+check("a public repository is refused when the leg actually runs, and not one byte goes there",
+      public_run.get("ok") is False and "not a private repository" in public_run.get("note", "")
+      and not REPOS[PUBLIC]["files"], public_run.get("note", "")[:58])
+stop("screen")
+
+boot("envscreen", repo=PRIVATE, book=SCREEN_BOOK, support=SCREEN_SUPPORT,
+     backups=SCREEN_BACKUPS, port=SHOP_PORT)
+own_env = ask("PUT", "/api/offsite", {"repo": "someone-elses/book"}, port=SHOP_PORT)
+check("a machine aimed by its service settings refuses to take the repository from a screen",
+      "service settings" in own_env.get("error", ""), own_env.get("error", "")[:70])
+check("and the environment's answer is still the one the card reads",
+      ask("GET", "/api/offsite", None, port=SHOP_PORT).get("repo") == PRIVATE,
+      ask("GET", "/api/offsite", None, port=SHOP_PORT).get("repo"))
+stop("envscreen")
+
+# ------------------------------------------------- the card as a screen reads it, and who may work it
+print("\n--- the depository on the counter's own screen")
+boot("visitor", repo=PRIVATE, book=SCREEN_BOOK, support=SCREEN_SUPPORT,
+     backups=SCREEN_BACKUPS, port=PHONE_PORT, extra=("--trust-proxy",))
+commits_before = len(writes_to(PRIVATE))
+read = ask("GET", "/api/offsite", None, port=PHONE_PORT, headers=VISITOR)
+check("a machine reaching the book the way a phone does still reads the card",
+      read.get("repo") == PRIVATE and read.get("ready") is True and read.get("token_saved") is True,
+      str(read.get("repo")))
+check("and what it reads carries no word that opens the repository",
+      "token" not in read and TEST_TOKEN not in json.dumps(read),
+      ", ".join(sorted(key for key in read if "token" in key)) or "no token field")
+refused_put = ask("PUT", "/api/offsite", {"repo": "someone-elses/book"},
+                  port=PHONE_PORT, headers=VISITOR)
+refused_post = ask("POST", "/api/offsite", {"action": "send"}, port=PHONE_PORT, headers=VISITOR)
+check("but that same machine cannot settle the depository, nor send a book through it",
+      "whose book it is" in refused_put.get("error", "")
+      and "whose book it is" in refused_post.get("error", ""),
+      refused_put.get("error", "")[:58])
+check("and a screen reading the card costs the repository no commit",
+      len(writes_to(PRIVATE)) == commits_before,
+      "%d commit(s) before, %d after" % (commits_before, len(writes_to(PRIVATE))))
+stop("visitor")
+
+# The card offers a switch, so the switch has to be the thing the clock reads. A counter standing on
+# mobile data who said 'only when somebody asks' must not watch this machine dial the repository
+# every half hour on their own meter.
+print("\n--- the switch on the card stops the clock, and does not merely say it does")
+REPOS[PRIVATE]["files"] = {}
+boot("switched", repo="", token="", name="", book=SCREEN_BOOK, support=SCREEN_SUPPORT,
+     backups=SCREEN_BACKUPS, port=SWITCH_PORT, role="shop", minutes="0")
+switched = ask("PUT", "/api/offsite", {"repo": PRIVATE, "token": TEST_TOKEN, "auto": False},
+               port=SWITCH_PORT)
+ask("POST", "/api/clients", {"name": "Switched Off Client", "phone": "055 700 8009"},
+    port=SWITCH_PORT)
+calls_before = len(AUDIT)
+commits_before = len(writes_to(PRIVATE))
+time.sleep(16)     # three turns of a clock told to run every zero minutes
+check("a machine told to keep still is read by the card as keeping still",
+      switched.get("auto") is False, str(switched.get("auto")))
+check("and over three turns of the fast clock it asked the repository for nothing",
+      len(AUDIT) == calls_before and len(writes_to(PRIVATE)) == commits_before,
+      "%d call(s) and %d commit(s) while switched off"
+      % (len(AUDIT) - calls_before, len(writes_to(PRIVATE)) - commits_before))
+ask("PUT", "/api/offsite", {"auto": True}, port=SWITCH_PORT)
+check("the same switch put back on runs the leg by itself, with nobody pressing anything",
+      wait_for(lambda: len(writes_to(PRIVATE)) > commits_before),
+      "%d commit(s) after the switch went back" % (len(writes_to(PRIVATE)) - commits_before))
+stop("switched")
+
+appjs = open(APPJS, encoding="utf-8").read()
+check("Shop & devices shows the depository card",
+      "function depositoryCard" in appjs and "depositoryCard(depo, shopMac)" in appjs)
+check("it asks the book at /api/offsite", "await api('/api/offsite')" in appjs)
+check("it offers both legs by hand, and only to the machine whose book it is",
+      'data-action="offsite-send"' in appjs and 'data-action="offsite-take"' in appjs
+      and "offsiteTrip('send', el)" in appjs and "offsiteTrip('take', el)" in appjs)
+check("its token box is a password box, never filled back in",
+      'name="token" type="password"' in appjs
+      and not re.search(r'name="token"[^>]*value=', appjs),
+      "the box that takes the word cannot show it")
+check("the card is built from what the engine answered, not from a guess about the calendar",
+      "depo.every_minutes" in appjs and "depo.send_note" in appjs and "depo.take_note" in appjs)
+check("and it says plain that the repository has to be private before the book goes there",
+      "Make that repository private" in appjs and "refuses to post" in appjs)
+
 # --------------------------------------------------------------------- where the token never goes
 print("\n--- where the token never goes")
 wipe_local_book()
@@ -408,7 +669,9 @@ check("a commit message names the copy and nothing of the shop's records",
 check("a file name with spaces and a folder in it reaches the contents route",
       spaced in REPOS[PRIVATE]["files"], sorted(REPOS[PRIVATE]["files"])[-1][:52])
 logs = "".join(log_text(tag) for tag in ("plain", "public", "private", "restore", "keep",
-                                         "garbage", "badtoken", "halffalse", "hygiene"))
+                                         "garbage", "badtoken", "halffalse", "hygiene",
+                                         "shopdesk", "laptop", "screen", "envscreen", "visitor",
+                                         "switched"))
 check("the token appears in no server log", TEST_TOKEN not in logs)
 check("the token is not inside the book either", TEST_TOKEN.encode() not in bytes_of(BOOK))
 rows = sqlite3.connect("file:%s?mode=ro" % BOOK, uri=True).execute(
