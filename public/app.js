@@ -846,7 +846,11 @@ async function paintDashboard(d, sh) {
   /* Offline rows are added to whichever month the screen is headlining, not blindly to the
      calendar month — otherwise a picked October would collect today's offline sale. */
   const moneyMonth = d.money_month || today.slice(0, 7);
-  const week = (d.trend && d.trend.length) ? d.trend[Math.max(0, d.trend.length - 7)].day : weekStart();
+  /* Entries queued on this device join the week the engine counted — its Monday through its
+     Saturday, not a rolling seven days — so an offline sale can never land in the wrong week's
+     tile, and a Sunday's money stays out of a working week that shut on Saturday. */
+  const week = day10(d.week_start) || weekStart();
+  const weekLast = day10(d.week_end) || day10(d.today);
   const bumpDay = (field, day, amount) => {
     const hit = (d.trend || []).filter((x) => x.day === day)[0];
     if (hit) hit[field] = round2(Number(hit[field] || 0) + amount);
@@ -855,7 +859,7 @@ async function paintDashboard(d, sh) {
     const day = day10(j.created_at);
     if (j.kind === 'Quote') { k.open_quotes += 1; k.quoted_value = round2(k.quoted_value + j.total); return; }
     if (day === today) k.jobs_today += 1;
-    if (day >= week) k.jobs_week += 1;
+    if (day >= week && day <= weekLast) k.jobs_week += 1;
     if (OPEN_STATUSES.indexOf(j.status) >= 0) k.open_jobs += 1;
     if (j.status === 'Ready') k.ready_jobs += 1;
     if (j.due_date && day10(j.due_date) < today && j.status !== 'Delivered' && j.status !== 'Cancelled') k.overdue_jobs += 1;
@@ -868,7 +872,7 @@ async function paintDashboard(d, sh) {
   sh.payments.forEach((p) => {
     const day = day10(p.paid_at);
     if (day === today) k.collected_today = round2(k.collected_today + p.delta);
-    if (day >= week) k.collected_week = round2(k.collected_week + p.delta);
+    if (day >= week && day <= weekLast) k.collected_week = round2(k.collected_week + p.delta);
     if (day.slice(0, 7) === moneyMonth) k.collected_month = round2(k.collected_month + p.delta);
     if (p.kind === 'Refund') k.refunds_total = round2(k.refunds_total + Number(p.amount || 0));
     bumpDay('collected', day, p.delta);
@@ -1942,7 +1946,14 @@ async function viewDashboard(r) {
   const moneyDay = day10(d.money_day) || day10(d.today);
   const onToday = moneyDay === day10(d.today);
   const dayTag = onToday ? 'today' : weekdayName(moneyDay);
-  const weekTag = onToday ? 'This week' : 'Week to ' + weekdayName(moneyDay);
+  /* The week card counts the shop's working week — Monday opens it, Saturday shuts it — so it is
+     'this week' only while today still sits inside the week being counted. A shop shut over a
+     weekend, and a month picked in the chooser, are read back into the week their last entry fell
+     in; that week has closed, and the card names the Monday it opened on instead of pretending to
+     be current. The engine says which week it counted and whether it is today's. */
+  const weekFrom = day10(d.week_start);
+  const weekTo = day10(d.week_end) || weekFrom;
+  const weekTag = d.week_current ? 'This week' : 'Week of ' + fdate(weekFrom);
   /* The open-work cards are honest zeros in a shop whose work is finished, and a row of zeros
      reads as an empty program. So the book's own totals — and the last finished jobs, with
      their clients and money — are put on the screen beside them. */
@@ -2095,11 +2106,12 @@ async function viewDashboard(r) {
       (onToday ? ' so far' : ' that day'), 'amt good hero',
       '#/accounts', 'Money in and out, counted from ' + (d.money_day_label || dayTag)) +
     stat(weekTag, money(k.collected_week),
-      /* The window the engine actually counted, in its own words: the page never works out the seven
-         days, it reads them off the answer, so the note cannot drift from the figure above it. */
-      (onToday ? 'last 7 days'
-       : fdate(d.week_start) + ' – ' + fdate(moneyDay)) + ' · ' + plural(k.jobs_week, 'job'),
-      'amt', '#/accounts', 'Click to see the accounts book') +
+      /* The days the engine actually counted, in its own words: the page never works out the week's
+         Monday or its Saturday, it reads both off the answer, so the note cannot drift from the
+         figure above it. Sunday is named as the rest day it is — money taken on a Sunday sits in
+         that day's own card and in the month, not in a working week's total. */
+      fdate(weekFrom) + ' – ' + fdate(weekTo) + ' · ' + plural(k.jobs_week, 'job'),
+      'amt', '#/accounts', 'Monday to Saturday, the shop’s working week — click to see the accounts book') +
     stat(onCurrentMonth ? 'Month to date' : d.money_month_label, money(k.collected_month), monthNote, 'amt', '#/reports', 'Click for this month in reports') +
     /* 'less money kept on accounts' would be the precise wording here, but this screen has nothing to
        prove it with: the dashboard's own rows look identical whichever server answered, and the shop's

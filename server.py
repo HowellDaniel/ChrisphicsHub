@@ -799,7 +799,18 @@ def dashboard(month=""):
         # Nothing booked anywhere in the month the screen is showing. A pinned past month stops on its
         # own final day rather than today; a month still running, and a brand-new book, stop at today.
         money_day = min(month_end, now).isoformat() if pinned else t
-    week_start = (dt.date.fromisoformat(money_day) - dt.timedelta(days=6)).isoformat()
+    # "This week" is the shop's own working week, counted the way it was counted before: Monday opens
+    # it, Saturday shuts it, and the Sunday after belongs to no week's takings. The screen is anchored
+    # on the day the book stopped, so a shop shut on a Friday reads as that Friday's week, and a month
+    # pinned in the chooser stays inside a week of that month — the weekend that closed October is
+    # counted in October's week and never carried into November's.
+    anchor = dt.date.fromisoformat(money_day)
+    monday = anchor - dt.timedelta(days=anchor.weekday())
+    week_start = monday.isoformat()
+    week_end = (monday + dt.timedelta(days=5)).isoformat()
+    # Whether that is the week today still sits inside, so the card can call itself "this week"
+    # truthfully. The page is never asked to work a calendar out for itself.
+    week_current = (monday - now).days <= 0 and (now - monday).days <= 6
     months_available = [{"month": r["month"], "label": month_label(r["month"]),
                          "income": r["income"], "spent": r["spent"]}
                         for r in q(
@@ -838,9 +849,9 @@ def dashboard(month=""):
            FROM payments WHERE substr(paid_at,1,7) = ?) AS collected_month,
         (SELECT round(coalesce(sum(CASE WHEN kind='Refund' THEN -amount ELSE amount END),0),2)
            FROM payments WHERE paid_at = ?) AS collected_today
-    """ % COLLECTABLE_SQL, (money_day, week_start, money_day, t, t,
+    """ % COLLECTABLE_SQL, (money_day, week_start, week_end, t, t,
                              money_month, money_month, money_month,
-                             week_start, money_day, money_month, money_day))
+                             week_start, week_end, money_month, money_day))
 
     by_status = {r["status"]: r["c"] for r in q(
         "SELECT status, count(*) c FROM jobs WHERE kind='Job' AND status IN ('Pending','Printing','Ready')"
@@ -926,7 +937,7 @@ def dashboard(month=""):
             "quotes": quotes, "follow_ups": follow_ups, "shop": SHOP, "today": t,
             "money_month": money_month, "money_month_label": month_label(money_month),
             "money_day": money_day, "money_day_label": day_label(money_day),
-            "week_start": week_start,
+            "week_start": week_start, "week_end": week_end, "week_current": week_current,
             "months_available": months_available,
             "hours": shop_hours(with_devices=True)}
 
