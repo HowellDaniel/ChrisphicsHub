@@ -8,7 +8,7 @@
    that got it, not to a phone that read it once on the bus. v25 carries the Mac app windows that
    own Settings, so a counter holding v24's page must not keep drawing the rail's row until the
    background refresh happens to land. */
-const CACHE_NAME = 'crispprint-shell-v25';
+const CACHE_NAME = 'crispprint-shell-v26';
 const APP_SHELL = [
   '/',
   '/index.html',

@@ -727,10 +727,41 @@ COLLECTABLE_SQL = """
 """
 
 
-def dashboard():
+MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December")
+
+
+def month_label(value):
+    """'2026-10' as 'October 2026', so a money card can name the month it is really reading."""
+    try:
+        return "%s %s" % (MONTH_NAMES[int(value[5:7]) - 1], value[:4])
+    except (ValueError, IndexError):
+        return value
+
+
+def dashboard(month=""):
     t = today()
-    month_start = t[:8] + "01"
+    cur_month = t[:7]
     week_start = (dt.date.today() - dt.timedelta(days=6)).isoformat()
+    # The month whose money the Dashboard headlines. Normally the calendar month; while that month
+    # is still empty — the first days of a new month — it carries the most recent month that actually
+    # sold something, so the counter's headline is never a bare zero on a book that has money in it.
+    pinned = month if re.fullmatch(r"\d{4}-\d{2}", month or "") else ""
+    sold_months = [r["month"] for r in q(
+        "SELECT month FROM monthly_pnl WHERE coalesce(income, 0) > 0 ORDER BY month DESC LIMIT 24")]
+    if pinned:
+        money_month = pinned
+    elif cur_month in sold_months:
+        money_month = cur_month
+    else:
+        money_month = sold_months[0] if sold_months else cur_month
+    months_available = [{"month": r["month"], "label": month_label(r["month"]),
+                         "income": r["income"], "spent": r["spent"]}
+                        for r in q(
+                            "SELECT month, income, spent FROM monthly_pnl ORDER BY month DESC LIMIT 12")]
+    if not any(m["month"] == money_month for m in months_available):
+        months_available.insert(0, {"month": money_month, "label": month_label(money_month),
+                                    "income": 0.0, "spent": 0.0})
     kpi = one("""
       SELECT
         (SELECT count(*) FROM jobs WHERE kind='Job' AND date(created_at)=?) AS jobs_today,
@@ -751,19 +782,19 @@ def dashboard():
         (SELECT round(coalesce(sum(value),0),2) FROM leads WHERE stage NOT IN ('Won','Lost')) AS pipeline_value,
         (%s) AS outstanding,
         (SELECT round(coalesce(sum(total),0),2) FROM job_accounts
-           WHERE kind='Job' AND status<>'Cancelled' AND date(created_at) >= ?) AS billed_month,
+           WHERE kind='Job' AND status<>'Cancelled' AND substr(created_at,1,7) = ?) AS billed_month,
         (SELECT round(coalesce(sum(profit),0),2) FROM job_accounts
-           WHERE kind='Job' AND status<>'Cancelled' AND date(created_at) >= ?) AS profit_month,
-        (SELECT round(coalesce(sum(amount),0),2) FROM expenses WHERE spent_on >= ?) AS spent_month,
+           WHERE kind='Job' AND status<>'Cancelled' AND substr(created_at,1,7) = ?) AS profit_month,
+        (SELECT round(coalesce(sum(amount),0),2) FROM expenses WHERE substr(spent_on,1,7) = ?) AS spent_month,
         (SELECT round(coalesce(sum(amount),0),2) FROM payments WHERE kind='Refund') AS refunds_total,
         (SELECT round(coalesce(sum(CASE WHEN kind='Refund' THEN -amount ELSE amount END),0),2)
            FROM payments WHERE paid_at >= ?) AS collected_week,
         (SELECT round(coalesce(sum(CASE WHEN kind='Refund' THEN -amount ELSE amount END),0),2)
-           FROM payments WHERE paid_at >= ?) AS collected_month,
+           FROM payments WHERE substr(paid_at,1,7) = ?) AS collected_month,
         (SELECT round(coalesce(sum(CASE WHEN kind='Refund' THEN -amount ELSE amount END),0),2)
            FROM payments WHERE paid_at = ?) AS collected_today
-    """ % COLLECTABLE_SQL, (t, week_start, t, t, month_start, month_start, month_start,
-                             week_start, month_start, t))
+    """ % COLLECTABLE_SQL, (t, week_start, t, t, money_month, money_month, money_month,
+                             week_start, money_month, t))
 
     by_status = {r["status"]: r["c"] for r in q(
         "SELECT status, count(*) c FROM jobs WHERE kind='Job' AND status IN ('Pending','Printing','Ready')"
@@ -823,9 +854,9 @@ def dashboard():
 
     spend = q("""
       SELECT e.category, count(*) AS n, round(sum(e.amount),2) AS amount
-      FROM expenses e WHERE e.spent_on >= ?
+      FROM expenses e WHERE substr(e.spent_on,1,7) = ?
       GROUP BY e.category ORDER BY amount DESC LIMIT 8
-    """, (month_start,))
+    """, (money_month,))
 
     quotes = q("""
       SELECT ja.id, ja.ref, ja.title, ja.category, ja.total, ja.valid_until, ja.client, ja.created_at,
@@ -846,6 +877,8 @@ def dashboard():
     return {"kpi": kpi, "by_status": by_status, "trend": trend, "overdue": overdue,
             "recent": recent, "debtors": debtors, "mix": mix, "spend": spend,
             "quotes": quotes, "follow_ups": follow_ups, "shop": SHOP, "today": t,
+            "money_month": money_month, "money_month_label": month_label(money_month),
+            "months_available": months_available,
             "hours": shop_hours(with_devices=True)}
 
 
@@ -6641,7 +6674,7 @@ class Handler(BaseHTTPRequestHandler):
                          "secure": bool(getattr(self.server, "is_tls", False)),
                          "backup": backup_report()}
         if method == "GET" and head == "dashboard":
-            return 200, dashboard()
+            return 200, dashboard(params.get("month", [""])[0])
         if method == "GET" and head == "shop":
             return 200, {"shop": SHOP,
                          **address_keys(self.headers.get("Host", ""),

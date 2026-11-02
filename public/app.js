@@ -842,7 +842,10 @@ function paintExpenses(d, sh) {
   return d;
 }
 async function paintDashboard(d, sh) {
-  const k = d.kpi, today = day10(d.today), monthStart = today.slice(0, 8) + '01';
+  const k = d.kpi, today = day10(d.today);
+  /* Offline rows are added to whichever month the screen is headlining, not blindly to the
+     calendar month — otherwise a picked October would collect today's offline sale. */
+  const moneyMonth = d.money_month || today.slice(0, 7);
   const week = (d.trend && d.trend.length) ? d.trend[Math.max(0, d.trend.length - 7)].day : weekStart();
   const bumpDay = (field, day, amount) => {
     const hit = (d.trend || []).filter((x) => x.day === day)[0];
@@ -856,7 +859,7 @@ async function paintDashboard(d, sh) {
     if (OPEN_STATUSES.indexOf(j.status) >= 0) k.open_jobs += 1;
     if (j.status === 'Ready') k.ready_jobs += 1;
     if (j.due_date && day10(j.due_date) < today && j.status !== 'Delivered' && j.status !== 'Cancelled') k.overdue_jobs += 1;
-    if (day >= monthStart) k.billed_month = round2(k.billed_month + j.total);
+    if (day.slice(0, 7) === moneyMonth) k.billed_month = round2(k.billed_month + j.total);
     bumpDay('new_jobs', day, 1);
     const by = d.by_status || {};
     if (OPEN_STATUSES.indexOf(j.status) >= 0) by[j.status] = (by[j.status] || 0) + 1;
@@ -866,11 +869,11 @@ async function paintDashboard(d, sh) {
     const day = day10(p.paid_at);
     if (day === today) k.collected_today = round2(k.collected_today + p.delta);
     if (day >= week) k.collected_week = round2(k.collected_week + p.delta);
-    if (day >= monthStart) k.collected_month = round2(k.collected_month + p.delta);
+    if (day.slice(0, 7) === moneyMonth) k.collected_month = round2(k.collected_month + p.delta);
     if (p.kind === 'Refund') k.refunds_total = round2(k.refunds_total + Number(p.amount || 0));
     bumpDay('collected', day, p.delta);
   });
-  sh.expenses.forEach((e) => { if (day10(e.spent_on) >= monthStart) k.spent_month = round2(k.spent_month + Number(e.amount || 0)); });
+  sh.expenses.forEach((e) => { if (day10(e.spent_on).slice(0, 7) === moneyMonth) k.spent_month = round2(k.spent_month + Number(e.amount || 0)); });
   sh.clients.forEach(() => { k.clients += 1; });
   sh.leads.forEach((l) => {
     if (l.stage === 'Won' || l.stage === 'Lost') return;
@@ -1910,8 +1913,15 @@ function watchToday() {
 }
 
 /* --------------------------------------------------------------- dashboard */
-async function viewDashboard() {
-  const d = await api('/api/dashboard');
+async function viewDashboard(r) {
+  const pick = (r && r.params && r.params.get('month')) || '';
+  const d = await api('/api/dashboard' + (pick ? '?month=' + encodeURIComponent(pick) : ''));
+  /* A month is chosen by name, not by the counter working out which calendar month the engine
+     decided to headline. `money_month` is that decision: the current month when it has sold, the
+     most recent month that did otherwise, or the month this screen was asked to show. */
+  const moneyMonth = d.money_month || day10(d.today).slice(0, 7);
+  const onCurrentMonth = moneyMonth === day10(d.today).slice(0, 7);
+  const monthTag = onCurrentMonth ? 'this month' : (d.money_month_label || moneyMonth);
   /* The open-work cards are honest zeros in a shop whose work is finished, and a row of zeros
      reads as an empty program. So the book's own totals — and the last finished jobs, with
      their clients and money — are put on the screen beside them. */
@@ -1975,14 +1985,20 @@ async function viewDashboard() {
     '<span><b>' + delivered + '</b>finished</span>' +
     '<span><b>' + (k.open_jobs || 0) + '</b>open</span>' +
     '<span><b>' + k.clients + '</b>clients</span>' +
-    '<span><b>' + money(k.billed_month) + '</b>billed this month</span>' +
+    '<span><b>' + money(k.billed_month) + '</b>billed ' + monthTag + '</span>' +
     '</div>' +
+    '<div class="month-pick" role="group" aria-label="Which month the money figures below cover">' +
+    '<label for="dash-month">Money shown for</label>' +
+    '<select id="dash-month" title="Choose the month these money figures cover">' +
+    (d.months_available || []).map((m) => '<option value="' + esc(m.month) + '"' +
+      (m.month === moneyMonth ? ' selected' : '') + '>' + esc(m.label) + '</option>').join('') +
+    '</select></div>' +
     '<p class="band-title">Money</p>' +
     '<div class="grid kpis money">' +
     stat('Collected today', money(k.collected_today), k.collected_today > 0 ? 'payments entered' : 'nothing entered yet', 'amt good hero',
       '#/accounts', 'Click to see money in and out') +
     stat('This week', money(k.collected_week), 'last 7 days', 'amt', '#/accounts', 'Click to see the accounts book') +
-    stat('Month to date', money(k.collected_month), monthName(day10(d.today)), 'amt', '#/reports', 'Click for this month in reports') +
+    stat(onCurrentMonth ? 'Month to date' : d.money_month_label, money(k.collected_month), onCurrentMonth ? monthName(day10(d.today)) : 'the month you picked', 'amt', '#/reports', 'Click for this month in reports') +
     /* 'less money kept on accounts' would be the precise wording here, but this screen has nothing to
        prove it with: the dashboard's own rows look identical whichever server answered, and the shop's
        running server can be a build behind the page. The Accounts screen, which can tell, says it there. */
@@ -2006,8 +2022,8 @@ async function viewDashboard() {
     stat('Enquiries to chase', k.open_leads, k.open_leads
       ? (k.leads_due ? k.leads_due + ' due today' : money(k.pipeline_value) + ' of work out there')
       : 'nothing to chase', k.leads_due ? 'warn' : '', '#/leads', 'Click to work the pipeline') +
-    stat('Spent this month', money(k.spent_month), 'paper, ink, rent and the rest', 'amt', '#/expenses', 'Click to see money out') +
-    stat('Profit this month', money(k.profit_month), 'of ' + money(k.billed_month) + ' billed',
+    stat('Spent ' + monthTag, money(k.spent_month), 'paper, ink, rent and the rest', 'amt', '#/expenses', 'Click to see money out') +
+    stat('Profit ' + monthTag, money(k.profit_month), 'of ' + money(k.billed_month) + ' billed',
       'amt ' + (k.profit_month < 0 ? 'warn' : 'good'), '#/reports', 'Click for the full picture') +
     '</div>' +
     '<div class="grid split">' +
@@ -2051,7 +2067,7 @@ async function viewDashboard() {
       ['Client', 'Jobs', 'Owes', '']) +
     '</div>' +
     '<div class="grid split">' +
-    '<div class="card"><h3>Where the money went — this month<span class="spacer"></span>' +
+    '<div class="card"><h3>Where the money went — ' + esc(monthTag) + '<span class="spacer"></span>' +
     '<a href="#/expenses" class="btn sm ghost">Expenses</a></h3><div class="card-b mix">' +
     (d.spend.length ? d.spend.map((c) => '<div class="row"><span>' + esc(c.category) + '</span><b>' + compact(c.amount) +
       ' · ' + c.n + '</b><div class="track"><i class="out" style="width:' + Math.round((c.amount / maxSpend) * 100) + '%"></i></div></div>').join('')
@@ -2062,6 +2078,11 @@ async function viewDashboard() {
     '</div>' +
     '<p class="hint editable-hint">Anything underlined you can click: move a due date, change a status, ' +
     'reprice an enquiry — it saves as soon as you press Enter.</p>';
+  /* Choosing a month is a navigation, not a data change: the hash carries it, the router re-runs,
+     and the engine answers for that month. Nothing here edits the book — it only picks which month's
+     already-booked money the screen headlines. */
+  const monthSel = $('#dash-month');
+  if (monthSel) monthSel.onchange = () => go('dashboard', { month: monthSel.value });
 }
 function monthName(iso) {
   return MON[Number((iso || '').slice(5, 7)) - 1] + ' ' + (iso || '').slice(0, 4);
