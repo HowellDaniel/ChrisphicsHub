@@ -1835,16 +1835,23 @@ function loadWeather() {
       wxDown = true;
     });
 }
-function todayCard(k) {
+function todayCard(k, when) {
   const now = new Date();
   const evening = themeIsDark(now);
   const applied = document.documentElement.dataset.theme === 'dark';
   calStamp = stampOf(now);
   const booked = Number((k || {}).jobs_today || 0);
   const taken = Number((k || {}).collected_today || 0);
+  /* The clock on this card is the real clock and the glance line is the book's last day. When the
+     two are different days the card says so outright — a counter who opens the shop on Monday and
+     reads ₵2,843.00 under the word 'Friday' is not being shown Monday's takings, and the sentence
+     that admits which day the tally belongs to is what makes the figure usable. */
+  const live = !when || when.live;
   const glance = booked || taken
-    ? plural(booked, 'job') + ' booked today · ' + money(taken) + ' taken'
-    : 'Nothing booked yet today — the first entry starts the day.';
+    ? plural(booked, 'job') + ' booked ' + (live ? 'today' : 'on ' + when.day) + ' · ' + money(taken) + ' taken'
+    : (live ? 'Nothing booked yet today — the first entry starts the day.'
+            : 'Nothing booked yet today — the book still reads ' + when.day + ', ' +
+              plural(booked, 'job') + ' and ' + money(taken) + '.');
   return '<div class="card today' + (applied ? ' night' : '') + '" id="todayCard">' +
     '<div class="card-b today-face">' +
     '<div class="today-cal" id="todayCal" role="img" aria-label="' + esc(calAria(now)) + '">' +
@@ -1927,6 +1934,15 @@ async function viewDashboard(r) {
      this month has sold nothing yet. */
   const monthNote = onCurrentMonth ? monthName(day10(d.today))
     : (pick ? 'the month you picked' : 'nothing sold yet in ' + monthName(day10(d.today)));
+  /* The day the engine headlines — the month rule one level down. Today while today has moved the
+     book; once the shop shuts, the day the book actually stopped on. Every entry and figure drawn
+     from the book carries that day's name, so a screen opened on Monday says outright which day its
+     takings came from. The clock, calendar, weather and shop hours are not anchored — they are the
+     shop as it stands right now, and a cashier needs both to know the day has not started yet. */
+  const moneyDay = day10(d.money_day) || day10(d.today);
+  const onToday = moneyDay === day10(d.today);
+  const dayTag = onToday ? 'today' : weekdayName(moneyDay);
+  const weekTag = onToday ? 'This week' : 'Week to ' + weekdayName(moneyDay);
   /* The open-work cards are honest zeros in a shop whose work is finished, and a row of zeros
      reads as an empty program. So the book's own totals — and the last finished jobs, with
      their clients and money — are put on the screen beside them. */
@@ -1974,7 +1990,8 @@ async function viewDashboard(r) {
       : cardTable('Quotes waiting on an answer', '<a href="#/jobs?kind=Quote" class="btn sm ghost">All quotes</a>',
         '<tr><td colspan="4" class="hint">No open quotes. Anything asked for has been booked or nothing is waiting.</td></tr>',
         ['Quote', 'Worth', 'Price holds', '']);
-  const moneyBars = '<div class="card"><h3>Money in — last 15 days</h3>' +
+  const moneyBars = '<div class="card"><h3>Money in — ' +
+    (onToday ? 'last 15 days' : '15 days to ' + dayTag) + '</h3>' +
     '<div class="card-b"><div class="bars">' + bars + '</div>' +
     '<div class="legend"><span><i style="background:var(--brand)"></i>cash, MoMo and transfers received</span></div>' +
     '<div class="duo"><span>Received</span><b class="pos">' + money(in15) + '</b>' +
@@ -1988,7 +2005,8 @@ async function viewDashboard(r) {
       : '<p class="hint">No costs recorded this month — that makes the profit figure look too good.</p>') +
     '<div class="duo"><span>Out of the till — ' + esc(monthTag) + '</span><b class="neg">' + money(k.spent_month) + '</b></div>' +
     '</div></div>';
-  const mixCard = '<div class="card"><h3>What we print most — last 3 months</h3><div class="card-b mix">' +
+  const mixCard = '<div class="card"><h3>What we print most — ' +
+    (onToday ? 'last 3 months' : '3 months to ' + dayTag) + '</h3><div class="card-b mix">' +
     (d.mix.length ? d.mix.map((m) => '<div class="row"><span>' + esc(m.category) + '</span><b>' + compact(m.billed) +
       ' · ' + m.jobs + '</b><div class="track"><i style="width:' + Math.round((m.billed / maxMix) * 100) + '%"></i></div></div>').join('')
       : '<p class="hint">No jobs booked in this window.</p>') +
@@ -2052,7 +2070,7 @@ async function viewDashboard(r) {
      group covers is picked on that group's own line, so the choice is never a row of its own. */
   $('#view').innerHTML =
     '<div class="grid split dash-top">' +
-    todayCard(d.kpi) +
+    todayCard(d.kpi, { live: onToday, day: dayTag }) +
     hoursCard(d.hours) +
     '</div>' +
     '<div class="card bookband" role="status" aria-label="What the book holds">' +
@@ -2069,9 +2087,16 @@ async function viewDashboard(r) {
       (m.month === moneyMonth ? ' selected' : '') + '>' + esc(m.label) + '</option>').join('') +
     '</select></span></p>' +
     '<div class="grid kpis money">' +
-    stat('Collected today', money(k.collected_today), k.collected_today > 0 ? 'payments entered' : 'nothing entered yet', 'amt good hero',
-      '#/accounts', 'Click to see money in and out') +
-    stat('This week', money(k.collected_week), 'last 7 days', 'amt', '#/accounts', 'Click to see the accounts book') +
+    stat('Collected ' + dayTag, money(k.collected_today),
+      (k.jobs_today ? plural(k.jobs_today, 'job') + ' booked' : 'nothing booked') +
+      (onToday ? ' so far' : ' that day'), 'amt good hero',
+      '#/accounts', 'Money in and out, counted from ' + (d.money_day_label || dayTag)) +
+    stat(weekTag, money(k.collected_week),
+      /* The window the engine actually counted, in its own words: the page never works out the seven
+         days, it reads them off the answer, so the note cannot drift from the figure above it. */
+      (onToday ? 'last 7 days'
+       : fdate(d.week_start) + ' – ' + fdate(moneyDay)) + ' · ' + plural(k.jobs_week, 'job'),
+      'amt', '#/accounts', 'Click to see the accounts book') +
     stat(onCurrentMonth ? 'Month to date' : d.money_month_label, money(k.collected_month), monthNote, 'amt', '#/reports', 'Click for this month in reports') +
     /* 'less money kept on accounts' would be the precise wording here, but this screen has nothing to
        prove it with: the dashboard's own rows look identical whichever server answered, and the shop's
@@ -2120,6 +2145,10 @@ async function viewDashboard(r) {
 }
 function monthName(iso) {
   return MON[Number((iso || '').slice(5, 7)) - 1] + ' ' + (iso || '').slice(0, 4);
+}
+/* Midday, not midnight: a machine west of the book would otherwise roll an ISO date back a day. */
+function weekdayName(iso) {
+  return new Date(day10(iso) + 'T12:00:00').toLocaleDateString('en-GB', { weekday: 'long' });
 }
 function statusLine(by) {
   return ['Pending', 'Printing', 'Ready'].map((s) => (by[s] || 0) + ' ' + s.toLowerCase()).join(' · ');

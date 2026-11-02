@@ -696,8 +696,13 @@ LaunchAgents installed only while the shop's records live on this Mac
 
 ## The eleven screens
 
-**Dashboard** — money in today / this week / month to date, what customers still owe,
-what is late, what is ready for pickup, a 15-day cash chart, and what you print most.
+**Dashboard** — money in on the day the book last moved, the week ending that day, the month's
+takings, what customers still owe, what is late, what is ready for pickup, a 15-day cash chart, and
+what you print most. The money tiles follow the book rather than the calendar: while today has entries
+they read today, and once the shop shuts they carry the last day that traded — named on the tile, so a
+screen opened on a Monday says outright that its ₵2,843.00 is Friday's. The month works the same way
+one level up, and the chooser on the *Money* band pins any month the book has sold. The clock,
+calendar, weather and shop hours never follow it back; they are the shop as it stands right now.
 The first thing on it is the shop's own **day**: the month laid out the way an iPhone's medium
 calendar widget lays it out, beside a clock the size of a phone's lock screen, the date in full
 underneath, the time running to the second, and the hour the look

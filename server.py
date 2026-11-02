@@ -730,6 +730,8 @@ COLLECTABLE_SQL = """
 MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
                "August", "September", "October", "November", "December")
 
+DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
 
 def month_label(value):
     """'2026-10' as 'October 2026', so a money card can name the month it is really reading."""
@@ -739,10 +741,18 @@ def month_label(value):
         return value
 
 
+def day_label(value):
+    """'2026-10-30' as 'Friday, 30 October 2026', so a money card can name the day it is reading."""
+    try:
+        d = dt.date.fromisoformat(value)
+    except (ValueError, TypeError):
+        return value
+    return "%s, %d %s %d" % (DAY_NAMES[d.weekday()], d.day, MONTH_NAMES[d.month - 1], d.year)
+
+
 def dashboard(month=""):
     t = today()
     cur_month = t[:7]
-    week_start = (dt.date.today() - dt.timedelta(days=6)).isoformat()
     # The month whose money the Dashboard headlines. Normally the calendar month; while that month
     # is still empty — the first days of a new month — it carries the most recent month that actually
     # sold something, so the counter's headline is never a bare zero on a book that has money in it.
@@ -755,6 +765,41 @@ def dashboard(month=""):
         money_month = cur_month
     else:
         money_month = sold_months[0] if sold_months else cur_month
+    # The day whose entries and takings the Dashboard headlines: the month rule one level down, and
+    # always a day inside the month the screen is already showing. Today while today has moved the
+    # book; after that, the last day that did. A shop that shut on Friday and reopens Monday does not
+    # get a screen of zeros over a book holding Friday's takings — the counter reads the day the book
+    # actually stopped on, and every tile names it. The clock, calendar, weather and shop hours stay
+    # live; only the figures drawn out of the book follow it back.
+    # When nobody picked a month, the day looks back over the whole book: the first job booked this
+    # morning moves the headline to today even while the money tiles are still reading the last month
+    # that sold. When the chooser pins a month, the day stays inside that month so every figure on the
+    # screen counts one stretch of days rather than two.
+    if pinned:
+        traded = one("SELECT max(d) AS d FROM ("
+                     " SELECT max(paid_at) AS d FROM payments WHERE substr(paid_at, 1, 7) = ?"
+                     " UNION ALL SELECT max(date(created_at)) AS d FROM jobs"
+                     "    WHERE status <> 'Cancelled' AND substr(created_at, 1, 7) = ?"
+                     " UNION ALL SELECT max(spent_on) AS d FROM expenses WHERE substr(spent_on, 1, 7) = ?"
+                     ")", (money_month, money_month, money_month))["d"] or ""
+    else:
+        traded = one("SELECT max(d) AS d FROM ("
+                     " SELECT max(paid_at) AS d FROM payments"
+                     " UNION ALL SELECT max(date(created_at)) AS d FROM jobs WHERE status <> 'Cancelled'"
+                     " UNION ALL SELECT max(spent_on) AS d FROM expenses)")["d"] or ""
+    now = dt.date.fromisoformat(t)
+    first = now.replace(day=1) if money_month == cur_month else dt.date.fromisoformat(money_month + "-01")
+    month_end = (first.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
+    if traded and traded < t:
+        money_day = traded
+    elif traded:
+        # A date entered further ahead than today — the book has moved, but not into that day yet.
+        money_day = t
+    else:
+        # Nothing booked anywhere in the month the screen is showing. A pinned past month stops on its
+        # own final day rather than today; a month still running, and a brand-new book, stop at today.
+        money_day = min(month_end, now).isoformat() if pinned else t
+    week_start = (dt.date.fromisoformat(money_day) - dt.timedelta(days=6)).isoformat()
     months_available = [{"month": r["month"], "label": month_label(r["month"]),
                          "income": r["income"], "spent": r["spent"]}
                         for r in q(
@@ -765,7 +810,7 @@ def dashboard(month=""):
     kpi = one("""
       SELECT
         (SELECT count(*) FROM jobs WHERE kind='Job' AND date(created_at)=?) AS jobs_today,
-        (SELECT count(*) FROM jobs WHERE kind='Job' AND date(created_at)>=?) AS jobs_week,
+        (SELECT count(*) FROM jobs WHERE kind='Job' AND date(created_at) BETWEEN ? AND ?) AS jobs_week,
         (SELECT count(*) FROM jobs WHERE kind='Job'
            AND status IN ('Pending','Printing','Ready')) AS open_jobs,
         (SELECT count(*) FROM jobs WHERE kind='Job' AND status='Ready') AS ready_jobs,
@@ -788,13 +833,14 @@ def dashboard(month=""):
         (SELECT round(coalesce(sum(amount),0),2) FROM expenses WHERE substr(spent_on,1,7) = ?) AS spent_month,
         (SELECT round(coalesce(sum(amount),0),2) FROM payments WHERE kind='Refund') AS refunds_total,
         (SELECT round(coalesce(sum(CASE WHEN kind='Refund' THEN -amount ELSE amount END),0),2)
-           FROM payments WHERE paid_at >= ?) AS collected_week,
+           FROM payments WHERE paid_at BETWEEN ? AND ?) AS collected_week,
         (SELECT round(coalesce(sum(CASE WHEN kind='Refund' THEN -amount ELSE amount END),0),2)
            FROM payments WHERE substr(paid_at,1,7) = ?) AS collected_month,
         (SELECT round(coalesce(sum(CASE WHEN kind='Refund' THEN -amount ELSE amount END),0),2)
            FROM payments WHERE paid_at = ?) AS collected_today
-    """ % COLLECTABLE_SQL, (t, week_start, t, t, money_month, money_month, money_month,
-                             week_start, money_month, t))
+    """ % COLLECTABLE_SQL, (money_day, week_start, money_day, t, t,
+                             money_month, money_month, money_month,
+                             week_start, money_day, money_month, money_day))
 
     by_status = {r["status"]: r["c"] for r in q(
         "SELECT status, count(*) c FROM jobs WHERE kind='Job' AND status IN ('Pending','Printing','Ready')"
@@ -812,7 +858,7 @@ def dashboard(month=""):
                   SELECT 8 UNION ALL SELECT 9 UNION ALL SELECT 10 UNION ALL SELECT 11 UNION ALL
                   SELECT 12 UNION ALL SELECT 13 UNION ALL SELECT 14) s) d
       ORDER BY d.day
-    """, (t,))
+    """, (money_day,))
 
     overdue = q("""
       SELECT ja.id, ja.ref, ja.kind, ja.title, ja.category, ja.status, ja.priority, ja.due_date,
@@ -848,9 +894,10 @@ def dashboard(month=""):
       SELECT ja.category, count(*) AS jobs, round(sum(ja.total),2) AS billed,
              round(sum(ja.profit),2) AS profit
       FROM job_accounts ja
-      WHERE ja.kind='Job' AND ja.status <> 'Cancelled' AND date(ja.created_at) >= ?
+      WHERE ja.kind='Job' AND ja.status <> 'Cancelled'
+        AND date(ja.created_at) BETWEEN ? AND ?
       GROUP BY ja.category ORDER BY billed DESC LIMIT 8
-    """, ((dt.date.today() - dt.timedelta(days=89)).isoformat(),))
+    """, ((dt.date.fromisoformat(money_day) - dt.timedelta(days=89)).isoformat(), money_day))
 
     spend = q("""
       SELECT e.category, count(*) AS n, round(sum(e.amount),2) AS amount
@@ -878,6 +925,8 @@ def dashboard(month=""):
             "recent": recent, "debtors": debtors, "mix": mix, "spend": spend,
             "quotes": quotes, "follow_ups": follow_ups, "shop": SHOP, "today": t,
             "money_month": money_month, "money_month_label": month_label(money_month),
+            "money_day": money_day, "money_day_label": day_label(money_day),
+            "week_start": week_start,
             "months_available": months_available,
             "hours": shop_hours(with_devices=True)}
 

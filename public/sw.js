@@ -1,14 +1,14 @@
 'use strict';
 
-/* Bumped again for the same reason as before: the page changed after v27 was already out the door.
-   A counter that opened the shop during that window cached v27's Money card, which printed a month's
-   spend beside a month's profit as though one were the other subtracted from the remaining figure —
-   a tally that does not add, on the screen the cashier reads the takings off. v28 served that card
-   but still labelled profit "of ₵ billed", which invites the same wrong subtraction against the Spent
-   tile beside it; v29 names the job cost the figure actually comes out of. The worker is cache-first,
-   so no counter lets go of a shell by itself — the number is the only way a shipped machine learns
-   the page again. The shell list itself is unchanged; every route it fills is still served. */
-const CACHE_NAME = 'crispprint-shell-v29';
+/* The Dashboard moved again, so the shell number moves with it. v29 was cached by every counter that
+   opened the shop this weekend, and those machines read a Monday screen of zeros — "Collected today
+   ₵0.00", "This week" over a window ending today, bars running to a blank Sunday — while the book had
+   ₵2,843.00 and thirteen jobs sitting on Friday. The page now follows the day the book actually
+   stopped on and names it on the tile, which is a change to the words the cashier reads the takings
+   off; a machine that keeps v29 keeps the old lie. The worker is cache-first, so no counter lets go
+   of a shell by itself — the number is the only way a shipped machine learns the page again. The shell
+   list itself is unchanged; every route it fills is still served. */
+const CACHE_NAME = 'crispprint-shell-v30';
 const APP_SHELL = [
   '/',
   '/index.html',
