@@ -486,7 +486,7 @@ static int runEngineOnly(void) {
 + (void)probeInto:(NSString *)folder done:(void (^)(void))done;
 @end
 
-@interface ShopWindow : NSObject <NSApplicationDelegate, WKNavigationDelegate>
+@interface ShopWindow : NSObject <NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate>
 @end
 
 @implementation ShopWindow {
@@ -531,6 +531,7 @@ static int runEngineOnly(void) {
     _web = [[WKWebView alloc] initWithFrame:_window.contentView.bounds configuration:config];
     _web.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _web.navigationDelegate = self;
+    _web.UIDelegate = self;
     [_window.contentView addSubview:_web];
     [_window makeKeyAndOrderFront:nil];
     kShopWeb = _web;
@@ -660,6 +661,51 @@ static int runEngineOnly(void) {
         return completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
     }
     completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+}
+
+// JavaScript's own dialogs. A web view with no UI delegate answers confirm() with "no" and shows
+// nothing, so on a hand-out Mac a page that stopped to ask before taking money out of the book simply
+// looked dead — the button was pressed and no request ever left the machine. The shop's own app asks
+// these questions in a panel of its own; this shell now does the same, in the same words, and always
+// hands WebKit an answer so a press cannot hang waiting for a panel that never appeared.
+- (void)webView:(WKWebView *)view runJavaScriptAlertPanelWithMessage:(NSString *)message
+    initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(void))completionHandler {
+    NSAlert *ask = [[NSAlert alloc] init];
+    ask.messageText = kName;
+    ask.informativeText = message ?: @"";
+    [ask addButtonWithTitle:@"OK"];
+    if (!view.window) return completionHandler();
+    [ask beginSheetModalForWindow:view.window completionHandler:^(NSModalResponse answer) { completionHandler(); }];
+}
+
+- (void)webView:(WKWebView *)view runJavaScriptConfirmPanelWithMessage:(NSString *)message
+    initiatedByFrame:(WKFrameInfo *)frame completionHandler:(void (^)(BOOL))completionHandler {
+    NSAlert *ask = [[NSAlert alloc] init];
+    ask.messageText = kName;
+    ask.informativeText = message ?: @"";
+    [ask addButtonWithTitle:@"Yes"];
+    [ask addButtonWithTitle:@"No"];
+    if (!view.window) return completionHandler(NO);
+    [ask beginSheetModalForWindow:view.window completionHandler:^(NSModalResponse answer) {
+        completionHandler(answer == NSAlertFirstButtonReturn);
+    }];
+}
+
+- (void)webView:(WKWebView *)view runJavaScriptTextInputPanelWithPrompt:(NSString *)prompt
+    defaultText:(NSString *)defaultText initiatedByFrame:(WKFrameInfo *)frame
+    completionHandler:(void (^)(NSString *))completionHandler {
+    NSAlert *ask = [[NSAlert alloc] init];
+    ask.messageText = kName;
+    ask.informativeText = prompt ?: @"";
+    [ask addButtonWithTitle:@"OK"];
+    [ask addButtonWithTitle:@"Cancel"];
+    NSTextField *box = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
+    box.stringValue = defaultText ?: @"";
+    ask.accessoryView = box;
+    if (!view.window) return completionHandler(nil);
+    [ask beginSheetModalForWindow:view.window completionHandler:^(NSModalResponse answer) {
+        completionHandler(answer == NSAlertFirstButtonReturn ? box.stringValue : nil);
+    }];
 }
 
 - (void)report {

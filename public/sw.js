@@ -7,8 +7,14 @@
    stopped on and names it on the tile, which is a change to the words the cashier reads the takings
    off; a machine that keeps v29 keeps the old lie. The worker is cache-first, so no counter lets go
    of a shell by itself — the number is the only way a shipped machine learns the page again. The shell
-   list itself is unchanged; every route it fills is still served. */
-const CACHE_NAME = 'crispprint-shell-v34';
+   list itself is unchanged; every route it fills is still served.
+
+   v35 is the release where the Remove button on an expense answers. The cashier pressed it on a double
+   entry and the screen did nothing, because the page asked her to confirm with the browser's own dialog
+   and the Mac shell it runs inside was never told how to show one — so the answer came back "no" with
+   no words on screen. Every press that takes money out of the book now asks in the page's own box, and
+   the old shell list is untouched. */
+const CACHE_NAME = 'crispprint-shell-v35';
 const APP_SHELL = [
   '/',
   '/index.html',

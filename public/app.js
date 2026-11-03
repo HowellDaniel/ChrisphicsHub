@@ -4131,6 +4131,26 @@ function openModal(html) {
   bindModal();
 }
 function closeModal() { $('#modal').hidden = true; $('#modalCard').innerHTML = ''; }
+/* The shop asks its own questions, in its own box. A window shell that was never told how to show a
+   JavaScript dialog answers confirm() with "no" and says nothing at all, so every press that takes
+   money out of the book looked dead on the Macs the shop hands out — the Remove button was pressed,
+   the page was waiting for an answer that never came, and no request ever left the machine. A press
+   that changes the book now asks where the counter can see it, on every engine alike. */
+function askYesNo(question, yesLabel) {
+  const words = String(question || '').split('\n\n');
+  const yes = yesLabel || 'Yes';
+  return new Promise((resolve) => {
+    openModal(modalHeader('Are you sure?', 'Nothing changes until you press ' + esc(yes) + '.') +
+      '<p style="margin:10px 0 0">' + esc(words[0]) + '</p>' +
+      (words.length > 1 ? '<div class="hint" style="margin-top:6px">' + esc(words.slice(1).join(' ')) + '</div>' : '') +
+      '<div class="modal-foot"><span class="spacer"></span>' +
+      '<button type="button" class="btn" id="askNo">Cancel</button>' +
+      '<button type="button" class="btn danger" id="askYes">' + esc(yes) + '</button></div>');
+    const settle = (answer) => { closeModal(); resolve(answer); };
+    $('#askYes').addEventListener('click', () => settle(true));
+    $('#askNo').addEventListener('click', () => settle(false));
+  });
+}
 function modalHeader(title, sub) {
   return '<header><div><h2>' + title + '</h2>' + (sub ? '<div class="hint">' + sub + '</div>' : '') +
     '</div><span class="spacer"></span><button class="iconbtn" data-action="close-modal" aria-label="Close">✕</button></header>';
@@ -5104,7 +5124,7 @@ const ACTIONS = {
   },
   async 'sync-discard'(el) {
     const row = await offlineRead('outbox', el.dataset.syncDiscard);
-    if (!row || !confirm('Discard this saved local change? The shared version will remain.')) return;
+    if (!row || !(await askYesNo('Discard this saved local change? The shared version will remain.', 'Discard it'))) return;
     row.state = 'discarded';
     await offlineWrite('outbox', row);
     toast('Local change discarded');
@@ -5136,12 +5156,12 @@ const ACTIONS = {
     if (!box.hidden) box.querySelector('input').focus();
   },
   async 'del-job'(el) {
-    if (!confirm('Delete ' + el.dataset.delName + ' and its payments? This cannot be undone.')) return;
+    if (!(await askYesNo('Delete ' + el.dataset.delName + ' and its payments? This cannot be undone.', 'Delete it'))) return;
     try { await api('/api/jobs/' + el.dataset.delJob, { method: 'DELETE' }); closeDrawer(); toast('Job deleted'); await afterMutation(true); }
     catch (err) { fail(err); }
   },
   async 'del-payment'(el) {
-    if (!confirm('Remove this payment of ' + money(el.dataset.delAmount) + ' from the book?')) return;
+    if (!(await askYesNo('Remove this payment of ' + money(el.dataset.delAmount) + ' from the book?', 'Remove it'))) return;
     try { await api('/api/payments/' + el.dataset.delPayment, { method: 'DELETE' }); toast('Payment removed'); await afterMutation(); }
     catch (err) { fail(err); }
   },
@@ -5207,7 +5227,7 @@ const ACTIONS = {
   },
   async 'collect-handover'(el) {
     const id = Number(el.dataset.statusJob);
-    if (!confirm('Give ' + el.dataset.statusName + ' to the client and close it in the book?')) return;
+    if (!(await askYesNo('Give ' + el.dataset.statusName + ' to the client and close it in the book?', 'Hand it over'))) return;
     try {
       await moveStage(id, 'Delivered');
       await afterMutation(true);
@@ -5262,8 +5282,8 @@ const ACTIONS = {
   async 'notify-del'(el) {
     const m = S.notify.byId[Number(el.dataset.notifyDel)];
     if (!m) return;
-    if (!confirm('Take the ' + m.event + ' ' + m.channel + ' message out of the queue?\n\n' +
-      'The job record keeps what was already written.')) return;
+    if (!(await askYesNo('Take the ' + m.event + ' ' + m.channel + ' message out of the queue?\n\n' +
+      'The job record keeps what was already written.', 'Take it out'))) return;
     try {
       await api('/api/notifications/' + m.id, { method: 'DELETE' });
       toast('Message removed from the queue');
@@ -5273,9 +5293,9 @@ const ACTIONS = {
   async 'convert-job'(el) {
     try {
       const job = await api('/api/jobs/' + el.dataset.convertJob);
-      if (!confirm('Turn ' + job.ref + ' into a booked job?\n\n' +
+      if (!(await askYesNo('Turn ' + job.ref + ' into a booked job?\n\n' +
         'It gets a CH- reference and starts counting as money owed. ' +
-        'Anything already paid on the quote is kept.')) return;
+        'Anything already paid on the quote is kept.', 'Book it'))) return;
       const saved = await api('/api/jobs/' + el.dataset.convertJob + '/convert',
         { method: 'POST', body: JSON.stringify({ status: 'Pending' }) });
       closeModal();
@@ -5301,8 +5321,8 @@ const ACTIONS = {
     spoilageForm(row, jobs);
   },
   async 'del-spoilage'(el) {
-    if (!confirm('Remove the spoiled-work record for ' + el.dataset.delQuantity + ' items on ' +
-        el.dataset.delJob + '? Its spoilage cost will also be removed from that job.')) return;
+    if (!(await askYesNo('Remove the spoiled-work record for ' + el.dataset.delQuantity + ' items on ' +
+        el.dataset.delJob + '? Its spoilage cost will also be removed from that job.', 'Remove it'))) return;
     try {
       await api('/api/spoiled/' + el.dataset.delSpoilage, { method: 'DELETE' });
       toast('Spoilage record removed'); await refreshChrome(); await render();
@@ -5318,14 +5338,14 @@ const ACTIONS = {
     expenseForm(row, null, jobs);
   },
   async 'del-expense'(el) {
-    if (!confirm('Remove this expense of ' + money(el.dataset.delAmount) + ' from the book?')) return;
+    if (!(await askYesNo('Remove this expense of ' + money(el.dataset.delAmount) + ' from the book?', 'Remove it'))) return;
     try { await api('/api/expenses/' + el.dataset.delExpense, { method: 'DELETE' }); toast('Expense removed'); await afterMutation(true); }
     catch (err) { fail(err); }
   },
   async 'new-lead'() { leadForm(null); },
   async 'edit-lead'(el) { const l = await api('/api/leads/' + el.dataset.editLead); leadForm(l); },
   async 'del-lead'(el) {
-    if (!confirm('Delete the enquiry from ' + el.dataset.delName + '? This cannot be undone.')) return;
+    if (!(await askYesNo('Delete the enquiry from ' + el.dataset.delName + '? This cannot be undone.', 'Delete it'))) return;
     try { await api('/api/leads/' + el.dataset.delLead, { method: 'DELETE' }); closeDrawer(); toast('Enquiry removed'); await afterMutation(true); }
     catch (err) { fail(err); }
   },
@@ -5770,9 +5790,9 @@ async function installUpdate() {
   const facts = await counterFacts(true);
   const pack = ((facts || {}).updates || {}).package || {};
   if (!pack.ready) return toast('There is no checked build here to install yet.', 'bad');
-  const sure = window.confirm('Install version ' + pack.install_version + ' now?\n\nThe shop closes for a ' +
+  const sure = await askYesNo('Install version ' + pack.install_version + ' now?\n\nThe shop closes for a ' +
                               'few seconds and opens again on the new build. Clients, jobs, money and ' +
-                              'every record stay exactly as they are.');
+                              'every record stay exactly as they are.', 'Install it');
   if (!sure) return;
   const say = (words) => { const line = $('#updateResult'); if (line) line.textContent = words; };
   say('Closing the shop to install ' + pack.install_version + '… it will open again by itself.');
