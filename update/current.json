@@ -1,15 +1,15 @@
 {
- "base": "main/update/chrisphics-hub-1.18",
+ "base": "main/update/chrisphics-hub-1.19",
  "files": [
   {
    "name": "VERSION",
-   "sha256": "60e5336bcff0a6a98a3ef80c7ac9c71022bae0d086d7e98dea8755cef4d7b0b1",
+   "sha256": "9a2aeb9e8dc23cf73946a8214e853a7a9cd6c151551b9e05f6569256ab7c799c",
    "size": 5
   },
   {
    "name": "public/app.js",
-   "sha256": "386e600a16f0b96899630f062184f9f0f074455113490ee2ac78ae3533641aad",
-   "size": 369988
+   "sha256": "7e42d03065099786e56e774e2baedd83dac7db518024aa57d8a211298bc5f86e",
+   "size": 371576
   },
   {
    "name": "public/img/apple-touch-icon.png",
@@ -88,8 +88,8 @@
   },
   {
    "name": "public/sw.js",
-   "sha256": "fcdb6a603c338fce311a9d10adf619476c2283e7eb7b264fe24078c2478dbb56",
-   "size": 3759
+   "sha256": "7cee0d638a360a460414f3da0ecc51672b28bc0cd6541ea14380ddecc535c3bf",
+   "size": 4214
   },
   {
    "name": "schema.sql",
@@ -102,8 +102,8 @@
    "size": 465184
   }
  ],
- "folder": "chrisphics-hub-1.18",
+ "folder": "chrisphics-hub-1.19",
  "notes": "",
- "size": 2308946,
- "version": "1.18"
+ "size": 2310989,
+ "version": "1.19"
 }
